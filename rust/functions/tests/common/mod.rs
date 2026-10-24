@@ -83,9 +83,9 @@ impl Store {
             .sum()
     }
 
-    /// Page keys in the store: pages checkpointed in place.
-    pub fn page_keys(&self) -> usize {
-        self.kv.page_count()
+    /// Blobs in the store: chunks of pages, and large records.
+    pub fn blobs(&self) -> usize {
+        self.kv.blob_count()
     }
 }
 

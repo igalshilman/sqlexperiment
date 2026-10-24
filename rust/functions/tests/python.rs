@@ -231,7 +231,7 @@ async def main(input, ctx):
     assert_eq!(call.idempotency_key(), "mine");
     // The commit record holds the run's state, its memory's and the inline
     // log: the input is in the heap, not in it.
-    let commit = run.view().commit_bytes;
+    let commit = run.view().root_bytes;
     assert!(commit < 2048, "{commit} bytes");
     // Another attempt restores the heap to read it.
     let mut run = start_python(&store, source, Value::Null, 2)?;

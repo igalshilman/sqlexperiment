@@ -187,7 +187,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             db.execute_with(
                 "INSERT INTO messages(role, text) VALUES(?, ?)",
                 [
-                    Value::build_text(if i % 2 == 0 { "user" } else { "assistant" }),
+                    Value::build_text(if i.is_multiple_of(2) { "user" } else { "assistant" }),
                     Value::build_text(text.clone()),
                 ],
             )

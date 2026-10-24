@@ -267,7 +267,6 @@ impl Campaign {
                 garbage_after: 1 + rng.below(4),
                 inline_record_bytes: rng.pick(&[64, 1024]),
                 prefetch_pages: rng.pick(&[0, 16]),
-                ..StateOptions::default()
             },
             cache: cached.then(fresh_namespace),
         };

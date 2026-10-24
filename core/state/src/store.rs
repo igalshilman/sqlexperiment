@@ -6,13 +6,13 @@
 //! | `blob/<n>` | One zstd frame, written once and never changed: a chunk, or a record     |
 //!
 //! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
-//! each. A chunk is stored as a *base* (a frame of its pages) and, maybe, a
-//! *delta*: a frame of its pages now, compressed against its base, so it
-//! costs about what changed since the base. Without a stored base, a chunk's
-//! base is its file's [`Base`] pages (a VM's golden image), or zeros. A
-//! flush writes each chunk it changed as a new delta against the chunk's
-//! base, or, once that delta passes [`StateOptions::rebase_ratio`] of the
-//! base's size, as a new base. A record of more than
+//! each. A chunk is stored as a *base*, a frame of its pages compressed
+//! against its file's [`Base`] pages (a VM's golden image) if it has one, and,
+//! maybe, a *delta*: a frame of its pages now, compressed against the base,
+//! so it costs about what changed since the base. A chunk with neither is
+//! its file's base pages, or zeros. A flush writes each chunk it changed as a
+//! new delta against the chunk's base, or, once that delta passes
+//! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
 //! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
 //! are in the root.
 //!
@@ -463,6 +463,15 @@ fn implicit(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u
     pages
 }
 
+/// What a chunk's base blob is compressed against: its file's `base` pages
+/// (zeros past them), or nothing for a file without one.
+fn reference(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u8> {
+    match base {
+        Some(_) => implicit(base, chunk_pages, chunk),
+        None => Vec::new(),
+    }
+}
+
 /// A decoded chunk: its pages, and the bytes of the blob that held them.
 pub(crate) struct Image {
     pages: Bytes,
@@ -725,13 +734,14 @@ impl Snapshot {
     }
 
     /// The base blob `n` of a chunk, decoded.
-    async fn base_image(&self, n: u64) -> io::Result<Arc<Image>> {
+    async fn base_image(&self, id: u32, chunk: u64, n: u64) -> io::Result<Arc<Image>> {
         if let Some(image) = self.images.lock().unwrap().get(&n) {
             return Ok(image.clone());
         }
         let frame = self.blob(n).await?;
+        let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
         let mut pages = Vec::with_capacity(self.root.chunk_bytes());
-        zstd::decompress(&mut pages, &frame, &[])?;
+        zstd::decompress(&mut pages, &frame, &prefix)?;
         if pages.len() != self.root.chunk_bytes() {
             return Err(invalid("chunk"));
         }
@@ -765,15 +775,15 @@ impl Snapshot {
             }))
         };
         let base = match stored.base {
-            Some(n) => Some((n, decode(n, &[])?)),
+            Some(n) => {
+                let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
+                Some((n, decode(n, &prefix)?))
+            }
             None => None,
         };
         let delta = match (stored.delta, &base) {
             (Some(n), Some((_, base))) => Some((n, decode(n, &base.pages)?)),
-            (Some(n), None) => {
-                let prefix = implicit(self.base_of(id)?, self.root.chunk_pages, chunk);
-                Some((n, decode(n, &prefix)?))
-            }
+            (Some(_), None) => return Err(invalid("chunk: a delta without a base")),
             (None, _) => None,
         };
         let mut images = self.images.lock().unwrap();
@@ -952,7 +962,7 @@ impl Snapshot {
                 let (base_image, now) = match stored.current() {
                     Some(_) if !missing => {
                         let base_image = match stored.base {
-                            Some(n) => Some(self.base_image(n).await?),
+                            Some(n) => Some(self.base_image(id, chunk, n).await?),
                             None => None,
                         };
                         (base_image, self.image(id, chunk).await?.pages.to_vec())
@@ -984,18 +994,17 @@ impl Snapshot {
                     chunks[chunk as usize] = Chunk::default();
                     continue;
                 }
-                let delta = match (&base_image, based) {
-                    (Some(base), _) => {
+                // A delta against the stored base while it stays small
+                // beside it; else a new base.
+                let delta = match &base_image {
+                    Some(base) => {
                         let delta =
                             zstd::compress(&pages, &base.pages, true, Bytes::copy_from_slice)?;
                         let small =
                             delta.len() as f64 <= self.options.rebase_ratio * base.stored as f64;
                         small.then_some(delta)
                     }
-                    (None, true) => {
-                        Some(zstd::compress(&pages, &hole, true, Bytes::copy_from_slice)?)
-                    }
-                    (None, false) => None,
+                    None => None,
                 };
                 let n = root.next_blob;
                 root.next_blob += 1;
@@ -1013,7 +1022,8 @@ impl Snapshot {
                         }
                     }
                     None => {
-                        let frame = zstd::compress(&pages, &[], true, Bytes::copy_from_slice)?;
+                        let prefix = if based { &hole[..] } else { &[] };
+                        let frame = zstd::compress(&pages, prefix, true, Bytes::copy_from_slice)?;
                         rebased += usize::from(stored.base.is_some());
                         dead.extend(stored.base);
                         let image = Image {

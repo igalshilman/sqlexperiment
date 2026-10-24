@@ -92,7 +92,7 @@ fn main() -> Result<()> {
                             "turn":view.turns,"turn_ms":turn_ms,"program_ms":program_ms,
                             "memory_bytes":view.memory_bytes,"live_pages":view.live_pages,
                             "changed_pages":view.changed_pages,"examined_pages":view.examined_pages,
-                            "logged_bytes":view.logged_bytes,"commit_bytes":view.commit_bytes,
+                            "blob_bytes":view.blob_bytes,"root_bytes":view.root_bytes,
                             "written_bytes":written,"writes":writes}));
                     }
                     if view.state.status != Status::Waiting {

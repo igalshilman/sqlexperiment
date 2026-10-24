@@ -17,7 +17,8 @@
 //! 4. **Delete only garbage**: a blob is deleted only if the root lists it
 //!    as garbage, and names it no more.
 //! 5. **Decodable**: every root decodes, and every chunk it names decodes to
-//!    its pages, a delta against its base.
+//!    its pages: a base against its file's golden pages, a delta against its
+//!    base.
 use crate::{
     Base, PAGE,
     kv::KvStore,
@@ -156,14 +157,17 @@ impl Known {
                         }
                     }
                 }
-                if let Some(frame) = stored.base.and_then(blob) {
-                    let mut pages = Vec::with_capacity(size);
-                    zstd::decompress(&mut pages, frame, &[])?;
-                    prefix = pages;
-                } else if stored.base.is_none() && stored.delta.is_some() && golden.is_none() {
+                if stored.base.is_none() && stored.delta.is_some() {
                     return Err(io::Error::other(format!(
                         "chunk {chunk}: a delta without a base"
                     )));
+                }
+                if let Some(frame) = stored.base.and_then(blob) {
+                    // Against the golden pages, if the file has them.
+                    let reference = if golden.is_some() { &prefix[..] } else { &[] };
+                    let mut pages = Vec::with_capacity(size);
+                    zstd::decompress(&mut pages, frame, reference)?;
+                    prefix = pages;
                 }
                 if let Some(frame) = stored.delta.and_then(blob) {
                     let mut pages = Vec::with_capacity(size);

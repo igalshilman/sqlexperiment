@@ -172,8 +172,14 @@ impl Participant for Memory {
     async fn prepare(&mut self, wal: &mut Wal) -> Result<()> {
         let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
         if let Some((file, pages)) = self.stale.take() {
-            for page in pages {
-                wal.write(&file, page.into(), None).map_err(storage_error)?;
+            // This image's file keeps its length, its old pages holes again;
+            // another image's goes whole (which needs no base).
+            if file.name() == self.file.name() {
+                for page in pages {
+                    wal.write(&file, page.into(), None).map_err(storage_error)?;
+                }
+            } else {
+                wal.set_len(&file, 0).map_err(storage_error)?;
             }
         }
         match (&self.live, settled) {
@@ -210,8 +216,8 @@ impl Participant for Memory {
 struct Written {
     changed_pages: usize,
     examined_pages: usize,
-    logged_bytes: usize,
-    commit_bytes: usize,
+    blob_bytes: usize,
+    root_bytes: usize,
 }
 
 enum Delivery {
@@ -435,8 +441,8 @@ impl Run {
         memory.memory_len
             + memory.live_pages().max(last.changed_pages) * PAGE
             + 3 * last.changed_pages * PAGE
-            + last.logged_bytes
-            + last.commit_bytes
+            + last.blob_bytes
+            + last.root_bytes
     }
 
     /// Let go of the VM and its image: the next delivery restores them from
@@ -544,8 +550,8 @@ impl Run {
             live_pages: memory.live_pages(),
             changed_pages: self.last.changed_pages,
             examined_pages: self.last.examined_pages,
-            logged_bytes: self.last.logged_bytes,
-            commit_bytes: self.last.commit_bytes,
+            blob_bytes: self.last.blob_bytes,
+            root_bytes: self.last.root_bytes,
         }
     }
 
@@ -675,8 +681,8 @@ impl Run {
         let sealed = match prepared {
             Ok(()) => (wal.flush().await)
                 .map(|report| {
-                    written.logged_bytes = report.logged_bytes;
-                    written.commit_bytes = report.record_bytes;
+                    written.blob_bytes = report.blob_bytes;
+                    written.root_bytes = report.root_bytes;
                 })
                 .map_err(storage_error),
             Err(error) => Err(error),
