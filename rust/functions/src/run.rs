@@ -33,8 +33,11 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sql::Sql;
-use state::{Base, File};
-use std::{collections::HashSet, sync::Arc};
+use state::{Base, File, Log};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 
 /// An input, or an outcome, the guest is given: within [`MAX_INPUT`] as JSON.
@@ -108,13 +111,30 @@ impl Participant for RunState {
     }
 }
 
+/// Turns a log holds at most: the next is folded into the file.
+const FOLD_TURNS: usize = 16;
+/// Bytes of pages a log holds at most, before compression: a turn that
+/// would pass them is folded into the file.
+const FOLD_BYTES: usize = 4 << 20;
+
 /// The run's memory, a participant: the record "memory", and the pages each
-/// turn changed, in the scope's file over the program's golden memory.
+/// turn changed, appended to the log "memory/turns" (see [`TurnEntry`]),
+/// and every [`FOLD_TURNS`] turns, or [`FOLD_BYTES`], folded into the
+/// scope's file over the program's golden memory. A turn thus writes about
+/// what it changed, and the file's chunks change only at a fold.
 struct Memory {
     record: MemoryRecord,
     stored: Record,
     /// The file over golden.
     file: File,
+    /// The turns since the last fold.
+    log: Log,
+    /// What the log holds, as sealed.
+    logged: Logged,
+    /// What the seal being flushed makes of `logged`.
+    sealing: Option<Logged>,
+    /// The log holds another run's turns, which this run's first seal drops.
+    stale_log: bool,
     /// The VM, and its memory as of the last seal: restored when a delivery
     /// needs it, and dropped once the run has settled.
     live: Option<Live>,
@@ -125,10 +145,36 @@ struct Memory {
     stale: Option<(File, Vec<u32>)>,
 }
 
-/// What a turn did to the memory: the pages it changed.
+/// What a turn did to the memory: the pages it changed, and how.
 struct Turn {
     changed: Vec<u32>,
+    entry: TurnEntry,
     settled: bool,
+}
+
+/// What a log of turns holds: how many, the bytes of the pages they
+/// changed, and which.
+#[derive(Clone, Default)]
+struct Logged {
+    turns: usize,
+    bytes: usize,
+    pages: BTreeSet<u32>,
+}
+
+impl Logged {
+    fn of(log: &Log) -> Result<Self> {
+        let mut logged = Self::default();
+        for entry in log.entries() {
+            logged.add(&LoggedTurn::decode(&entry)?.indexes);
+        }
+        Ok(logged)
+    }
+
+    fn add(&mut self, pages: &[u32]) {
+        self.turns += 1;
+        self.bytes += pages.len() * PAGE;
+        self.pages.extend(pages);
+    }
 }
 
 /// A live VM, and the image its memory was at the last seal: what the next
@@ -146,13 +192,19 @@ impl Memory {
         base.meta = capture.meta.clone();
         base.grow(capture.memory_len);
         let mut changed = Vec::with_capacity(capture.pages.len());
+        let mut entry = TurnEntry::default();
         for (index, new) in capture.pages {
             changed.push(index);
+            entry.push(index, base.page(index), &new);
             base.set(index, &new);
         }
         self.record.meta = capture.meta;
         self.record.memory_len = capture.memory_len;
-        self.turn = Some(Turn { changed, settled });
+        self.turn = Some(Turn {
+            changed,
+            entry,
+            settled,
+        });
         Ok(())
     }
 
@@ -162,6 +214,7 @@ impl Memory {
         self.live = None;
         self.turn = Some(Turn {
             changed: Vec::new(),
+            entry: TurnEntry::default(),
             settled: true,
         });
     }
@@ -169,10 +222,16 @@ impl Memory {
 
 #[async_trait]
 impl Participant for Memory {
-    /// The pages the turn changed, into the file (the state makes one that
-    /// is golden's again a hole); a settled run's, as holes.
+    /// The turn, appended to the log; or, every [`FOLD_TURNS`] turns, the
+    /// pages the log's turns and this one changed, into the file (the state
+    /// makes one that is golden's again a hole), and the log dropped. A
+    /// settled run's pages, as holes.
     async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
-        let Turn { changed, settled } = self.turn.take().context("No turn to seal")?;
+        let Turn {
+            changed,
+            entry,
+            settled,
+        } = self.turn.take().context("No turn to seal")?;
         if let Some((file, pages)) = self.stale.take() {
             // This image's file keeps its length, its old pages holes again;
             // another image's goes whole (which needs no base).
@@ -186,35 +245,63 @@ impl Participant for Memory {
                 mutation.set_len(&file, 0).map_err(storage_error)?;
             }
         }
+        let mut drop_log = std::mem::take(&mut self.stale_log);
+        let mut logged = match drop_log {
+            true => Logged::default(),
+            false => self.logged.clone(),
+        };
         match (&self.live, settled) {
             // A settled run never restores again: it keeps its outcome, not
             // its image.
             (_, true) => {
-                for page in self.record.pages().chain(changed) {
+                for page in self.record.folded() {
                     (mutation.write(&self.file, page.into(), None)).map_err(storage_error)?;
                 }
                 self.record.pages.clear();
+                self.record.folded.clear();
                 self.live = None;
+                (logged, drop_log) = (Logged::default(), true);
             }
             (Some(live), false) => {
-                for page in changed {
-                    let image = bytes::Bytes::copy_from_slice(live.base.page(page));
-                    (mutation.write(&self.file, page.into(), Some(image)))
+                let bytes = changed.len() * PAGE;
+                if logged.turns + 1 >= FOLD_TURNS || logged.bytes + bytes > FOLD_BYTES {
+                    for &page in logged.pages.union(&changed.iter().copied().collect()) {
+                        let image = bytes::Bytes::copy_from_slice(live.base.page(page));
+                        (mutation.write(&self.file, page.into(), Some(image)))
+                            .map_err(storage_error)?;
+                    }
+                    self.record.set_folded(live.base.changed());
+                    (logged, drop_log) = (Logged::default(), true);
+                } else if !changed.is_empty() {
+                    mutation
+                        .append(&self.log, entry.encode()?.into())
                         .map_err(storage_error)?;
+                    logged.add(&changed);
                 }
                 self.record.set_pages(live.base.changed());
             }
             (None, false) => anyhow::bail!("No live VM"),
         }
+        if drop_log {
+            (mutation.truncate(&self.log, self.log.next())).map_err(storage_error)?;
+        }
+        self.sealing = Some(logged);
         let bytes = json_bytes(&self.record)?;
         mutation
             .set(&self.stored, bytes.into())
             .map_err(storage_error)
     }
 
+    fn committed(&mut self) {
+        if let Some(logged) = self.sealing.take() {
+            self.logged = logged;
+        }
+    }
+
     /// The image no longer matches a seal: the attempt is over.
     fn aborted(&mut self) {
         self.live = None;
+        self.sealing = None;
     }
 }
 
@@ -264,6 +351,7 @@ impl Run {
         let state = scope.open().await?;
         let db = Db::new(Sql::open(&state).await.map_err(storage_error)?);
         let (stored_run, stored_memory) = (state.record("run"), state.record("memory"));
+        let log = state.log("memory/turns");
         // What the scope's last seal kept of each extension, whichever run
         // made it. The scope is the program's object key, as its state
         // is: another program's objects of the same key keep their own.
@@ -294,6 +382,10 @@ impl Run {
                     record: memory,
                     stored: stored_memory,
                     file,
+                    logged: Logged::of(&log)?,
+                    log,
+                    sealing: None,
+                    stale_log: false,
                     live: None,
                     turn: None,
                     stale: None,
@@ -304,9 +396,9 @@ impl Run {
             // previous run's pages, if any, go with its first seal.
             None => {
                 let stale = match sealed_memory {
-                    Some(old) if !old.pages.is_empty() => {
+                    Some(old) if !old.folded.is_empty() => {
                         let file = state.file(&old.file).map_err(storage_error)?;
-                        Some((file, old.pages().collect()))
+                        Some((file, old.folded().collect()))
                     }
                     _ => None,
                 };
@@ -340,9 +432,14 @@ impl Run {
                         memory_len: golden.len(),
                         file: name,
                         pages: Vec::new(),
+                        folded: Vec::new(),
                     },
                     stored: stored_memory,
                     file,
+                    log,
+                    logged: Logged::default(),
+                    sealing: None,
+                    stale_log: true,
                     live: Some(Live { vm, base: golden }),
                     turn: None,
                     stale,
@@ -591,9 +688,10 @@ impl Run {
         );
         base.meta = memory.meta.clone();
         base.grow(memory.memory_len);
-        // The pages that differ from golden, read together: from the state's
-        // decoded chunks, the cache, or the store.
-        let indexes: Vec<u32> = memory.pages().collect();
+        // The file's pages that differ from golden, read together: from the
+        // state's decoded chunks, the cache, or the store; then the turns
+        // since they were folded.
+        let indexes: Vec<u32> = memory.folded().collect();
         ensure!(
             (indexes.last()).is_none_or(|&last| (last as usize + 1) * PAGE <= base.len()),
             "Page beyond memory"
@@ -603,6 +701,9 @@ impl Run {
         let pages = (futures::future::try_join_all(reads).await).map_err(storage_error)?;
         for (index, page) in indexes.iter().zip(pages) {
             base.set(*index, page.as_deref().unwrap_or(&ZERO_PAGE));
+        }
+        for entry in self.memory.log.entries() {
+            LoggedTurn::decode(&entry)?.replay(&mut base)?;
         }
         let runtime = self.programs.runtime();
         let mut vm = Vm::for_image(runtime, program.language(), &base, &record.run, now).await?;

@@ -3,9 +3,11 @@
 //! ([`RunRecord`], [`MemoryRecord`]), what the host learns of it ([`View`]),
 //! memory images ([`Image`]), and the limits every part checks.
 use crate::cow::Golden;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+use zstd::zstd_safe;
 
 pub(crate) const PAGE: usize = 4096;
 /// A page of zeros: what memory past golden's end reads as.
@@ -330,35 +332,38 @@ pub(crate) struct RunRecord {
 
 /// The run's memory, as its last seal keeps it (the record "memory"): the
 /// image is the program's golden image with the pages of `file`, the
-/// scope's file over golden, that differ from it.
+/// scope's file over golden, as the last fold left them, and the turns since
+/// replayed over them, each an entry of the log "memory/turns" (see
+/// [`TurnEntry`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemoryRecord {
     pub meta: VmMeta,
     pub memory_len: usize,
-    /// The file the pages are in, named after its golden memory.
+    /// The file the folded pages are in, named after its golden memory.
     pub file: String,
-    /// The pages that differ from golden, as runs of `[first, count]`: the
-    /// store cannot list the file's pages, so the record does. Empty until
-    /// the run's first turn, and once it has settled.
+    /// The pages that differ from golden, as runs of `[first, count]`.
+    /// Empty until the run's first turn, and once it has settled.
     pub pages: Vec<(u32, u32)>,
+    /// The pages of `file` that differ from golden, as runs: the store
+    /// cannot list a file's pages, so the record does.
+    pub folded: Vec<(u32, u32)>,
 }
 
 impl MemoryRecord {
-    /// The pages that differ from golden, in order.
-    pub fn pages(&self) -> impl Iterator<Item = u32> + '_ {
-        (self.pages.iter()).flat_map(|&(first, count)| first..first + count)
-    }
-
     /// Record `pages` (ascending) as the ones that differ from golden.
     pub fn set_pages(&mut self, pages: impl Iterator<Item = u32>) {
-        self.pages.clear();
-        for page in pages {
-            match self.pages.last_mut() {
-                Some((first, count)) if *first + *count == page => *count += 1,
-                _ => self.pages.push((page, 1)),
-            }
-        }
+        self.pages = runs(pages);
+    }
+
+    /// The pages of the file that differ from golden, in order.
+    pub fn folded(&self) -> impl Iterator<Item = u32> + '_ {
+        unrun(&self.folded)
+    }
+
+    /// Record `pages` (ascending) as the file's that differ from golden.
+    pub fn set_folded(&mut self, pages: impl Iterator<Item = u32>) {
+        self.folded = runs(pages);
     }
 
     /// How many pages differ from golden.
@@ -366,6 +371,146 @@ impl MemoryRecord {
         self.pages.iter().map(|&(_, count)| count as usize).sum()
     }
 }
+
+/// Ascending `pages` as runs of `[first, count]`.
+fn runs(pages: impl Iterator<Item = u32>) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for page in pages {
+        match runs.last_mut() {
+            Some((first, count)) if *first + *count == page => *count += 1,
+            _ => runs.push((page, 1)),
+        }
+    }
+    runs
+}
+
+fn unrun(runs: &[(u32, u32)]) -> impl Iterator<Item = u32> + '_ {
+    runs.iter().flat_map(|&(first, count)| first..first + count)
+}
+
+/// What a turn changed in the memory, as an entry of the log
+/// "memory/turns": the pages it changed, compressed as one Zstd frame with
+/// their images before the turn as its prefix, so a page costs about what
+/// changed in it, wherever it moved. Replayed in order over the image the
+/// last fold left, the log's entries make the sealed image.
+///
+/// Encoded as the count of pages, their indexes (each a little-endian
+/// `u32`), then the frame.
+#[derive(Default)]
+pub(crate) struct TurnEntry {
+    pub indexes: Vec<u32>,
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+/// A decoded [`TurnEntry`]: its pages, and the frame of their new images.
+pub(crate) struct LoggedTurn {
+    pub indexes: Vec<u32>,
+    frame: Vec<u8>,
+}
+
+impl TurnEntry {
+    /// Page `index` changed from `before` to `after`.
+    pub fn push(&mut self, index: u32, before: &[u8], after: &[u8]) {
+        self.indexes.push(index);
+        self.before.extend_from_slice(before);
+        self.after.extend_from_slice(after);
+    }
+
+    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
+        let mut bytes = header(&self.indexes);
+        let mut frame = Vec::with_capacity(zstd_safe::compress_bound(self.after.len()));
+        COMPRESS.with_borrow_mut(|cctx| {
+            let compressed = (cctx.set_parameter(zstd_safe::CParameter::CompressionLevel(3)))
+                .and_then(|_| cctx.ref_prefix(referenced(&self.before)))
+                .and_then(|_| cctx.compress2(&mut frame, &self.after));
+            // The prefix goes with the session: the next frame has its own.
+            let _ = cctx.reset(zstd_safe::ResetDirective::SessionAndParameters);
+            compressed.map_err(zstd_error)
+        })?;
+        bytes.extend(frame);
+        Ok(bytes)
+    }
+}
+
+/// The count of `indexes`, then each, as little-endian `u32`s.
+fn header(indexes: &[u32]) -> Vec<u8> {
+    let count = indexes.len() as u32;
+    let mut bytes = count.to_le_bytes().to_vec();
+    bytes.extend(indexes.iter().flat_map(|index| index.to_le_bytes()));
+    bytes
+}
+
+impl LoggedTurn {
+    pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let u32_at = |at: usize| {
+            let word = bytes.get(at..at + 4).context("A truncated turn entry")?;
+            anyhow::Ok(u32::from_le_bytes(word.try_into().unwrap()))
+        };
+        let count = u32_at(0)? as usize;
+        let frame = 4 + count.checked_mul(4).context("A turn entry too large")?;
+        let indexes = (0..count)
+            .map(|i| u32_at(4 + i * 4))
+            .collect::<anyhow::Result<_>>()?;
+        let frame = bytes.get(frame..).context("A truncated turn entry")?;
+        Ok(Self {
+            indexes,
+            frame: frame.to_vec(),
+        })
+    }
+
+    /// Apply the turn to `image`, as it was before the turn.
+    pub fn replay(&self, image: &mut Image) -> anyhow::Result<()> {
+        let mut before = Vec::with_capacity(self.indexes.len() * PAGE);
+        for &index in &self.indexes {
+            anyhow::ensure!(
+                (index as usize + 1) * PAGE <= image.len(),
+                "Page beyond memory"
+            );
+            before.extend_from_slice(image.page(index));
+        }
+        let mut after = Vec::with_capacity(before.len());
+        DECOMPRESS.with_borrow_mut(|dctx| {
+            let decompressed = (dctx
+                .set_parameter(zstd_safe::DParameter::WindowLogMax(MAX_WINDOW_LOG)))
+            .and_then(|_| dctx.ref_prefix(referenced(&before)))
+            .and_then(|_| dctx.decompress(&mut after, &self.frame));
+            let _ = dctx.reset(zstd_safe::ResetDirective::SessionAndParameters);
+            decompressed.map_err(zstd_error)
+        })?;
+        anyhow::ensure!(
+            after.len() == before.len(),
+            "A turn entry of the wrong length"
+        );
+        for (&index, page) in self.indexes.iter().zip(after.chunks(PAGE)) {
+            image.set(index, page);
+        }
+        Ok(())
+    }
+}
+
+thread_local! {
+    /// Making a context costs several times what coding a page with it does.
+    static COMPRESS: RefCell<zstd_safe::CCtx<'static>> = RefCell::new(zstd_safe::CCtx::create());
+    static DECOMPRESS: RefCell<zstd_safe::DCtx<'static>> = RefCell::new(zstd_safe::DCtx::create());
+}
+
+/// Extend `prefix`'s lifetime to a context's: the callers above reset the
+/// context before they return, which drops the prefix.
+fn referenced(prefix: &[u8]) -> &'static [u8] {
+    // SAFETY: the context references the prefix only until its reset, which
+    // every path through `encode` and `replay` reaches, and nothing reads the
+    // prefix after it.
+    unsafe { std::mem::transmute::<&[u8], &'static [u8]>(prefix) }
+}
+
+fn zstd_error(code: zstd_safe::ErrorCode) -> anyhow::Error {
+    anyhow::anyhow!("Zstd: {}", zstd_safe::get_error_name(code))
+}
+
+/// The largest window a turn entry's frame needs: its pages before and
+/// after, up to the log's bytes (see `FOLD_BYTES`) each.
+const MAX_WINDOW_LOG: u32 = 24;
 
 /// A run as of its last seal, and what that turn wrote.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -20,9 +20,9 @@ A state is one Restate object's state, in two kinds of key. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
 and the root plays that role.
 
-| Key            | What it holds                                                                                                                             |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.              |
+| Key            | What it holds                                                                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                           |
 | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record or log entry |
 
 Transactions change two kinds of state:
@@ -113,13 +113,13 @@ then reopens.
 transaction, the seal: one mutation that every participant prepares into, then
 flushed.
 
-| Participant       | Where it lives in the state                                             |
-| ----------------- | ----------------------------------------------------------------------- |
-| Run state         | Record `run`                                                            |
-| VM memory         | Record `memory`, plus the changed pages of a file over the golden image |
-| Tables (`ctx.db`) | `Sql` on the file `db`                                                  |
-| Each extension    | Its own records and files, named under `<name>/`                        |
-| Large bytes       | The scope's blob store, outside Restate; a record names each blob       |
+| Participant       | Where it lives in the state                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| Run state         | Record `run`                                                                                                 |
+| VM memory         | Record `memory`, a file over the golden image, and a log of the turns since it was last folded into the file |
+| Tables (`ctx.db`) | `Sql` on the file `db`                                                                                       |
+| Each extension    | Its own records and files, named under `<name>/`                                                             |
+| Large bytes       | The scope's blob store, outside Restate; a record names each blob                                            |
 
 ```
 turn n                      seal n                  after the seal

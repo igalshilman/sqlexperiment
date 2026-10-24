@@ -417,6 +417,29 @@ fn a_runs_memory_is_stored_and_restored_from_its_blobs() -> Result<()> {
     Ok(())
 }
 
+/// Each turn is logged, and every 16th folds the log into the memory's
+/// file: an attempt restored at any turn replays the log over the file,
+/// pages written back to golden included.
+#[test]
+fn turns_are_logged_folded_and_replayed() -> Result<()> {
+    let source = "const words=new Uint32Array(64*1024);export async function main(){for(let i=0;i<40;i++){words[i*1024]=i+1;if(i===20)words.fill(0);await durable.call('tick');}let sum=0;for(let i=0;i<40;i++)sum+=words[i*1024];return sum;}";
+    let store = Store::default();
+    start(&store, source, Value::Null, 1)?;
+    let mut logged = Vec::new();
+    for _ in 0..39 {
+        // Another attempt each turn: it restores from the file and the log.
+        let mut run = start(&store, source, Value::Null, 1)?;
+        step(&mut run)?;
+        logged.push(store.logged_turns());
+    }
+    assert!(logged.iter().all(|&turns| turns < 16), "{logged:?}");
+    assert!(logged.windows(2).any(|w| w[1] < w[0]), "folded: {logged:?}");
+    let mut run = start(&store, source, Value::Null, 1)?;
+    assert_eq!(value(&finish(&mut run)?), json!((22..=40).sum::<u32>()));
+    assert_eq!(store.logged_turns(), 0, "a settled run keeps no turns");
+    Ok(())
+}
+
 /// A big image and small turns: each turn writes the chunks it changed, as
 /// deltas against their base, not the image.
 #[test]
