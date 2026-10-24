@@ -425,7 +425,12 @@ impl TurnEntry {
                 .and_then(|_| cctx.ref_prefix(referenced(&self.before)))
                 .and_then(|_| cctx.compress2(&mut frame, &self.after));
             // The prefix goes with the session: the next frame has its own.
-            let _ = cctx.reset(zstd_safe::ResetDirective::SessionAndParameters);
+            if cctx
+                .reset(zstd_safe::ResetDirective::SessionAndParameters)
+                .is_err()
+            {
+                *cctx = zstd_safe::CCtx::create();
+            }
             compressed.map_err(zstd_error)
         })?;
         bytes.extend(frame);
@@ -448,11 +453,11 @@ impl LoggedTurn {
             anyhow::Ok(u32::from_le_bytes(word.try_into().unwrap()))
         };
         let count = u32_at(0)? as usize;
-        let frame = 4 + count.checked_mul(4).context("A turn entry too large")?;
+        let header_len = 4 + count.checked_mul(4).context("A turn entry too large")?;
         let indexes = (0..count)
             .map(|i| u32_at(4 + i * 4))
             .collect::<anyhow::Result<_>>()?;
-        let frame = bytes.get(frame..).context("A truncated turn entry")?;
+        let frame = bytes.get(header_len..).context("A truncated turn entry")?;
         Ok(Self {
             indexes,
             frame: frame.to_vec(),
@@ -461,6 +466,10 @@ impl LoggedTurn {
 
     /// Apply the turn to `image`, as it was before the turn.
     pub fn replay(&self, image: &mut Image) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.indexes.len() * PAGE <= image.len(),
+            "A turn entry of more pages than memory"
+        );
         let mut before = Vec::with_capacity(self.indexes.len() * PAGE);
         for &index in &self.indexes {
             anyhow::ensure!(
@@ -475,7 +484,12 @@ impl LoggedTurn {
                 .set_parameter(zstd_safe::DParameter::WindowLogMax(MAX_WINDOW_LOG)))
             .and_then(|_| dctx.ref_prefix(referenced(&before)))
             .and_then(|_| dctx.decompress(&mut after, &self.frame));
-            let _ = dctx.reset(zstd_safe::ResetDirective::SessionAndParameters);
+            if dctx
+                .reset(zstd_safe::ResetDirective::SessionAndParameters)
+                .is_err()
+            {
+                *dctx = zstd_safe::DCtx::create();
+            }
             decompressed.map_err(zstd_error)
         })?;
         anyhow::ensure!(
@@ -496,7 +510,8 @@ thread_local! {
 }
 
 /// Extend `prefix`'s lifetime to a context's: the callers above reset the
-/// context before they return, which drops the prefix.
+/// context (or replace it, if that fails) before they return, which drops
+/// the prefix.
 fn referenced(prefix: &[u8]) -> &'static [u8] {
     // SAFETY: the context references the prefix only until its reset, which
     // every path through `encode` and `replay` reaches, and nothing reads the

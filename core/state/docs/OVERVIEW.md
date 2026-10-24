@@ -23,7 +23,7 @@ and the root plays that role.
 | Key            | What it holds                                                                                                                                          |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                           |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record or log entry |
+| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record, or a log entry |
 
 Transactions change two kinds of state:
 

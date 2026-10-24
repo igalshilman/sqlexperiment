@@ -31,7 +31,7 @@
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
 //! | Root | `v16/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
-//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record or log entry; written once | Yes, until no root a reader may hold names it |
+//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record, or a log entry; written once | Yes, until no root a reader may hold names it |
 //!
 //! # Ownership and concurrency
 //!
@@ -585,7 +585,9 @@ impl Mutation {
     /// past the last entry the log holds or this mutation appended. Refused,
     /// before the mutation changes, is what no flush could store: an entry
     /// past [`MAX_RECORD_BYTES`], a log past [`MAX_LOG_ENTRIES`], a name
-    /// past [`MAX_NAME_BYTES`], or the name of a record or a paged file.
+    /// past [`MAX_NAME_BYTES`], or the name of a record or a paged file. The
+    /// flush is refused if another appended to the log since: the index
+    /// would no longer hold.
     pub fn append(&mut self, log: &Log, entry: Bytes) -> Result<u64> {
         self.of(&log.shared)?;
         if entry.len() > MAX_RECORD_BYTES {
@@ -593,12 +595,17 @@ impl Mutation {
             return Err(format!("{:?}: an entry of {len} bytes exceeds {max}", log.name).into());
         }
         self.claim(&log.name, Is::Log)?;
-        let held = log.held();
-        let appended = self.logs.entry(log.name.to_string()).or_default();
-        let next = held.next() + appended.values.len() as u64;
-        if next + 1 - appended.before.max(held.first) > MAX_LOG_ENTRIES {
+        let (first, held_next) = log.bounds();
+        let mine = self.logs.get(&*log.name);
+        let next = held_next + mine.map_or(0, |mine| mine.values.len() as u64);
+        let start = mine.map_or(0, |mine| mine.before).max(first);
+        if next + 1 - start > MAX_LOG_ENTRIES {
             let max = MAX_LOG_ENTRIES;
             return Err(format!("{:?} would hold more than {max} entries", log.name).into());
+        }
+        let appended = self.logs.entry(log.name.to_string()).or_default();
+        if appended.values.is_empty() {
+            appended.from = held_next;
         }
         appended.values.push(entry);
         Ok(next)
@@ -607,16 +614,21 @@ impl Mutation {
     /// Drop `log`'s entries before index `before` with this mutation's
     /// flush, those it appends included: after it, the log starts at
     /// `before`, or where it started if that is later. Refused is an
-    /// index past the log's end, this mutation's appends included.
+    /// index past the log's end, this mutation's appends included. One that
+    /// drops nothing changes nothing.
     pub fn truncate(&mut self, log: &Log, before: u64) -> Result<()> {
         self.of(&log.shared)?;
         self.claim(&log.name, Is::Log)?;
-        let held = log.held();
-        let appended = self.logs.entry(log.name.to_string()).or_default();
-        if before > held.next() + appended.values.len() as u64 {
+        let (first, next) = log.bounds();
+        let mine = self.logs.get(&*log.name);
+        let appended = mine.map_or(0, |mine| mine.values.len() as u64);
+        if before > next + appended {
             return Err(format!("{:?}: truncating past its end", log.name).into());
         }
-        appended.before = appended.before.max(before);
+        if before <= mine.map_or(0, |mine| mine.before).max(first) {
+            return Ok(());
+        }
+        self.logs.entry(log.name.to_string()).or_default().before = before;
         Ok(())
     }
 
@@ -855,21 +867,21 @@ impl Log {
     /// The index of the first entry the log holds, as last flushed: of the
     /// next entry if it holds none.
     pub fn first(&self) -> u64 {
-        self.held().first
+        self.bounds().0
     }
 
     /// The index the next entry appended takes, as last flushed.
     pub fn next(&self) -> u64 {
-        self.held().next()
+        self.bounds().1
     }
 
     /// The entries the log holds, as last flushed, from [`Self::first`].
     pub fn entries(&self) -> Vec<Bytes> {
-        self.held().values
+        self.shared.snapshot().log(&self.name).values
     }
 
-    fn held(&self) -> store::Entries {
-        self.shared.snapshot().log(&self.name)
+    fn bounds(&self) -> (u64, u64) {
+        self.shared.snapshot().log_bounds(&self.name)
     }
 }
 

@@ -61,12 +61,11 @@ A namespace holds:
 
 - **The root** (`v16/root`): the version, the directory of files (paged
   files, such as the SQL database's, records and logs), the small records,
-  and
-  the top of each paged file's chunk map.
+  and the top of each paged file's chunk map.
 - **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
   changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,
   compressed against the base, so it costs about what changed), a node of a
-  chunk map, or a large record or log entry.
+  chunk map, or a large record, or a log entry.
 
 **Chunk maps.** A paged file's chunks are named by a copy-on-write radix
 tree of 64-entry nodes, its top node in the root. A file of up to 1 MiB is

@@ -191,6 +191,8 @@ pub(crate) type Logs = BTreeMap<String, Entries>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Appended {
     pub values: Vec<Bytes>,
+    /// The index the first of `values` took, as the state held the log.
+    pub from: u64,
     pub before: u64,
 }
 
@@ -869,6 +871,13 @@ impl Snapshot {
         self.logs.get(name).cloned().unwrap_or_default()
     }
 
+    /// The log `name`'s first index, and the next.
+    pub fn log_bounds(&self, name: &str) -> (u64, u64) {
+        self.logs
+            .get(name)
+            .map_or((0, 0), |entries| (entries.first, entries.next()))
+    }
+
     pub fn file_size(&self, name: &str) -> u64 {
         match self
             .root
@@ -1183,6 +1192,10 @@ impl Snapshot {
         }
         for (name, appended) in logs {
             let held = self.log(name);
+            if !appended.values.is_empty() && appended.from != held.next() {
+                // The indexes the appends returned would no longer hold.
+                return refuse(format!("{name:?} was appended to since"));
+            }
             let next = held.next() + appended.values.len() as u64;
             if appended.before > next {
                 return refuse(format!("{name:?}: truncating past its end"));
