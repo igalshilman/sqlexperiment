@@ -560,8 +560,8 @@ impl Open {
     }
 
     /// Open a reader of a namespace that another owns, alongside it: a
-    /// state that writes nothing to the store (its mutations refuse to flush). It
-    /// reads the state as of open, whatever the owner flushes meanwhile,
+    /// state whose mutations refuse to flush (it may still collect garbage,
+    /// [`State::collect_garbage`]). It reads the state as of open, whatever the owner flushes meanwhile,
     /// until the owner's second checkpoint after it. With a cache
     /// ([`Self::cached`]), it reads the ranges of packs the owner cached.
     pub fn reader(self) -> Self {
