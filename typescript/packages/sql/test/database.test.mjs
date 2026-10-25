@@ -382,14 +382,14 @@ test('a store that lists its keys is swept now and then; one that cannot keeps i
   assert.ok(swept < 60 && kept > 100, `${swept} blobs swept, ${kept} kept`);
 });
 
-for (const [how, keys] of [
-  ['rejects', async () => Promise.reject(new Error('listing failed'))],
-  [
-    'throws',
-    () => {
+for (const { how, keys } of [
+  { how: 'rejects', keys: async () => Promise.reject(new Error('listing failed')) },
+  {
+    how: 'throws',
+    keys: () => {
       throw new Error('listing failed');
     },
-  ],
+  },
 ]) {
   test(`a listing that ${how} fails the commit that sweeps, which landed`, async () => {
     const backend = new Backend();
@@ -401,7 +401,7 @@ for (const [how, keys] of [
     let committed = 1;
     // A commit sweeps every 16 versions.
     await assert.rejects(async () => {
-      for (; committed < 40; committed++) await db.execute(`INSERT INTO t VALUES (${committed})`);
+      for (; committed < 40; committed++) await db.execute('INSERT INTO t VALUES (?)', [committed]);
     }, /listing failed/);
     const reopened = await open(ns, backend.request());
     assert.deepEqual(await reopened.query('SELECT count(*) FROM t'), [[committed]]);
