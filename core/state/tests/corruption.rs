@@ -84,9 +84,9 @@ async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> (Read, Re
         cache: cached.then(fresh_namespace),
         packs: None,
     };
-    let read = async |swept: bool| {
-        let session = Session::open(store.clone(), options(cached && !swept)).await?;
-        if swept {
+    let read = async |collected: bool| {
+        let session = Session::open(store.clone(), options(cached && !collected)).await?;
+        if collected {
             // Its failure is a read's to find.
             let _ = session.state.collect_garbage().await;
             let session = Session::open(store.clone(), options(false)).await?;
@@ -124,12 +124,12 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
                     let case = format!("{key} {corruption}, cached {cached}");
                     let store: Arc<dyn KvStore> = Arc::new(corrupted.clone());
                     let read = AssertUnwindSafe(read(store, &model, cached)).catch_unwind();
-                    let Ok((read, swept)) = read.await else {
+                    let Ok((read, collected)) = read.await else {
                         panic!("{case}: panicked");
                     };
                     // Garbage is only what the head does not need.
-                    if read == Read::AsFlushed && swept != Read::AsFlushed {
-                        panic!("{case}: read as flushed, then after collecting {swept:?}");
+                    if read == Read::AsFlushed && collected != Read::AsFlushed {
+                        panic!("{case}: read as flushed, then after collecting {collected:?}");
                     }
                     // A bit flip may stay undetected: frames have a
                     // checksum, but not their headers.

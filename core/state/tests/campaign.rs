@@ -193,7 +193,7 @@ impl World {
         let rng = &mut self.rng;
         Setup {
             options: StateOptions {
-                // Kept by the namespace's first root.
+                // Kept by the namespace's first head.
                 frame_pages: rng.pick(&[1, 2, 4, 16]),
                 inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),
@@ -510,34 +510,34 @@ impl World {
             .as_ref()
             .map_or(&session.state, |worker| &worker.state);
         // Whole, with a fault at any of its requests, or dropped at a poll.
-        let (faulty, swept) = match self.rng.below(10) {
+        let (faulty, collected) = match self.rng.below(10) {
             0..=5 => (false, state.collect_garbage().await),
             6..=8 => {
                 let failpoint = self.failpoint();
                 let _signal = self.store.arm(failpoint);
                 self.s3_faults(true);
-                let swept = state.collect_garbage().await;
+                let collected = state.collect_garbage().await;
                 self.s3_faults(false);
                 self.store.disarm();
-                (true, swept)
+                (true, collected)
             }
             _ => {
                 let polls = self.rng.below(8);
-                let mut sweep = Box::pin(state.collect_garbage());
+                let mut collecting = Box::pin(state.collect_garbage());
                 let mut cx = Context::from_waker(noop_waker_ref());
-                let mut swept = Err("cancelled".into());
+                let mut collected = Err("cancelled".into());
                 for _ in 0..polls {
-                    if let Poll::Ready(outcome) = sweep.as_mut().poll(&mut cx) {
-                        swept = outcome;
+                    if let Poll::Ready(outcome) = collecting.as_mut().poll(&mut cx) {
+                        collected = outcome;
                         break;
                     }
                 }
-                drop(sweep);
+                drop(collecting);
                 self.totals.cancelled += 1;
                 match polls {
                     // Never polled: nothing happened.
                     0 => return Ok(session),
-                    _ => (true, swept),
+                    _ => (true, collected),
                 }
             }
         };
@@ -548,9 +548,9 @@ impl World {
             } else {
                 "the owner"
             };
-            format!("collection by {by}: {swept:?}")
+            format!("collection by {by}: {collected:?}")
         });
-        let error = match swept {
+        let error = match collected {
             Ok(deleted) => {
                 self.totals.collected += deleted;
                 return Ok(session);

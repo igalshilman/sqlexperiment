@@ -25,8 +25,8 @@ fn options(cache: Option<Namespace>) -> Setup {
     )
 }
 
-/// Turn `i`'s value: small, held in the root, or past the inline budget, a
-/// blob of its own, just past it or far past it.
+/// Turn `i`'s value: small, inline in a checkpoint's manifest, or past the
+/// inline budget, a value of its own in a pack, just past it or far past it.
 fn value(i: usize) -> Bytes {
     let len = [100, 1500, 9000][i % 3];
     Bytes::from((0..len).map(|n| (n * 31 + i) as u8).collect::<Vec<_>>())
@@ -121,9 +121,9 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
 }
 
 /// A turn of no SQL, in a transaction or without one, is one flush, and puts
-/// only the root.
+/// only its tail entry and the head.
 #[test]
-fn turns_without_sql_put_only_the_root() -> Result<()> {
+fn turns_without_sql_put_only_a_tail_entry_and_the_head() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(Some(fresh_namespace()))).await?;

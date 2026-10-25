@@ -30,9 +30,9 @@ fn options(cache: Option<Namespace>, packs: Option<&MemoryBlobs>) -> Setup {
     }
 }
 
-/// The changes of flush `step`: small ones (deltas), large ones (rebases),
-/// records over the inline budget, holes, a shrink, and a page equal to its
-/// base's.
+/// The changes of flush `step`: pages a few bytes apart and pages of random
+/// bytes, records over the inline budget, holes, a shrink, and a page equal
+/// to its base's.
 fn changes(step: u64) -> Vec<Op> {
     let mut rng = Rng::new(step);
     let image = |rng: &mut Rng| match step % 3 {
@@ -59,7 +59,7 @@ fn changes(step: u64) -> Vec<Op> {
     ops
 }
 
-/// Open a session and read a few pages, so that a flush finds their chunks
+/// Open a session and read a few pages, so that a flush finds their frames
 /// decoded.
 async fn session(
     store: Arc<dyn KvStore>,

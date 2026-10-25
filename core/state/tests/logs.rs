@@ -205,7 +205,7 @@ fn a_write_refuses_what_no_flush_could_store() -> Result<()> {
 }
 
 /// A reader reads the log as it opened it while the owner appends and
-/// truncates, its blobs included.
+/// truncates, its large entry included.
 #[test]
 fn a_reader_keeps_the_log_it_opened() -> Result<()> {
     futures::executor::block_on(async {

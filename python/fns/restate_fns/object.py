@@ -234,7 +234,8 @@ class _ContextHost:
         return self.context.run_typed("sync", _nothing)
 
     def sql_keys(self) -> Awaitable[list[str]]:
-        return self.context.state_keys(entry_name="keys")
+        # Named under the format's prefix, which tooling hides, as the keys.
+        return self.context.state_keys(entry_name="v20/keys")
 
     def sql_send(
         self,

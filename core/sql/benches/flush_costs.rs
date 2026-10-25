@@ -165,7 +165,7 @@ const WORKLOADS: [Workload; 10] = [
         payload: 256,
         flushes: 256,
     },
-    // 56 MB: the chunk map is two levels deep.
+    // 56 MB: a manifest of about 6 KiB.
     Workload {
         name: "200k: update 1",
         rows: 200_000,
@@ -178,7 +178,7 @@ const WORKLOADS: [Workload; 10] = [
         payload: 256,
         flushes: 256,
     },
-    // 280 MB: three levels.
+    // 280 MB: about 30 KiB.
     Workload {
         name: "1M: update 1",
         rows: 1_000_000,
@@ -311,7 +311,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     load(&stores, w, &mut words).await?;
     let cache =
         cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
-    // Warm the owner, and its cache with every blob, and checkpoint the load,
+    // Warm the owner, and its cache with every frame, and checkpoint the load,
     // outside the measurement.
     let mut db = open(&stores, &cache).await?;
     if !w.name.starts_with("chat") {

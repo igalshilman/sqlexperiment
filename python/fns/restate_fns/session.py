@@ -286,8 +286,8 @@ class _ReaderStore:
         pass
 
 
-# A transaction's sends commit with it, in the database's root (its
-# effects): the outbox, which holds each committed transaction's sends until
+# A transaction's sends commit with it, in the database's record of its
+# effects: the outbox, which holds each committed transaction's sends until
 # they are stored. They are made once the transaction commits; a later open
 # makes again those still in the outbox, with the same idempotency keys
 # (`transaction/<id>/<index>`, with a random id of the transaction), so making

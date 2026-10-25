@@ -70,7 +70,7 @@ async fn baseline() -> Result<MemoryKv> {
         insert_pair(&session, i).await?;
     }
     session.commit(Some(effects(20))).await?;
-    // More flushes: deltas over the chunks' bases, read from the store.
+    // More flushes: tail entries over the checkpoint, read from the store.
     session.query("CREATE TABLE a(x)", None).await?;
     for k in 0..4 {
         session

@@ -64,7 +64,7 @@ impl state::Base for Zeros {
 /// A file with a base decodes its pages only once opened with it, and
 /// reads what was flushed through later flushes of other files.
 #[test]
-fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
+fn a_based_file_reads_its_pages_once_opened_with_its_base() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         for n in [1, 2] {
@@ -89,11 +89,11 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
     })
 }
 
-/// A cold sequential read of more chunks than a state keeps decoded: the
-/// chunk a read decoded is returned, even when its readahead dropped them
-/// all, and readahead grows to its widest.
+/// A cold sequential read of 1500 pages (as many frames), all in the tail:
+/// every page reads as written, decoded from the tail the open fetched,
+/// without a round trip per page.
 #[test]
-fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
+fn a_long_sequential_read_returns_every_page() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let options = || state::StateOptions {
@@ -115,7 +115,7 @@ fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
         for n in 0..1500 {
             assert_eq!(byte(&file, n).await?, Some(n as u8 | 1), "page {n}");
         }
-        // Readahead grows to 16 chunks a round trip.
+        // The open fetched the tail, which holds every page.
         assert!(store.round_trips() < 1500 / 12, "{}", store.round_trips());
         Ok(())
     })
@@ -149,7 +149,7 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
 }
 
 /// A flush without a cache gets nothing: the open before it got the head,
-/// then, for the map's leaves (100 chunks, two levels), the whole tail, in
+/// then the manifest and the whole tail (400 pages), together, in
 /// one round trip; the flush is one more.
 #[test]
 fn a_cold_flush_gets_nothing_the_open_fetched_the_tail() -> Result<()> {

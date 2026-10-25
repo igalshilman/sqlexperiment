@@ -428,7 +428,7 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
 }
 
 /// Two sessions of one owner that both write: the second flush would replace
-/// the root the first wrote, so it is refused.
+/// the head the first wrote, so it is refused.
 #[test]
 fn a_second_concurrent_writer_is_refused() -> Result<()> {
     futures::executor::block_on(async {

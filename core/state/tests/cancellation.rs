@@ -14,8 +14,8 @@ use std::{
 };
 use support::*;
 
-/// Chunks rebase often, checkpoints come every other flush, and large records
-/// go to blobs.
+/// Small frames, a checkpoint every other flush, and large records in
+/// packs.
 fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
@@ -118,14 +118,14 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 drop(session);
                 // The flush lands with its head; a crash takes it back, as
                 // no sync completed.
-                let rooted = memory.unsynced().iter().any(|(key, _)| key == HEAD_KEY);
+                let head_queued = memory.unsynced().iter().any(|(key, _)| key == HEAD_KEY);
                 if crash {
                     memory.crash();
                 }
                 let reopened = Session::open(store.clone(), options(cache)).await?;
                 let whole = new.matches(&reopened).await?;
                 assert!(whole || old.matches(&reopened).await?, "{case}");
-                assert_eq!(whole, rooted && !crash, "{case}");
+                assert_eq!(whole, head_queued && !crash, "{case}");
                 landed[usize::from(whole)] += 1;
                 // It goes on, durably.
                 let after = [Op::Set("state", "after".into())];
@@ -141,7 +141,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 );
                 assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
             }
-            // Some drops came after the root went out (and, uncached, some
+            // Some drops came after the head went out (and, uncached, some
             // while the flush still fetched what it builds on).
             if !crash {
                 assert!(
