@@ -1,11 +1,12 @@
 //! Turns of a few workloads over a store in memory: `cargo bench --bench
-//! checkpoints` (and `--features full-scan`, the control). Each run goes once
-//! with its VM live from turn to turn, and once restoring it at every turn, as
-//! a new attempt would. Results go to bench-<mode>.json.
+//! checkpoints` (and `--features full-scan`, the control; `-- s3` keeps the
+//! checkpoints' packs in an S3 in memory). Each run goes once with its VM
+//! live from turn to turn, and once restoring it at every turn, as a new
+//! attempt would. Results go to bench-<mode>.json (bench-<mode>-s3.json).
 use anyhow::{Result, ensure};
 use functions::{Language, Outcome, Program, Programs, Run, Runtime, Scope, Status};
 use serde_json::{Value, json};
-use state::simulation::MemoryKv;
+use state::simulation::{MemoryBlobs, MemoryKv};
 use std::{sync::Arc, time::Instant};
 
 fn main() -> Result<()> {
@@ -27,6 +28,7 @@ fn main() -> Result<()> {
         "barriers"
     };
     let compile_ms = before.elapsed().as_secs_f64() * 1000.0;
+    let s3 = std::env::args().any(|arg| arg == "s3");
     let cases = [
         (
             "scalar",
@@ -69,8 +71,11 @@ fn main() -> Result<()> {
             let program_ms = before.elapsed().as_secs_f64() * 1000.0;
             let programs = Arc::new(Programs::new(runtime.clone()).with(program)?);
             for restored in [false, true] {
-                let store = MemoryKv::default();
-                let scope = Scope::new(Arc::new(store.clone()));
+                let (store, packs) = (MemoryKv::default(), MemoryBlobs::default());
+                let mut scope = Scope::new(Arc::new(store.clone()));
+                if s3 {
+                    scope = scope.checkpoints(Arc::new(packs.clone()));
+                }
                 let started = Instant::now();
                 let mut run = futures_executor::block_on(Run::start(
                     &programs,
@@ -85,6 +90,7 @@ fn main() -> Result<()> {
                 let mut turn_ms = started.elapsed().as_secs_f64() * 1000.0;
                 let mut written = store.stats().bytes_written as usize;
                 let mut writes = (store.stats().puts + store.stats().deletes) as usize;
+                let (mut uploaded, mut uploads) = (packs.uploaded(), packs.puts());
                 loop {
                     let view = run.view();
                     if repeat != 0 {
@@ -93,7 +99,8 @@ fn main() -> Result<()> {
                             "memory_bytes":view.memory_bytes,"live_pages":view.live_pages,
                             "changed_pages":view.changed_pages,"examined_pages":view.examined_pages,
                             "entry_bytes":view.entry_bytes,"head_bytes":view.head_bytes,
-                            "written_bytes":written,"writes":writes}));
+                            "written_bytes":written,"writes":writes,
+                            "s3_bytes":uploaded,"s3_puts":uploads}));
                     }
                     if view.state.status != Status::Waiting {
                         ensure!(
@@ -108,6 +115,7 @@ fn main() -> Result<()> {
                         store.stats().bytes_written as usize,
                         (store.stats().puts + store.stats().deletes) as usize,
                     );
+                    let (s3_bytes, s3_puts) = (packs.uploaded(), packs.puts());
                     let started = Instant::now();
                     if restored {
                         run = futures_executor::block_on(Run::start(
@@ -129,6 +137,7 @@ fn main() -> Result<()> {
                     turn_ms = started.elapsed().as_secs_f64() * 1000.0;
                     written = store.stats().bytes_written as usize - bytes;
                     writes = (store.stats().puts + store.stats().deletes) as usize - count;
+                    (uploaded, uploads) = (packs.uploaded() - s3_bytes, packs.puts() - s3_puts);
                 }
             }
         }
@@ -138,13 +147,19 @@ fn main() -> Result<()> {
         .output()?;
     let output = json!({"rustc":String::from_utf8_lossy(&rust.stdout).trim(),"arch":std::env::consts::ARCH,
         "os":std::env::consts::OS,"wasmtime":"49.0.3",
-        "compile_ms":compile_ms,"capture_mode":mode,
+        "compile_ms":compile_ms,"capture_mode":mode,"packs":if s3 {"s3"} else {"store"},
         "notes":["Optimized Rust; one warm-up and three repetitions; a store in memory, not a network or a disk.",
         "A live turn delivers to the VM kept from the last one: execution, capture, compression and the writes. A restored turn starts a new attempt first: reading the commit and its pages, and a new Wasm instance.",
-        "written_bytes: the turn's pages, its commit, and the writes and deletes that follow it.",
+        "written_bytes: the turn's pages, its commit, and the writes and deletes that follow it, to the store (Restate).",
+        "s3_bytes, s3_puts: what the turn put in S3, with -- s3: its checkpoint's pack.",
         "Native mode examines the pages the kernel saw written (userfaultfd write protection, PAGEMAP_SCAN); barriers mode, those marked by Wasm write barriers and host writes. Full-scan mode examines all pages."],"rows":rows});
     let output = serde_json::to_string_pretty(&output)?;
-    std::fs::write(format!("bench-{mode}.json"), &output)?;
+    let file = if s3 {
+        format!("bench-{mode}-s3.json")
+    } else {
+        format!("bench-{mode}.json")
+    };
+    std::fs::write(file, &output)?;
     println!("{output}");
     Ok(())
 }

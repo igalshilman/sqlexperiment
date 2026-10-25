@@ -1102,8 +1102,15 @@ state's frame packs (v20: a tail in Restate, checkpoints now and then):
   MiB of checkpoints. Neither the heap nor Restate's journal holds the
   requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in
-  1.2–1.5 ms, reading the checkpoint's frames and replaying the tail. The
-  first restore of a process sometimes takes about 10 ms.
+  1.1–1.6 ms, reading the checkpoint's frames and replaying the tail. About
+  one in six takes 10–13 ms instead, with the packs in Restate or in S3
+  alike; why is not known yet.
+- **With the packs in S3** (`cargo bench --bench agent -- s3`, an S3 in
+  memory, without its latency): a checkpoint is due once the tail holds 1
+  MiB, so 3 in 200 steps (at 64, 128 and 192), each a pack of 73–75 KB in S3
+  and a manifest of 18–26 KB in Restate. Restate stores 2.34 MiB and S3 0.21
+  MiB; no step stores more than 26 KB in Restate. Heads name more tail
+  entries, up to 300 B.
 - **Against the state before frame packs** (6ea9e1e, the same bench, the
   same machine, the same day), whose log kept each turn's changes and whose
   file was copy-on-write chunks: 11 KB a step too, 2.25 MiB in all, no step
@@ -1133,7 +1140,10 @@ spread out: a heap that changes most of its pages each turn
 (heap-churn) checkpoints at its second turn and again when it settles, each
 time about as much as a turn's entry, so its median turn stores twice as
 much. Over a long run checkpoints add up to about what the tail stored, and
-less as pages change again before it.
+less as pages change again before it. With the packs in S3 (`-- s3`), these
+runs never reach a checkpoint's 1 MiB of tail: each turn stores its entry
+and its head, as before frame packs (heap-churn 49,977 B, write-heavy
+1,990 B), and the times are the same.
 
 An entry XORing each page with its previous image, instead of a Zstd frame
 against it, took 0.33 ms a scalar turn, but stored 1.5 times as much on
