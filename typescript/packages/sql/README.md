@@ -30,11 +30,12 @@ which builds the store inside the SDK.
 it is stored. Writes are stored in the order they were made: a crash keeps a
 prefix of the writes since the last sync and loses the rest, never a write
 without the ones before it (as a Restate object's state does). A `set` or
-`clear` that throws fails the next `sync`. A database's writes are immutable
-blobs and the root that names them (see the crate's
-[format](../../../core/state/docs/FORMAT.md)): a transaction commits with the
-root, written after its blobs, so a commit is durable once a sync after it
-resolves.
+`clear` that throws fails the next `sync`. A transaction commits as a tail
+entry and the head that names it (see the crate's
+[format](../../../core/state/docs/FORMAT.md)), written after it, so a commit
+is durable once a sync after it resolves. Now and then a commit first
+checkpoints the database into a pack, which never changes, and drops the
+tail.
 
 ## Sessions and the page cache
 
@@ -48,7 +49,7 @@ the body. A COMMIT that fails rolls back. An SQL error leaves the session
 usable (`isUsable()`); a storage error ends it.
 
 A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
-puts them in the same root, so they are stored exactly when the
+puts them in the same head, so they are stored exactly when the
 transaction is, even if it changes nothing, and stay until a later
 transaction commits others. `effects()` returns them. The SDK keeps a
 transaction's sends there, its outbox, and makes them once it commits.
@@ -56,11 +57,11 @@ transaction's sends there, its outbox, and makes them once it commits.
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
 with the process, or the file `RESTATE_SQL_CACHE_FILE` names. It keeps a
-database's blobs, which never change, and its last root: a session reads the
-blobs it has from the cache, and reuses the idle engine when the root is the
-one the cache saw last. `save()` (or `close()`) ends a session,
-leaving its engine to the next one when it is idle. The cache keys blobs by
-the database's random id, from its root, as well as the namespace: two stores
+database's packs, which never change, and its last head: a session reads the
+ranges of packs it has from the cache, and reuses the idle engine when the
+head is the one the cache saw last. `save()` (or `close()`) ends a session,
+leaving its engine to the next one when it is idle. The cache keys packs by
+their random names as well as the namespace: two stores
 holding different databases under one namespace (two Restate clusters, say)
 may share a process.
 

@@ -61,11 +61,10 @@ impl state::Base for Zeros {
     }
 }
 
-/// A file with a base decodes its chunks only once opened with it, and
-/// reads what was flushed through later flushes of other files; without it,
-/// whole chunks of it can be made holes.
+/// A file with a base decodes its pages only once opened with it, and
+/// reads what was flushed through later flushes of other files.
 #[test]
-fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
+fn a_based_file_reads_its_pages_once_opened_with_its_base() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         for n in [1, 2] {
@@ -86,31 +85,19 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
         mutation.write(&state.file("db")?, 0, Some(page(9)))?;
         mutation.flush().await?;
         assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
-
-        // Without its base, a whole chunk of it can still be made holes:
-        // its base pages again.
-        let state = State::open(store.clone()).await?;
-        let mut mutation = state.mutation();
-        for n in 0..4 {
-            mutation.write(&state.file("vm")?, n, None)?;
-        }
-        mutation.flush().await?;
-        let state = State::open(store).await?;
-        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
-        assert_eq!(byte(&vm, 1).await?, Some(0), "its base page");
         Ok(())
     })
 }
 
-/// A cold sequential read of more chunks than a state keeps decoded: the
-/// chunk a read decoded is returned, even when its readahead dropped them
-/// all, and readahead grows to its widest.
+/// A cold sequential read of 1500 pages (as many frames), all in the tail:
+/// every page reads as written, decoded from the tail the open fetched,
+/// without a round trip per page.
 #[test]
-fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
+fn a_long_sequential_read_returns_every_page() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let options = || state::StateOptions {
-            chunk_pages: 1,
+            frame_pages: 1,
             ..state::StateOptions::default()
         };
         let state = State::open(Arc::new(memory.clone()))
@@ -128,7 +115,7 @@ fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
         for n in 0..1500 {
             assert_eq!(byte(&file, n).await?, Some(n as u8 | 1), "page {n}");
         }
-        // Readahead grows to 16 chunks a round trip.
+        // The open fetched the tail, which holds every page.
         assert!(store.round_trips() < 1500 / 12, "{}", store.round_trips());
         Ok(())
     })
@@ -161,11 +148,11 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
     })
 }
 
-/// A flush without a cache gets the stored chunks it changes together: one
-/// round trip for the chunks, however many, then one for the flush. The open
-/// before it got the root, then the map's leaves (100 chunks, two levels).
+/// A flush without a cache gets nothing: the open before it got the head,
+/// then the manifest and the whole tail (400 pages), together, in
+/// one round trip; the flush is one more.
 #[test]
-fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
+fn a_cold_flush_gets_nothing_the_open_fetched_the_tail() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let state = State::open(Arc::new(memory.clone())).await?;
@@ -185,8 +172,88 @@ fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
             mutation.write(&file, n, Some(page(2)))?;
         }
         mutation.flush().await?;
-        assert_eq!(store.round_trips(), 2);
+        assert_eq!(store.round_trips(), 1);
         assert_eq!(byte(&file, 37).await?, Some(2));
+        Ok(())
+    })
+}
+
+/// Pages that do not compress, made from `seed`.
+fn noise(seed: u64, pages: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    (0..pages * 4096)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// Small changes to a page, a checkpoint each flush, patch its frame rather
+/// than rewrite it, and the tail compresses the next change against the
+/// patched page; a frame rewritten whole is rebuilt, dropping its patches.
+/// The file reads the same in the session and reopened, small enough to be
+/// fetched whole on open or not.
+#[test]
+fn checkpoints_patch_frames_a_few_pages_change() -> Result<()> {
+    futures::executor::block_on(async {
+        for pages in [8, 64] {
+            let store = Arc::new(MemoryKv::default());
+            let options = state::StateOptions {
+                checkpoint_entries: 1,
+                ..Default::default()
+            };
+            let state = State::open(store.clone()).options(options.clone()).await?;
+            let file = state.file("db")?;
+            let mut image = noise(1, pages);
+            let mut reports = Vec::new();
+            for round in 0..12 {
+                let at = 5 * 4096 + round * 8;
+                image[at..at + 8].copy_from_slice(&[round as u8; 8]);
+                if round == 6 {
+                    image[4 * 4096..8 * 4096].copy_from_slice(&noise(2, 4));
+                }
+                let mut mutation = state.mutation();
+                for page in 0..pages as u64 {
+                    let range = page as usize * 4096..(page as usize + 1) * 4096;
+                    if round == 0 || (4..8).contains(&page) && (round == 6 || page == 5) {
+                        mutation.write(&file, page, Some(image[range].to_vec().into()))?;
+                    }
+                }
+                reports.push(mutation.flush().await?);
+                let reopened = State::open(store.clone()).options(options.clone()).await?;
+                for file in [&file, &reopened.file("db")?] {
+                    for page in 0..pages as u64 {
+                        let range = page as usize * 4096..(page as usize + 1) * 4096;
+                        let read = file.read(page).await?.expect("a page");
+                        assert!(
+                            read[..] == image[range],
+                            "{pages} pages, round {round}, page {page}"
+                        );
+                    }
+                }
+            }
+            let shape: Vec<Option<(usize, usize)>> = (reports.iter())
+                .map(|report| (report.checkpoint.as_ref()).map(|c| (c.frames, c.patched)))
+                .collect();
+            // A checkpoint holds the flushes before its own: the one at
+            // round 1 the file, the one at round 7 the frame round 6 rewrote.
+            let mut expected = vec![None, Some((pages / 4, 0))];
+            expected.extend([Some((0, 1)); 5]);
+            expected.push(Some((1, 0)));
+            expected.extend([Some((0, 1)); 4]);
+            assert_eq!(shape, expected, "{pages} pages");
+            for (round, report) in reports.iter().enumerate().skip(2) {
+                if round != 6 {
+                    assert!(
+                        report.entry_bytes < 200,
+                        "{pages} pages, round {round}: {report:?}"
+                    );
+                }
+            }
+        }
         Ok(())
     })
 }

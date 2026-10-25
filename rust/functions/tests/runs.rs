@@ -225,7 +225,7 @@ fn memory_growth_survives_a_restore() -> Result<()> {
     // The 3 MiB buffer is mostly new memory: some of it may fit in the
     // heap's free space.
     assert!(grown.memory_bytes > initial + 2 * 1024 * 1024);
-    assert!(grown.blob_bytes < 100_000);
+    assert!(grown.entry_bytes < 100_000);
     step(&mut run)?;
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!([0, 9, 0]));
@@ -354,7 +354,7 @@ fn garbage_a_turn_frees_is_not_saved() -> Result<()> {
         // zeroing, ~60 pages changed and the batch took ~70 KiB. With it, a
         // few KiB: how much depends on when the GC runs, which moves with the
         // size of the bridge's heap.
-        assert!(turn.blob_bytes < 8192, "{} bytes", turn.blob_bytes);
+        assert!(turn.entry_bytes < 8192, "{} bytes", turn.entry_bytes);
     }
     assert_eq!(value(&finish(&mut run)?), json!(true));
     Ok(())
@@ -396,10 +396,10 @@ fn long_local_loops_go_on_in_the_next_turn() -> Result<()> {
     Ok(())
 }
 
-/// A run's memory pages are stored in blobs like the tables' pages, and a
-/// restore reads the chunks that differ from golden.
+/// A run's memory pages are stored like the tables' pages, checkpointed in
+/// packs, and a restore reads the pages that differ from golden.
 #[test]
-fn a_runs_memory_is_stored_and_restored_from_its_blobs() -> Result<()> {
+fn a_runs_memory_is_stored_and_restored_from_its_packs() -> Result<()> {
     let source = "const log=[];export async function main(_,ctx){for(let i=0;i<60;i++){log.push('x'.repeat(5000)+i);await durable.call('tick');}return log.length+':'+log[59].slice(-2);}";
     let store = Store::default();
     let mut run = start(&store, source, Value::Null, 1)?;
@@ -408,7 +408,7 @@ fn a_runs_memory_is_stored_and_restored_from_its_blobs() -> Result<()> {
     }
     let pages = store.memory_pages();
     assert!(pages > 40, "{pages} pages differ from golden");
-    assert!(store.blobs() > 10, "{} blobs", store.blobs());
+    assert!(store.packs() > 0, "checkpointed");
     // Another attempt restores them, and the run goes on.
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!("60:59"));
@@ -440,8 +440,8 @@ fn turns_are_logged_folded_and_replayed() -> Result<()> {
     Ok(())
 }
 
-/// A big image and small turns: each turn writes the chunks it changed, as
-/// deltas against their base, not the image.
+/// A big image and small turns: each turn writes the pages it changed, each
+/// against the checkpoint's, not the image.
 #[test]
 fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     let source = "export async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
@@ -451,10 +451,11 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
         step(&mut run)?;
     }
     assert!(store.memory_pages() >= 8, "{} pages", store.memory_pages());
-    // The first turn writes 32 KiB of noise; the others a delta of a word
-    // each, and a root: ~150 KiB in all.
+    // The first turn writes 32 KiB of noise, and so does each of the two
+    // checkpoints; the others ~2 KiB each, and a head: ~200 KiB in all,
+    // against 1.3 MiB for the image every turn.
     let written = store.bytes_written();
-    assert!(written < 160 * 1024, "{written} bytes");
+    assert!(written < 220 * 1024, "{written} bytes");
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!(39));
     Ok(())
@@ -497,11 +498,11 @@ fn a_call_input_stays_in_the_heap_until_answered() -> Result<()> {
     let issued = run.view();
     // ~39 KiB of JSON, kept in the heap, compressed; none in the root.
     assert!(
-        (8 * 1024..32 * 1024).contains(&issued.blob_bytes),
+        (8 * 1024..32 * 1024).contains(&issued.entry_bytes),
         "{} bytes",
-        issued.blob_bytes
+        issued.entry_bytes
     );
-    assert!(issued.root_bytes < 2048, "{} bytes", issued.root_bytes);
+    assert!(issued.head_bytes < 2048, "{} bytes", issued.head_bytes);
     let call = &issued.state.pending[0];
     assert_eq!(call.idempotency_key(), "mine");
     let input = block(run.input(call.id()))?.unwrap();

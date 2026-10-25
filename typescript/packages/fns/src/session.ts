@@ -71,6 +71,8 @@ export interface SqlHost {
   get(name: string, serde: Serde<Uint8Array>, options: restate.EntryOptions): PromiseLike<Uint8Array | null>;
   set(name: string, value: Uint8Array, serde: Serde<Uint8Array>, options: restate.EntryOptions): void;
   clear(name: string, options: restate.EntryOptions): void;
+  /** The object's state keys. */
+  stateKeys(): PromiseLike<string[]>;
   run(name: string, action: () => void): PromiseLike<void>;
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
@@ -132,7 +134,7 @@ class AttemptEnd {
 }
 
 // A state command is named after its key, so that tooling can hide the
-// database's root and blobs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
+// database's head, tail and packs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
 const named = (key: string): restate.EntryOptions => ({ name: key });
 
 // A shared handler's reader writes nothing.
@@ -142,12 +144,22 @@ const refusedWrite = () => {
 
 /**
  * The keys of the database `name`, beside the object's own: each of the
- * format's keys (`v16/root`, `v16/blob/...`) as `v16/<name>/root`, under
- * the format's prefix still, which tooling hides.
+ * format's keys (`v20/head`, `v20/tail/...`, `v20/manifest/...`,
+ * `v20/pack/...`) as `v20/<name>/head`, under the format's prefix still,
+ * which tooling hides.
  */
 const beside = (name: string) => (key: string) => {
   const at = key.indexOf('/');
   return `${key.slice(0, at)}/${name}/${key.slice(at + 1)}`;
+};
+
+/**
+ * The format's key of a key of the database `name` (undoes {@link beside});
+ * `undefined` for any other key of the object.
+ */
+const unbeside = (name: string) => (key: string) => {
+  const at = key.indexOf('/');
+  return at >= 0 && key.startsWith(`/${name}/`, at) ? key.slice(0, at) + key.slice(at + name.length + 1) : undefined;
 };
 
 /**
@@ -170,6 +182,13 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined
     get,
     set: (key, value) => ctx.set(keyOf(key), value, serde.binary, named(keyOf(key))),
     clear: (key) => ctx.clear(keyOf(key), named(keyOf(key))),
+    // A sweep's, now and then: the database's keys.
+    keys: async () => {
+      const keys = await end.race(ctx.stateKeys());
+      if (database === undefined) return keys;
+      const own = unbeside(database);
+      return keys.flatMap((key) => own(key) ?? []);
+    },
     sync: async () => {
       await end.race(ctx.run('sync', () => {}));
     },

@@ -43,6 +43,11 @@ class Store(Protocol):
     write (``None`` when absent), or an awaitable of it: so a plain
     ``async def get`` does not do, as its read would be issued only when it
     first runs.
+
+    A store may also return its ``keys()`` (every key, as the object's
+    ``ctx.state_keys()``), or an awaitable of them: then a commit that
+    checkpoints deletes the checkpoints' packs no checkpoint needs any more.
+    One that cannot keeps them.
     """
 
     def get(self, key: str) -> bytes | None | Awaitable[bytes | None]: ...
@@ -61,9 +66,9 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
     A ``reader`` reads the database beside the session that writes it (a
     shared handler's, beside the exclusive one's): it writes nothing to the
     store, and reads the state it opened on throughout, a snapshot, whatever
-    the writer commits meanwhile. The writer deletes what it no longer needs
-    16 commits later, so a reader still reading after 16 of them may fail
-    ("is gone"): open it again (a shared handler is retried).
+    the writer commits meanwhile, until the writer's second checkpoint after
+    it: a reader still reading then may fail ("is gone"): open it again (a
+    shared handler is retried).
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync
@@ -94,6 +99,12 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
                 return
             if op == _native.GET:
                 result = store.get(key)
+            elif op == _native.KEYS:
+                keys = getattr(store, "keys", None)
+                if keys is None:
+                    reply(None)
+                    return
+                result = _lines(keys())
             elif failure:
                 reply(None, str(failure[0]))
                 return
@@ -108,6 +119,13 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
                 reply(None, str(error))
 
     return Database(await _native.open(namespace, dispatch, loop, reader))
+
+
+async def _lines(keys: Sequence[str] | Awaitable[Sequence[str]]) -> bytes:
+    """A store's keys, one per line, as the native side reads them."""
+    if inspect.isawaitable(keys):
+        keys = await keys
+    return "\n".join(keys).encode()
 
 
 # The transaction whose body is running, in that body's context (and the

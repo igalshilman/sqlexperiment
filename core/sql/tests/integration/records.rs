@@ -1,5 +1,5 @@
-//! The host's records: named values a turn flushes with its SQL, in one
-//! root.
+//! The host's records: named values a turn flushes with its SQL, under one
+//! head.
 use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
@@ -19,13 +19,14 @@ fn options(cache: Option<Namespace>) -> Setup {
                 ..StateOptions::default()
             },
             cache,
+            packs: None,
         },
         Durability::Commit,
     )
 }
 
-/// Turn `i`'s value: small, held in the root, or past the inline budget, a
-/// blob of its own, just past it or far past it.
+/// Turn `i`'s value: small, inline in a checkpoint's manifest, or past the
+/// inline budget, a value of its own in a pack, just past it or far past it.
 fn value(i: usize) -> Bytes {
     let len = [100, 1500, 9000][i % 3];
     Bytes::from((0..len).map(|n| (n * 31 + i) as u8).collect::<Vec<_>>())
@@ -83,9 +84,12 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
             for i in 0..60 {
                 turn(&mut db, i).await?;
                 assert_eq!(db.state().record("turn").get(), expected(i + 1), "turn {i}");
+                if i % 8 == 7 {
+                    db.state().collect_garbage().await?;
+                }
                 if i % 7 == 6 {
                     // Another session reads the same turn: the records, and the
-                    // blobs the root names.
+                    // packs the head names.
                     drop(db);
                     let mut other = Db::open(store.clone(), options(None)).await?;
                     assert_eq!(
@@ -103,20 +107,13 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
             assert_eq!(store.violations(), Vec::<String>::new());
             db.execute("BEGIN").await?;
             db.commit_with(Bytes::from_static(b"done")).await?;
-            // A blob per large `turn` value, and a chunk per turn with a row
-            // (the table is one chunk) besides the `CREATE TABLE`: a turn
-            // without SQL changes writes no chunk.
-            let large = (0..60).filter(|i| value(*i).len() > 1024).count() as u64;
-            let put = store.inner.stats().kind("blob").puts;
-            assert_eq!(put, large + 30 + 1, "cached={cached}");
-            // What no root names is garbage, deleted `garbage_after` (16)
-            // flushes later: the live blobs (the `turn` value, the chunk's
-            // base and delta) and what the last 16 flushes left, at most two
-            // each (the old `turn` value, the chunk's old delta).
-            let stored = store.inner.blob_count();
-            assert!(
-                stored <= 3 + 2 * 16,
-                "cached={cached}: {stored} of {put} blobs stored"
+            // What no checkpoint the head names needs is garbage, which a
+            // collection deletes.
+            db.state().collect_garbage().await?;
+            assert_eq!(
+                store.inner.packs(),
+                db.state().needed_packs().await?,
+                "cached={cached}"
             );
         }
         Ok(())
@@ -124,9 +121,9 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
 }
 
 /// A turn of no SQL, in a transaction or without one, is one flush, and puts
-/// only the root.
+/// only its tail entry and the head.
 #[test]
-fn turns_without_sql_put_only_the_root() -> Result<()> {
+fn turns_without_sql_put_only_a_tail_entry_and_the_head() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let mut db = Db::open(store.clone(), options(Some(fresh_namespace()))).await?;
@@ -142,9 +139,12 @@ fn turns_without_sql_put_only_the_root() -> Result<()> {
             db.flush().await?;
         }
         assert_eq!(db.version(), version + 100);
-        // A record of 64 bytes stays in the root, and no chunk changed.
+        // A flush each: a head and a tail entry, which holds the record.
         let stats = store.stats();
-        assert_eq!((stats.kind("root").puts, stats.kind("blob").puts), (100, 0));
+        assert_eq!(
+            (stats.kind("head").puts, stats.kind("tail").puts),
+            (100, 100)
+        );
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
         assert_eq!(db.state().record("turn").get(), vec![99u8; 64]);
@@ -183,7 +183,7 @@ async fn run_case(durability: Durability, cached: bool, nth: usize) -> Result<Op
     let options = |cache| {
         options(cache)
             .with(|o| StateOptions {
-                garbage_after: 4,
+                checkpoint_entries: 4,
                 ..o
             })
             .mode(durability)

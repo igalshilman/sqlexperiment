@@ -19,65 +19,86 @@ crate, which keeps its engine's state private until it flushes into a mutation.
 
 - **The backend is a Restate object's state** ([`kv`](../src/kv.rs)):
   whole-value `get`, and `put` and `delete` of one key, atomic, queued in
-  issue order; `sync` returns once every write before it is stored. No
-  multi-key transactions, compare-and-swap or listing.
+  issue order; `sync` returns once every write before it is stored; `keys`
+  lists every key (Restate's `getKeys()`), to collect garbage. No multi-key
+  transactions or compare-and-swap.
 - **A crash keeps a prefix.** Of the writes since the last sync, a crash (or
   a failed sync) keeps the first few and loses the rest: never a write
   without the ones before it. Values are never torn. Reads see every write
   this owner issued.
 - **One owner at a time.** Restate runs one exclusive handler per object key,
-  and fences a former attempt's writes. This crate does not fence.
+  and fences a former attempt's writes. This crate does not fence. Packs
+  kept beside Restate, in S3 ([`ObjectStoreBlobs`](../src/blobs.rs)), are
+  not fenced: there every pack has a name no other put uses (below).
 - **Round trips dominate.** A flush or open should cost one round trip in
   the steady state.
 
 ## The model
 
-A namespace holds two kinds of keys:
+A namespace holds these keys:
 
-| Key            | Holds                                                                                                                                        |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.              |
+| Key                                     | Holds                                                                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `v20/head`                              | The head, the commit point: the version, the frame size, the checkpoint and the one before, and the tail entries kept. |
+| `v20/tail/<version>/<part>`             | The tail: one entry per flush, the mutation it made, in parts of at most 1 MiB.                                        |
+| `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's manifest, put once and never changed, in parts of 64 KiB.                                               |
+| `checkpoint/<version>-<nonce>`          | A pack, put once and never changed: a checkpoint's frames, patches and large values. In a `BlobStore`.                 |
 
-**Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
-16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A
-chunk is stored as a _base_, its pages compressed against its file's base
-pages if it has one (a VM's memory over its golden image) or against nothing,
-and maybe a _delta_: its pages now, compressed with the base as zstd's
-reference prefix, so a delta costs about what changed since the base. A
-chunk with neither reads as its file's base pages, or zeros; a page of zeros
-in a file without a base reads as a hole. A delta without a base is invalid.
+Packs are kept in Restate by default ([`KvBlobs`](../src/blobs.rs), in
+parts of 64 KiB under `v20/pack/`), or in S3. Manifests are in Restate
+either way: an open reads the manifest with the tail, from Restate, and
+goes to S3 only for the frames and values it reads. A manifest takes about
+1.7 bytes per frame (3 KiB for 100k rows, 30 KiB for 1M), and is written
+whole by each checkpoint.
 
-**Chunk maps.** A file's chunks are named by a copy-on-write radix tree, as
-ZFS names a file's blocks with indirect blocks: nodes of up to `fanout` (64)
-entries, a leaf naming chunks' blobs, an inner node the nodes below, as few
-levels as the file needs. The top node is in the root; the others are blobs.
-A file of at most 64 chunks (1 MiB) is a leaf in the root, a 64 MiB file
-two levels, 10 GiB four. A flush writes a new node on each path it changes
-and keeps every other subtree. A cold open fetches the map whole, a level a
-round trip, up to 512 nodes (512 MiB); past that, a cold read fetches the
-nodes on its path. A subtree of holes is not stored.
+**Frames.** A paged file is a row of frames of `frame_pages` pages (4,
+16 KiB; set when the namespace is made, and kept in the head), as many as
+its size needs, at most `MAX_FILE_BYTES` (10 GiB). A frame is stored as one
+zstd frame, its pages compressed against its file's base pages if it has
+one (a VM's memory over its golden image) or against nothing, so a read
+fetches one range of one pack. A frame of only its base's pages, or zeros,
+is not stored; a page of zeros where the file has no base page reads as a
+hole.
 
-**Records** are whole named values: in the root up to `inline_record_bytes`
-(1 KiB), and a blob of their own when larger, written when they change.
+**The tail.** A flush stores what its mutation changed, as it changed it:
+the records set, the log entries appended and truncations, the files'
+sizes, and each page written, a zstd frame of its own compressed against
+its _reference_: the page as the head's checkpoint holds it (its patch,
+else its frame), else its base's page. The reference stays the same for
+the whole tail, so an entry decodes alone, and a small change to a page
+costs bytes in proportion to what changed since the checkpoint. Applied in
+memory, the tail is the _overlay_: the pages written since the checkpoint,
+the records and logs as they are, and, for a file that shrank, where it was
+cut.
 
-**Logs** are named sequences of entries, each a blob of its own, written
-once (the root holds only its number), at the next index: a mutation appends to a log and truncates it from
-its start (`Mutation::append`, `Mutation::truncate`), at most 4096 entries
-held. A flush writes what it appends, not the log: a log is for changes too
-small to rewrite their whole each time, folded into a record or a file
-now and then and truncated. A truncation applies to the log as the flush
-leaves it, whatever its order among the mutation's appends; an entry
-appended and dropped by one flush is never stored, and a dropped entry's
-blob is garbage.
+**Checkpoints.** A checkpoint is the state as of a version, in one pack,
+with a _manifest_ (in Restate, under the pack's name) that says where every frame, patch, large record and log
+entry is: in this pack, or in an older one. A _patch_ is one page changed
+since its frame was written, compressed against the frame's page. A head
+names its checkpoint and the one before (for readers that opened on it),
+and keeps the tail since the one before.
 
-**One rule.** A blob is put before the first root that names it, and deleted
-only once no root that a reader may still hold names it. The store keeps a
-prefix of the writes, so whatever a crash keeps, the root stored names only
-blobs that are stored. Nothing is overwritten except the root, so there is
-no log to replay, nothing to checkpoint and nothing to repair after a crash.
+**Records** are whole named values: in the manifest up to
+`inline_record_bytes` (1 KiB), and a value of their own in a pack when
+larger, written by the first checkpoint after they change.
 
-Exact encodings are in [FORMAT.md](FORMAT.md).
+**Logs** are named sequences of entries, at the next index: a mutation
+appends to a log and truncates it from its start (`Mutation::append`,
+`Mutation::truncate`), at most 4096 entries held. A flush writes what it
+appends, not the log, and a checkpoint writes each entry once: a log is for
+changes too small to rewrite their whole each time, folded into a record or
+a file now and then and truncated. A truncation applies to the log as the
+flush leaves it, whatever its order among the mutation's appends; an entry
+appended and dropped by one flush is never stored.
+
+**One rule.** A tail entry or a pack is stored before the first head that
+names it, and dropped only once no head that a state may still hold needs
+it. The store keeps a prefix of the writes, so whatever a crash keeps, the
+head stored names only what is stored. Nothing a head names is ever
+overwritten, so there is nothing to repair after a crash.
+
+Exact encodings are in [FORMAT.md](FORMAT.md); the experiment that made
+this layout, with measurements, is [FRAMES.md](FRAMES.md).
 
 ## Flush
 
@@ -86,49 +107,72 @@ SQL writes into a private view (dirty pages and the engine's own WAL file).
 changed pages into the mutation, as writes to the file `db`; the mutation's flush then
 writes every file and record in it, and syncs once:
 
-1. **Encode.** Each chunk a write touched becomes a new delta against its
-   chunk's base: the base is decoded (from the state, the cache, or the
-   store) and the chunk's pages compressed with it as the reference. Once
-   the delta would pass `rebase_ratio` (0.25) of the base's stored bytes,
-   the chunk is written as a new base instead, and its old base and delta
-   die. A record past the inline budget, and every log entry, is
-   compressed into a blob.
-2. **Map.** Each map node on a path to a changed chunk is written anew
-   (below the root's top node, a blob), and the old one dies; so does a
-   node a shrinking file no longer needs.
-3. **Garbage.** Delete the blobs that died `garbage_after` (16) flushes ago
-   or earlier. The root lists each dead blob with the version it died at,
-   so a crash between that root and the delete leaks nothing: the next flush
-   deletes it.
-4. **Blobs.** Put the flush's blobs, at numbers from the root's `next_blob`:
-   none at or past it is named, so a crashed flush's leftovers are simply
-   overwritten.
-5. **Root.** Put the root, at the next version, naming them, with the
-   records and logs, and listing the blobs it names no more as garbage.
-6. **Sync.** One sync stores all of it: one round trip, whatever the flush
-   wrote.
+1. **Checkpoint**, if one is due (below): the pack is put first, and the
+   entry builds on it.
+2. **Entry.** Each page written is compressed against its reference (from
+   the state's decoded frames, the cache, or the store). The records, the
+   log changes and the files' sizes go in as they are. An entry past 1 MiB
+   is cut into parts.
+3. **Put** the entry's parts at the next version, then the head, naming
+   them; a flush that adopts a checkpoint also deletes the tail that the
+   checkpoint before covered.
+4. **Sync.** One sync stores all of it: one round trip, whatever the flush
+   wrote. Once the head is stored, the transaction is durable; before, it
+   doesn't exist.
+5. **Apply** the entry to the overlay, in memory: the state goes on from it.
 
-**Compression.** zstd does the work twice. A chunk compresses its 4 pages
-together, so a B-tree page compresses against its neighbours. And a delta
-uses its base as a reference prefix ("patch from"), so a flush that changes
-a few bytes of a page writes about those bytes plus the frame's overhead, and
-a VM's memory is compressed against its golden image. The rebase bound keeps
-a read at two blobs: the base and one delta.
+**Compression.** zstd does the work twice. A frame compresses its 4 pages
+together, so a B-tree page compresses against its neighbours, and against
+its file's base pages. And a page in the tail, or a patch, uses the page as
+the checkpoint holds it as a reference prefix ("patch from"), so a flush
+that changes a few bytes of a page writes about those bytes plus the
+frame's overhead.
 
-**Bytes.** A flush writes the root (the directory and each file's top map
-node), a node per changed path and level below it, and a delta per changed
-chunk. A node is a few bytes per entry before compression: blob numbers as
-varint differences from the one before. `Ok(FlushReport)` means
-flushed; an error leaves the outcome unknown.
+**Bytes.** A flush writes its entry (each page written, each record set,
+each entry appended) and the head (a few dozen bytes, and a varint per
+tail entry kept). `Ok(FlushReport)` means flushed, and says what it wrote;
+an error leaves the outcome unknown.
 
 **Effects.** A host may flush bytes of its own with a transaction, as a
 record (the SDKs' `effects`): set in the same mutation, they ride in the same
-root put, so they are durable exactly when the transaction is, and stay
+tail entry, so they are durable exactly when the transaction is, and stay
 until a later flush replaces them. The Restate SDKs keep a transaction's
 sends there, as its outbox, and make them once it is flushed. A host may set
 any record (`State::record`) and write paged files of its own
 (`State::file`) in a mutation, made durable by its flush. A mutation that changes
 nothing writes nothing.
+
+## Checkpoint
+
+A flush that writes anything checkpoints first once the tail holds
+`checkpoint_entries` (128) entries since the head's checkpoint, or
+`checkpoint_bytes` (1 MiB); with packs in Restate, where a checkpoint costs
+only its bytes, once it holds the bytes the checkpoint holds (its packs
+and its manifest), if fewer, so a small database's tail stays short. A mutation marked with
+`Mutation::checkpoint` checkpoints however short the tail is. A checkpoint
+writes the state as of the head, into one new pack:
+
+1. **Frames.** A frame the overlay changed only a few pages of is
+   _patched_: each page it changed is put as a patch, compressed against
+   the frame's page, while the frame's patches stay within half its stored
+   bytes. Any other frame the overlay touched (or a cut reached) is rebuilt
+   from its old frame and patches (fetched, in parallel) and the overlay's
+   pages, and compressed again, without patches.
+2. **Values.** Records set since, and log entries appended since: inline
+   in the manifest if small, else a zstd frame of their own.
+3. **Compaction.** A pack that the manifest needs less than half of has
+   its live ranges copied, raw, into the new pack.
+4. **Put** the pack: frames, patches, values, copies. One put, and none if
+   the checkpoint stores nothing outside its manifest.
+5. **Queue** the manifest in Restate, before the head, so the head's sync
+   stores both, in order.
+
+The flush's head then names it, and the head's checkpoint becomes the
+previous one. A checkpoint that fails fails nothing: the flush goes on
+without it and says why (`FlushReport::checkpoint_failed`), the tail grows,
+and the next flush tries again. A file made
+with a base needs it to rebuild its frames, so it takes no write unless it
+is opened with that base.
 
 ## When a flush happens
 
@@ -136,7 +180,7 @@ At `Mutation::flush`, and only then. SQL statements and SQL `COMMIT` change the
 engine's private view; `Sql::flush(&mut mutation)` commits an open SQL transaction
 and copies what the SQL committed into the mutation, as writes to the file `db`;
 the mutation's flush makes it durable with every record and file in the mutation, in
-one root, and consumes the mutation. SQL keeps the copied pages in its view until
+one tail entry, and consumes the mutation. SQL keeps the copied pages in its view until
 the mutation's receipt says the state flushed it: a mutation dropped unflushed discards
 its writes, and SQL's go into the next one. A mutation flushed without
 `Sql::flush` leaves SQL's changes private, for a later one: pairing the two
@@ -145,9 +189,9 @@ is the host's.
 closure returns `Err`.
 
 A continuing session moves its view forward locally instead of reopening:
-the flush's root and blobs become the state's. Each flush costs one round
+the flush's entry joins the state's overlay. Each flush costs one round
 trip. Flushes are sequential: a second flush of the state is refused while
-one runs, and each builds on the root of the one before, once its sync
+one runs, and each builds on the head of the one before, once its sync
 returned.
 
 **Retries without a journal.** With at-least-once delivery, a handler that
@@ -158,7 +202,7 @@ fails after a flush runs again on top of it. Two patterns keep that correct:
   a plain `INSERT` into a table keyed by the id fails on a duplicate, which
   rolls back `Sql::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
   returns no row for one. The dedupe row and the effects become durable
-  together, because they are one root.
+  together, because they are one tail entry.
 - **Outbox for calls.** Flush the intent to call another object or service
   with the transaction, as effects, then make the call, and drop it from a
   later flush once the call is stored. A retry finds it and calls again, so
@@ -176,43 +220,88 @@ does not lose acknowledged work when a later step fails.
 
 ## Open
 
-1. **Get the root.** An owner without a cache, or whose last flush had an
+1. **Get the head.** An owner without a cache, or whose last flush had an
    unknown outcome, syncs in the same round trip, so that what it reads is
-   durable.
-2. **Get what it needs at once,** in one more round trip: the blobs of the
-   large records and log entries, and every chunk of a file of at most `prefetch_pages`
-   (16) pages, such as a small database whole (its map is in the root). A
-   cached owner gets only those the cache lacks.
-3. **Get the maps**, beside step 2: of every file of at most 512 map nodes
-   (512 MiB), a level of all of them a round trip. The first read would
-   descend the map in as many round trips; after this, no read misses it.
+   durable. An owner whose cache holds the state as of this head reuses it,
+   and reads nothing more.
+2. **Get the checkpoint's manifest and the tail past it,** together, and
+   apply the tail in memory.
+3. **Get what the manifest stores of the records and logs,** and every
+   frame and patch of each file of at most `prefetch_pages` (16) pages
+   without a base, such as a small database whole, together. A cached
+   owner gets only those the cache lacks.
 
-There is nothing to confirm, replay or repair: the root read names only
-stored blobs, and whatever a crashed flush left (blobs no root names) is
-overwritten by the next flush.
+There is nothing to confirm, replay against the store or repair: the head
+read names only what is stored, and whatever a crashed flush left (a tail
+entry past the head's version, a pack or manifest no head names) is overwritten by the
+next flush, or collected.
+
+## Garbage
+
+The tail goes with the checkpoints: a flush that adopts a checkpoint deletes
+the tail entries the checkpoint before covered, in its own sync. Those since
+then stay for readers that opened on that one.
+
+Packs and manifests are collected (`State::collect_garbage`, and after
+every flush that checkpoints):
+
+1. **List**, together, Restate's keys once (`KvStore::keys`: Restate's
+   `getKeys()`), for the manifests and the packs kept there, and S3's
+   packs, where they are there. A store that cannot list keeps its
+   garbage: Restate's, the manifests (and its packs); S3's, its packs.
+2. **Keep** what the head's checkpoints need: the packs its checkpoint's and
+   previous checkpoint's manifests name.
+3. **Delete** every listed pack older than the head's previous checkpoint
+   that neither names, and every manifest older than it: in Restate,
+   queued and stored by one sync; in S3, one request.
+
+A later head names only packs its head's checkpoints name, or newer than
+its previous checkpoint, so whatever head a collection read (a reader's, a
+zombie's, an older one), it never deletes what a later head needs.
+Collections may overlap, crash or run beside the owner; the worst is a
+delete of a pack already gone. A collection that fails, or is dropped
+midway, ends its state. A crashed attempt's or a zombie's packs, which no
+head names, are deleted once the head's previous checkpoint passes them.
+
+## Packs beside Restate
+
+Packs in S3 are not fenced: a former attempt that Restate fenced from the
+head may still be uploading one, and an upload may land after its attempt
+failed. So a pack's name is its version and a random nonce: no two puts
+ever use one name, and no head names a pack a zombie puts, nor any before
+it is stored, as a checkpoint is uploaded before its flush puts the head.
+[`ObjectStoreBlobs`](../src/blobs.rs) keeps them under the namespace's
+prefix; a range read is one ranged GET.
+
+Kept in Restate ([`KvBlobs`](../src/blobs.rs), the default), a pack is cut
+into parts of 64 KiB, which a put only queues: the flush's sync stores them
+with its tail entry, before the head that names them, as the store keeps
+writes in order. A range read gets the parts it overlaps.
 
 ## Readers
 
 A reader (`State::open(store).reader()`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
-one. It writes nothing to the store, nor to the cache: its SQL changes stay
-in the session, and its mutations refuse to flush. It reads the root it opened,
-and the blobs that root names never change, so it reads one consistent
+one. It flushes nothing: its SQL changes stay in the session, and its
+mutations refuse to flush. It reads the head it opened, its
+checkpoint and its tail, and packs never change, so it reads one consistent
 state, however the owner flushes meanwhile: snapshot isolation, with no
-check and no retry. The owner deletes a blob `garbage_after` (16) of its
-flushes after the last root that named it, so a reader that outlives that
-many flushes fails with "is gone", and its handler is retried. With the
-cache, a reader reads the blobs the owner cached.
+check and no retry. The packs and the tail its head names stay until the
+owner's second checkpoint after it, so a reader that outlives that fails
+with "is gone", and its handler is retried. A reader may collect garbage
+too. With the cache, a reader reads the ranges the owner cached.
 
 ## Failures
 
 A crash anywhere keeps a prefix of the writes since the last sync.
 
-| Crash after               | State afterwards                            | Recovery                                |
-| ------------------------- | ------------------------------------------- | --------------------------------------- |
-| Some garbage deletes      | The root before, which no longer names them | The next flush deletes the rest         |
-| Some blobs, before a root | Blobs at numbers no root names              | Ignored; the next flush overwrites them |
-| The root                  | The new root, with every blob it names      | Open reads it                           |
+| Crash after                             | State afterwards                              | Recovery                                                |
+| --------------------------------------- | --------------------------------------------- | ------------------------------------------------------- |
+| Some garbage deletes                    | The head, which needs none of them            | The next collection deletes the rest                    |
+| A pack, or some of its parts            | A pack no head names                          | Collected once the head's previous checkpoint passes it |
+| Some of a tail entry, before a head     | An entry past the head's version              | Overwritten by the next flush                           |
+| A flush's tail deletes, before its head | The head before, its tail past its checkpoint | The next checkpoint deletes the rest                    |
+| The head                                | The new head, with everything it names        | Open reads it                                           |
 
 ## Engine integration
 
@@ -220,13 +309,12 @@ How the [`sql`](../../sql/README.md) crate runs the SQL engine on the state.
 The engine sees two virtual files, the database and its WAL file (SQLite's
 own), served by `KvIo`:
 
-- **Reads** of the database file go to the committed view: the chunk's
-  decoded image, else its blobs from the cache, else from the store. The
-  engine issues one dependent read at a time; adjacent queued reads are
-  batched (up to 16) without crossing write, truncate or sync barriers. A get
-  fetches a whole chunk, and after two consecutive chunk misses each further
-  one also fetches the following chunks, in a window that doubles up to 16,
-  so a scan costs a few round trips rather than one per chunk.
+- **Reads** of the database file go to the committed view: the overlay's
+  page, else the page's patch or frame, decoded, from the state, the cache,
+  or the store. The engine issues one dependent read at a time; adjacent
+  queued reads are batched (up to 16) without crossing write, truncate or
+  sync barriers. A get fetches a whole frame, which the state keeps decoded,
+  so its neighbours read without another.
 - **Writes, truncation and sync** stay in private memory. File sync is only an
   ordering barrier. Nothing reaches KV before a mutation's flush, and the engine's
   WAL file never does.
@@ -262,33 +350,35 @@ One `PageCache` per process. A state opens in it under its namespace's key
 (`State::open(store).cached(&cache, key)`), and keeps that namespace's part of
 it (a `NamespaceCache`, inside the crate).
 
-**Blobs.** A blob never changes once a durable root names it, so the cache
-keeps it under (namespace, database, number) in memory, spilling to a local disk file
+**Packs.** A pack never changes, and its name is never reused, so the cache
+keeps its ranges (frames, patches, values, manifests) under (namespace,
+pack, offset) in memory, spilling to a local disk file
 ([foyer](https://github.com/foyer-rs/foyer)), one budget for all namespaces,
 for as long as it likes. There is nothing to invalidate: no versions, no
-generations, no epochs, no read marks. The one care is what goes in: a blob
-is cached only once a durable root names it (after this owner's flush
-synced, or when the owner read it as named by the root it opened), so a
-crashed flush's blobs, which the next flush overwrites, are never cached.
-The database is the root's random identity, drawn when its first root was
-made: a namespace emptied (its object's state cleared) and made again
-numbers its blobs from 0 again, under another identity, so it never reads
-the old database's blobs. Readers never insert. A memory hit is served without foyer's disk hop, and
-concurrent reads of one blob share one get, held weakly, so a cancelled
-read cancels the get.
+generations, no epochs, no read marks. A range of a pack that never became
+durable is harmless: no head will ever name it. The namespace is a
+process-wide counter, drawn per namespace handle, and the disk tier starts
+empty in every process. A memory hit is served without foyer's disk hop,
+and concurrent reads of one range share one get, held weakly, so a
+cancelled read cancels the get.
 
-**Per-namespace state:** the root bytes this owner last read or wrote, the
-version of its last durable flush, and the values parked there (`State::park`:
-an engine, say). Open compares the root it reads with the one it remembers:
-the same bytes, and this owner continues as it left, with its parked engine;
-any other root, and it reads on from the cache by blob number, which is
-still right, and drops only the parked values. A flush whose outcome is unknown
-forgets the root, and the next open syncs first.
+**Per-namespace state:** the head bytes this owner last read or wrote, the
+state as of that head, the version of its last durable flush, and the values
+parked there (`State::park`: an engine, say). Open compares the head it
+reads with the one it remembers: the same bytes, and this owner continues
+as it left, with its parked engine, reading nothing more; any other head,
+and it loads that head's state, from the cache where it can, and drops the
+parked values. A head holds the database's random identity, drawn when it
+was made, so a namespace emptied (its object's state cleared) and made
+again never matches the old one. A flush whose outcome is unknown forgets
+the head, and the next open syncs first. Namespaces are kept by the bytes
+of their states (`PageCacheConfig::namespace_bytes`, 256 MiB, least
+recently used first): a namespace evicted only loads its state again.
 
 **States of one owner.** States may overlap, such as a writer and readers
 for a virtual object's shared handlers. A flush is refused when another
-state flushed since this one opened, rather than replacing the root that
-state wrote. Each reads its own root.
+state flushed since this one opened, rather than replacing the head that
+state wrote. Each reads its own head.
 
 **Engine reuse.** A session that ends cleanly (after a successful flush, or
 read-only) parks its engine, but only if that engine holds the owner's latest
@@ -300,7 +390,7 @@ This keeps the parsed schema warm, which cuts CPU per session several-fold
 ([cache results](../../sql/benches/CACHE_RESULTS.md)). Parked engines share
 a byte budget (`PageCacheConfig::parked_bytes`, 64 MiB), each weighed as 4 MiB
 (turso's buffer pool) plus 16 bytes per byte of schema SQL. Namespace states
-are capped by count. Least recently used go first; dropping either only makes
+are kept by their bytes (above). Least recently used go first; dropping either only makes
 a namespace cold.
 
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
@@ -308,48 +398,70 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                                                                          | Mutations                                                                |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Flush, cached    | 1, the sync                                                                                                                          | A delta (or base) per changed chunk, the root, the old garbage's deletes |
-| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes                                                                                  | The same, plus a map node per changed path and level                     |
-| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                                   | None                                                                     |
-| Cold open        | 2: the root, then a small database whole and the large records; 1 more per map level past the second                                 | None                                                                     |
-| Cold page read   | 1 get of the chunk's base and delta (past 512 MiB, after 1 per map level not yet read); sequential reads fetch up to 16 chunks ahead | None                                                                     |
+| Operation        | Round trips                                                                                                              | Writes                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| Flush, cached    | 1, the sync                                                                                                              | A tail entry (its parts), the head |
+| Flush, cold      | 1, plus 1 to get the frames (or patches) of the pages it writes, where the state lacks them                              | The same                           |
+| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; in S3, 1 PUT before the flush | A pack, a manifest                 |
+| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes  | The deletes                        |
+| Open, with cache | 1, the head, when nothing changed since this owner's flush                                                               | None                               |
+| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                | None                               |
+| Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                         | None                               |
 
-Measurements: [copy-on-write](COW_EXPERIMENT.md),
+Measurements: [frame packs](FRAMES.md),
 [cache](../../sql/benches/CACHE_RESULTS.md).
 
 ## Limits and open questions
 
-- **Size.** A paged file holds at most 10 GiB (655,360 chunks, four map
-  levels); the SQL database is capped there too (`PRAGMA max_page_count`),
-  so a statement that would grow it past fails with SQLITE_FULL and the
-  session goes on. A flush costs a node per map level on each changed path,
-  and a cold open a round trip per level, so a large database pays a few
-  hundred bytes more per flush and a round trip or two more per cold open; a
-  small one, a leaf in the root, neither.
-- **Keys.** Every flush that changes pages puts at least two keys (a blob and
-  the root), and a namespace holds a key per live blob, about two per
-  chunk, plus `garbage_after` flushes' garbage.
-- **Fencing.** Restate provides it: a former attempt's writes never land
-  after a newer owner's, so the state adds none.
+- **Size.** A paged file holds at most 10 GiB; the SQL database is capped
+  there too (`PRAGMA max_page_count`), so a statement that would grow it
+  past fails with SQLITE_FULL and the session goes on. A cold open reads
+  the manifest whole, a frame location per frame: a few bytes per 16 KiB.
+- **Bytes.** A page in the tail is compressed alone against its reference,
+  and a checkpoint rewrites whole frames, so both write more bytes than a
+  delta of what changed would; compaction at half live stores up to twice
+  what is live ([FRAMES.md](FRAMES.md) measures it).
+- **Keys.** Every flush puts at least two keys (a tail entry and the head);
+  a namespace holds a key per part of each tail entry kept, a key per 64
+  KiB of each manifest kept (two checkpoints'), and, with packs in Restate,
+  a key per 64 KiB of each pack. A collection lists every key:
+  a round trip, and its deletes.
+- **Fencing.** Restate provides it for the head and the tail: a former
+  attempt's writes never land after a newer owner's. Packs beside Restate
+  are not fenced; their unique names keep attempts apart.
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
-  either fails the statement. A state keeps at most 1,024 decoded chunk
-  images. Parked engines share a byte budget, by a measured estimate.
+  either fails the statement. A state keeps the tail since its checkpoint in
+  memory, as its overlay, and at most 256 decoded frames and patches. Parked
+  engines share a byte budget, by a measured estimate.
 - **Integrity.** Restate provides it: a value reads back as written. Decoding
-  checks structure and bounds versions, blob numbers, sizes and counts, and
-  every zstd frame carries a checksum, which also catches a delta decoded
-  against the wrong base.
-- **Format.** Only v16, with no migration.
-- **Validation.** A monitor checks every write of the simulator's campaigns
-  against the one rule, decoding every root and blob it sees: a blob put
-  below the root's next number (an overwrite of one a root may name), a root
-  that names a blob not stored or does not build on the root before, a
-  delete of a blob the root does not list as garbage, or a chunk or record
-  that does not decode. The campaigns' readers check the grace. A seeded random campaign over the public API (`tests/campaign.rs`;
-  `STATE_SEEDS=<n>` runs more seeds) mixes changes to records and files,
-  faults, cancellations, crashes, reopens, owners and readers, and compares
-  every reopen and every read with a model; other tests drop a flush after
-  every number of polls, corrupt every stored value, and fuzz the decoders.
-  The Restate crash tests kill processes; there are no power-loss tests.
+  checks structure and bounds versions, sizes, counts and names, and every
+  zstd frame carries a checksum, which also catches a page decoded against
+  the wrong reference.
+- **Format.** Only v20, with no migration.
+- **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
+  differences from the location before, and zstd over the manifest's body;
+  the pages are zstd frames of their own. A zero-copy format (FlatBuffers,
+  Cap'n Proto, rkyv) would save the decode, but nothing here is read
+  uncompressed: a manifest of 70,000 frames (1M rows) is 16–30 KB encoded
+  and decodes in 2 ms, once per cold open (the cache keeps it decoded),
+  where laid out flat it would be about 1 MB, rewritten in Restate at
+  every checkpoint; a frame decompresses in 25 µs.
+- **Validation.** A monitor checks every request of the simulator's
+  campaigns against the one rule, decoding every head, tail entry and
+  manifest it sees, and every page, frame and value they name: a head that
+  names a tail entry or a checkpoint (its manifest and every range it
+  names) not stored, or does not build on the head before; a tail entry
+  put for any version but the next, or a pack's or manifest's part put
+  twice; a delete of a tail entry the head's checkpoint does not cover, of
+  a pack a head may need, or of a manifest of a checkpoint not older than
+  the previous one. A seeded random campaign over the public API
+  (`tests/campaign.rs`; `STATE_SEEDS=<n>` runs more seeds) mixes changes to
+  records, files and logs, random checkpoint thresholds, faults,
+  cancellations, crashes, reopens, owners and readers, with packs in
+  Restate (even seeds) or in an S3 that fails as S3 does (odd seeds:
+  uploads lost, done with the response lost, or landing late), and
+  compares every reopen and every read with a model; other tests crash at
+  every write of a flush, with packs in Restate and in S3, drop a flush
+  after every number of polls, and corrupt every stored value. The Restate
+  crash tests kill processes; there are no power-loss tests.

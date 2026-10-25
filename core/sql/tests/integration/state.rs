@@ -19,7 +19,7 @@ async fn rows(sql: &mut Sql) -> Result<i64> {
 }
 
 /// Nothing SQL or a mutation changes is durable until the mutation flushes, and then
-/// all of it is, under one root; the state reads as last flushed meanwhile.
+/// all of it is, under one head; the state reads as last flushed meanwhile.
 #[test]
 fn a_flush_makes_sql_and_the_rest_durable_together() -> Result<()> {
     futures::executor::block_on(async {
@@ -40,9 +40,11 @@ fn a_flush_makes_sql_and_the_rest_durable_together() -> Result<()> {
         let puts = store.stats().puts;
         mutation.flush().await?;
         assert_eq!(state.version(), 1);
-        // A blob for each file's chunk (the record is inline), then the root.
-        assert_eq!(store.stats().puts - puts, 3);
-        assert_eq!(store.stats().kind("root").puts, 1);
+        // One tail entry, the record and both files' pages in it, then the
+        // head.
+        assert_eq!(store.stats().puts - puts, 2);
+        assert_eq!(store.stats().kind("tail").puts, 1);
+        assert_eq!(store.stats().kind("head").puts, 1);
         assert_eq!(state.record("progress").get(), &b"one"[..]);
         drop(sql);
         drop(state);
@@ -129,6 +131,7 @@ fn a_parked_engine_waits_for_the_next_sql() -> Result<()> {
         let options = || StateSetup {
             options: options(),
             cache: Some(cache.clone()),
+            packs: None,
         };
         let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;
@@ -252,6 +255,7 @@ fn a_session_is_clean_once_the_state_flushed_its_mutation() -> Result<()> {
         let options = || StateSetup {
             options: options(),
             cache: Some(cache.clone()),
+            packs: None,
         };
         let state = options().open(store.clone()).await?;
         let mut sql = Sql::open(&state).await?;

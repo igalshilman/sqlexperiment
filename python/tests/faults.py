@@ -34,6 +34,9 @@ class Faulty:
 
     def __init__(self, store: Store) -> None:
         self.store = store
+        # A store that cannot list its keys stays one: it is never swept.
+        if hasattr(store, "keys"):
+            self.keys = self._keys
 
     def get(self, key):
         maybe_abort()
@@ -52,6 +55,10 @@ class Faulty:
     def sync(self):
         maybe_abort()
         return self.store.sync()
+
+    def _keys(self):
+        maybe_abort()
+        return self.store.keys()
 
 
 if __name__ == "__main__":

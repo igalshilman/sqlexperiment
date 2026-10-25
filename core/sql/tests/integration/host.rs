@@ -28,9 +28,23 @@ pub struct Setup(pub StateSetup, pub Durability);
 impl Setup {
     /// These options, changed by `change`.
     pub fn with(self, change: impl FnOnce(StateOptions) -> StateOptions) -> Self {
-        let Self(StateSetup { options, cache }, durability) = self;
+        let Self(
+            StateSetup {
+                options,
+                cache,
+                packs,
+            },
+            durability,
+        ) = self;
         let options = change(options);
-        Self(StateSetup { options, cache }, durability)
+        Self(
+            StateSetup {
+                options,
+                cache,
+                packs,
+            },
+            durability,
+        )
     }
 
     /// These options, flushed as `durability` says.
@@ -123,6 +137,18 @@ impl Db {
 
     /// Flush, and end the session (leaving its engine).
     pub async fn save(mut self) -> Result<FlushReport> {
+        self.flush().await
+    }
+
+    /// Flush, then checkpoint it in a flush of its own: the database's pages
+    /// are read from the checkpoint's pack after it. That flush's report.
+    pub async fn save_checkpointed(mut self) -> Result<FlushReport> {
+        self.flush().await?;
+        let checkpointed = self.sql.state().record("checkpointed");
+        let version = self.sql.state().version().to_le_bytes();
+        self.mutation
+            .set(&checkpointed, Bytes::copy_from_slice(&version))?;
+        self.mutation.checkpoint();
         self.flush().await
     }
 

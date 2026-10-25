@@ -48,7 +48,7 @@ pub struct Session {
 impl Session {
     /// Open the database of `namespace` over `store`, kept warm in the
     /// process-wide page cache. A `reader` reads the namespace beside its
-    /// owner (see [`state::Open::reader`]): from the blobs the owner cached,
+    /// owner (see [`state::Open::reader`]): from the packs the owner cached,
     /// writing nothing to the store or the cache, it reads the state it
     /// opened on throughout.
     pub async fn open(store: Arc<dyn KvStore>, namespace: &str, reader: bool) -> Result<Self> {

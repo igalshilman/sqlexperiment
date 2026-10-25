@@ -1,24 +1,26 @@
 //! The owner cache across owners, crashes and readers: no session reads a
-//! blob of a flush that was lost, and a reader reads the state it opened
+//! page of a flush that was lost, and a reader reads the state it opened
 //! while the owner flushes.
 #![cfg(feature = "simulation")]
 mod support;
 
 use futures::future::Either;
-use state::{Result, StateOptions, kv::KvStore, simulation::*};
+use state::{Result, State, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-/// Small chunks, rebased often, and large records in blobs.
+/// Small frames, large records in packs, and a checkpoint
+/// every other flush.
 fn options(cache: Option<&Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            chunk_pages: 2,
-            rebase_ratio: 0.1,
+            frame_pages: 2,
             inline_record_bytes: 256,
+            checkpoint_entries: 2,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
+        packs: None,
     }
 }
 
@@ -48,9 +50,9 @@ async fn flush(
 
 /// Owner A's flush fails at its sync; A reopens and reads what the failed
 /// flush wrote (visible, but synced by that open). A crash loses whatever is
-/// not durable. Another process, B, takes over and flushes, at blob numbers
-/// the lost flush may have used. A, back with its cache, must read B's
-/// pages, not blobs it cached.
+/// not durable. Another process, B, takes over and flushes, at versions the
+/// lost flush may have used. A, back with its cache, must read B's pages,
+/// not the ones it cached.
 #[test]
 fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
     futures::executor::block_on(async {
@@ -103,8 +105,8 @@ fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
 }
 
 /// State A's flush waits on its sync when a second owner state, B, opens:
-/// the store shows A's root, not yet durable. B must not cache the blobs it
-/// names: A's flush is lost, and another process flushes at those numbers.
+/// the store shows A's head, not yet durable. B must not cache the state it
+/// names: A's flush is lost, and another process flushes at those versions.
 #[test]
 fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<()> {
     futures::executor::block_on(async {
@@ -144,7 +146,7 @@ fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<
         }
         drop(session);
 
-        // Another process flushes, at the numbers the lost flush used.
+        // Another process flushes, at the versions the lost flush used.
         flush(
             &store,
             Some(&b),
@@ -159,11 +161,11 @@ fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<
 }
 
 /// The object's state is cleared, and another process makes a new database
-/// in the same namespace, numbering its blobs from 0 again. The owner, back
-/// with its cache, must read the new database's pages, not the blobs it
-/// cached of the old one under the same numbers.
+/// in the same namespace, numbering its versions from 0 again. The owner,
+/// back with its cache, must read the new database's pages, not the ones it
+/// cached of the old one at the same versions.
 #[test]
-fn a_namespace_made_again_never_reads_the_old_databases_blobs() -> Result<()> {
+fn a_namespace_made_again_never_reads_the_old_databases_pages() -> Result<()> {
     futures::executor::block_on(async {
         let a = fresh_namespace();
         let old: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
@@ -194,9 +196,11 @@ fn a_namespace_made_again_never_reads_the_old_databases_blobs() -> Result<()> {
     })
 }
 
-/// A reader beside the owner, which flushes meanwhile: it reads the state
-/// it opened, and never writes to the store; once the owner deleted a blob
-/// it needs, a read of it fails, never reads another state.
+/// A reader beside the owner, which flushes and checkpoints meanwhile, and a
+/// worker that collects garbage after each flush: the reader reads the state
+/// it opened, and never writes to the store; once the owner's second
+/// checkpoint since dropped a pack it needs, a read of it fails, never reads
+/// another state.
 #[test]
 fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
     futures::executor::block_on(async {
@@ -205,7 +209,9 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
         let store: Arc<dyn KvStore> = Arc::new(memory.clone());
         let owner = fresh_namespace();
         let mut model = Model::default();
-        let grace = StateOptions::default().garbage_after;
+        // The owner's second checkpoint after the reader opened may come at
+        // its third flush.
+        let grace = 3;
         let (mut read, mut gone) = (0, 0);
         for round in 0..60 {
             let ops: Vec<Op> = (0..1 + rng.below(6))
@@ -218,16 +224,20 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                     ..StateOptions::default()
                 },
                 cache: rng.percent(50).then(|| owner.clone()),
+                packs: None,
             };
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();
-            // Past the grace sometimes: then blobs it reads may be gone.
-            let flushes = rng.pick(&[0, 1, 3, grace - 1, grace + 4]);
+            // Past the grace sometimes: then packs it reads may be gone.
+            let flushes = rng.pick(&[0, 1, grace - 1, grace, grace + 4]);
             for _ in 0..flushes {
                 // Pages the reader reads often, and anything else.
                 let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
                 let ops = [hot, Op::random(&mut rng)];
                 flush(&store, Some(&owner), &mut model, &ops).await?;
+                // A worker collects garbage beside them.
+                let worker = State::open(store.clone()).reader().await?;
+                worker.collect_garbage().await?;
             }
             for _ in 0..16 {
                 let name = rng.pick(&FILES);

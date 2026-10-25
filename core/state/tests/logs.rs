@@ -1,6 +1,6 @@
 //! Logs: entries appended in a mutation are read once flushed, from the
 //! index each took, and survive a reopen; a truncation drops a prefix, the
-//! entries the same mutation appends included, and its blobs become garbage;
+//! entries the same mutation appends included, and checkpoints drop them;
 //! a write refuses what no flush could store; a reader keeps the log it
 //! opened.
 #![cfg(feature = "simulation")]
@@ -8,7 +8,7 @@ use bytes::Bytes;
 use state::{
     MAX_LOG_ENTRIES, MAX_RECORD_BYTES, Result, State, StateOptions, kv::KvStore, simulation::*,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 fn entries(values: &[&str]) -> Vec<Bytes> {
     values
@@ -67,18 +67,15 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
         mutation.append(&log, "d".into())?;
         mutation.flush().await?;
         assert_eq!((log.first(), log.entries()), (1, entries(&["b", "c", "d"])));
-        // Appended, then truncated past: the entry never lands. Each entry
-        // is a blob of its own: one more, for "f".
+        // Appended, then truncated past: the entry never lands.
         let mut mutation = state.mutation();
         mutation.append(&log, large(5))?;
         mutation.append(&log, "f".into())?;
         mutation.truncate(&log, 5)?;
-        let blobs = store.blob_count();
-        mutation.flush().await?;
-        assert_eq!(
-            store.blob_count(),
-            blobs + 1,
-            "the large entry, never stored"
+        let report = mutation.flush().await?;
+        assert!(
+            report.entry_bytes < 100,
+            "the large entry, never stored: {report:?}"
         );
         assert_eq!(
             (log.first(), log.next(), log.entries()),
@@ -95,34 +92,55 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
     })
 }
 
-/// A truncated entry's blob is garbage: deleted [`StateOptions::garbage_after`]
-/// flushes later.
+/// An entry that does not compress: stored, it is as large as it is.
+fn noise(n: u8, len: usize) -> Bytes {
+    let mut seed = u64::from(n) + 1;
+    (0..len)
+        .map(|_| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 56) as u8
+        })
+        .collect()
+}
+
+/// A truncated entry leaves the tail with the checkpoint after the next, and
+/// is in no checkpoint since: the pack that held it, mostly dead, is
+/// compacted into a later one, then deleted.
 #[test]
-fn a_truncated_entrys_blob_is_deleted_later() -> Result<()> {
+fn a_truncated_entry_is_dropped_by_checkpoints() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let options = StateOptions {
-            garbage_after: 2,
+            checkpoint_entries: 1,
             ..Default::default()
         };
         let state = State::open(store.clone()).options(options).await?;
         let log = state.log("turns");
         let mut mutation = state.mutation();
-        mutation.append(&log, large(1))?;
-        mutation.append(&log, large(2))?;
+        mutation.append(&log, noise(1, 60_000))?;
+        mutation.append(&log, noise(2, 2_000))?;
         mutation.flush().await?;
-        assert_eq!(store.blob_count(), 2);
+        assert_eq!(store.tail_entries(), BTreeSet::from([1]));
         let mut mutation = state.mutation();
         mutation.truncate(&log, 1)?;
-        mutation.flush().await?;
-        assert_eq!(store.blob_count(), 2, "a reader may still read it");
-        for n in 0..2 {
+        let report = mutation.flush().await?;
+        let first = report.checkpoint.expect("the first checkpoint");
+        assert_eq!((first.version, first.values), (1, 2), "both live then");
+        assert!(first.pack_bytes > 60_000, "{first:?}");
+        let mut checkpoints = Vec::new();
+        for n in 0..3 {
             let mut mutation = state.mutation();
             mutation.set(&state.record("n"), Bytes::from(vec![n]))?;
-            mutation.flush().await?;
+            checkpoints.push(mutation.flush().await?.checkpoint.expect("a checkpoint"));
         }
-        assert_eq!(store.blob_count(), 1);
-        assert_eq!(log.entries(), vec![large(2)]);
+        assert_eq!(checkpoints[0].compacted, 1, "{checkpoints:?}");
+        assert!(checkpoints[0].pack_bytes < 10_000, "{checkpoints:?}");
+        assert_eq!(checkpoints[1].deleted, 1, "{checkpoints:?}");
+        assert_eq!(store.tail_entries(), BTreeSet::from([4, 5]));
+        assert!(store.stored_bytes() < 20_000, "{}", store.stored_bytes());
+        let reopened = State::open(store).await?.log("turns");
+        assert_eq!(reopened.entries(), vec![noise(2, 2_000)]);
+        assert_eq!(log.entries(), vec![noise(2, 2_000)]);
         Ok(())
     })
 }
@@ -187,7 +205,7 @@ fn a_write_refuses_what_no_flush_could_store() -> Result<()> {
 }
 
 /// A reader reads the log as it opened it while the owner appends and
-/// truncates, its blobs included.
+/// truncates, its large entry included.
 #[test]
 fn a_reader_keeps_the_log_it_opened() -> Result<()> {
     futures::executor::block_on(async {

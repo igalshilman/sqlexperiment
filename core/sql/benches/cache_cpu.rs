@@ -122,7 +122,7 @@ async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> R
 }
 
 struct Sample {
-    blob_gets: u64,
+    pack_gets: u64,
     round_trips: u64,
     allocations: u64,
     allocated: u64,
@@ -146,7 +146,7 @@ async fn run(base: &MemoryKv, capacity: usize) -> Result<Sample> {
     }
     let micros = started.elapsed().as_micros();
     Ok(Sample {
-        blob_gets: store.inner.stats().kind("blob").gets,
+        pack_gets: store.inner.stats().kind("pack").gets,
         round_trips: store.round_trips(),
         allocations: ALLOCATIONS.load(Relaxed) - allocations,
         allocated: ALLOCATED.load(Relaxed) - allocated,
@@ -164,7 +164,7 @@ fn main() -> Result<()> {
         let (base, pages) = baseline().await?;
         let logical = pages as usize * 4096;
         println!(
-            "capacity_fraction,capacity_bytes,db_pages,sessions,blob_gets,round_trips,allocations,allocated_bytes,cache_bytes,median_micros"
+            "capacity_fraction,capacity_bytes,db_pages,sessions,pack_gets,round_trips,allocations,allocated_bytes,cache_bytes,median_micros"
         );
         for fraction in FRACTIONS {
             let capacity = (logical as f64 * fraction) as usize;
@@ -176,8 +176,8 @@ fn main() -> Result<()> {
             for s in &samples[1..] {
                 // Memory use depends on the disk tier's timing; traffic does not.
                 assert_eq!(
-                    (s.blob_gets, s.round_trips),
-                    (first.blob_gets, first.round_trips),
+                    (s.pack_gets, s.round_trips),
+                    (first.pack_gets, first.round_trips),
                     "counters must not vary"
                 );
             }
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
             micros.sort();
             println!(
                 "{fraction},{capacity},{pages},{SESSIONS},{},{},{},{},{},{}",
-                first.blob_gets,
+                first.pack_gets,
                 first.round_trips,
                 first.allocations,
                 first.allocated,

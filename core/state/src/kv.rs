@@ -30,4 +30,16 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
+    /// Every key, stored or written since, as Restate's `getKeys`: what
+    /// checkpoints kept here need ([`crate::blobs::KvBlobs`]), to delete the
+    /// packs no checkpoint needs. A store that cannot fails with
+    /// [`io::ErrorKind::Unsupported`]; its garbage stays.
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this store cannot list its keys",
+            ))
+        })
+    }
 }

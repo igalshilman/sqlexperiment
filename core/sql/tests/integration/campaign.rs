@@ -4,7 +4,7 @@
 //! `Sql` with a flush per turn, with random storage faults (an error
 //! before or after a request, a cancellation, a crash keeping any prefix of
 //! the writes) and reopens, over the protocol monitor, with and without the
-//! page cache, and with random chunk sizes, rebase ratios and garbage grace.
+//! page cache, and with random frame sizes and checkpoint intervals.
 //!
 //! After every reopen the store must hold what a reference engine holds that
 //! replays only acknowledged transactions: every acknowledged commit, and an
@@ -23,7 +23,8 @@ use crate::{
 use bytes::Bytes;
 use sql::{Rows, Sql, binding::Session};
 use state::{
-    Result, State, StateOptions,
+    HEAD_KEY, Result, State, StateOptions, TAIL_PREFIX,
+    blobs::KV_PREFIX,
     kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
@@ -262,26 +263,26 @@ impl Campaign {
         let cached = seed % 4 >= 2;
         let options = StateSetup {
             options: StateOptions {
-                chunk_pages: rng.pick(&[1, 4, 16]),
-                fanout: rng.pick(&[2, 3, 64]),
-                rebase_ratio: rng.pick(&[0.0, 0.25, 4.0]),
-                garbage_after: 1 + rng.below(4),
+                frame_pages: rng.pick(&[1, 4, 16]),
+                checkpoint_entries: 1 + rng.below(4),
+                checkpoint_bytes: rng.pick(&[0, 1 << 20]),
                 inline_record_bytes: rng.pick(&[64, 1024]),
                 prefetch_pages: rng.pick(&[0, 16]),
             },
             cache: cached.then(fresh_namespace),
+            packs: None,
         };
         let session = seed.is_multiple_of(2);
         let summary = format!(
-            "{}, cached: {cached}, chunks of {} pages, rebase over {}, garbage after {} flushes, inline records to {} bytes, prefetch {}",
+            "{}, cached: {cached}, frames of {} pages, a checkpoint every {} entries or {} bytes (0: by count only), inline records to {} bytes, prefetch {}",
             if session {
                 "binding session"
             } else {
                 "Sql turns"
             },
-            options.options.chunk_pages,
-            options.options.rebase_ratio,
-            options.options.garbage_after,
+            options.options.frame_pages,
+            options.options.checkpoint_entries,
+            options.options.checkpoint_bytes,
             options.options.inline_record_bytes,
             options.options.prefetch_pages,
         );
@@ -393,8 +394,9 @@ impl Campaign {
         }
         let operation = self.rng.pick(operations);
         let prefixes: &[&str] = match operation {
-            Operation::Put => &["", "", "", "v16/root", "v16/blob/"],
-            Operation::Get => &["", "v16/root", "v16/blob/"],
+            Operation::Put => &["", "", "", HEAD_KEY, TAIL_PREFIX, KV_PREFIX],
+            Operation::Get => &["", HEAD_KEY, TAIL_PREFIX, KV_PREFIX],
+            Operation::Delete => &["", TAIL_PREFIX, KV_PREFIX],
             _ => &[""],
         };
         Some(Failpoint {
@@ -426,6 +428,7 @@ impl Campaign {
                 Operation::Sync,
                 Operation::Sync,
                 Operation::Sync,
+                Operation::Keys,
             ],
         );
         self.log(|| format!("{what} {plan:?}"));

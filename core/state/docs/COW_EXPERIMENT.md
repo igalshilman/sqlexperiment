@@ -144,7 +144,8 @@ Restate retries the handler.
 
 ### Is the log gone?
 
-Completely: format v16 (`v16/root`, `v16/blob/<n>`), with no
+Completely: format v16 (`v16/root`, `v16/blob/<n>`; since v17, with
+blob claims and sweeps instead of the root's garbage list), with no
 migration. The benches, analyzers and results that measured the log
 (`log_shipping`, `page_compression`, their scripts and CSVs, the TLA+
 specification and its review) are deleted; `CACHE_RESULTS.md` and
@@ -231,4 +232,4 @@ SDKs) are gone.
   larger.
 - **Uncached flushes fetch bases** before they write deltas (above).
 - **Restate's state grows a key per blob**, about two per chunk, which its
-  UI lists unless hidden by the `v16/` prefix (the SDKs set it).
+  UI lists unless hidden by the `v17/` prefix (the SDKs set it).

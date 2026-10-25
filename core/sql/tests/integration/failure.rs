@@ -5,7 +5,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, Either, select},
 };
-use state::{Result, StateOptions, kv::KvStore, simulation::MemoryKv};
+use state::{Result, StateOptions, blobs::KV_PREFIX, kv::KvStore, simulation::MemoryKv};
 use std::{
     io,
     sync::{
@@ -23,9 +23,9 @@ struct ControlledKv {
 impl KvStore for ControlledKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
-            if key.starts_with("v16/blob/") {
+            if key.starts_with(KV_PREFIX) {
                 if self.fail_reads.load(Ordering::SeqCst) {
-                    return Err(io::Error::other("injected blob-read failure"));
+                    return Err(io::Error::other("injected pack-read failure"));
                 }
                 let signal = self.gate.lock().unwrap().take();
                 if let Some(signal) = signal {
@@ -53,9 +53,9 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         fail_reads: AtomicBool::new(false),
         gate: Mutex::new(None),
     });
-    // A page per blob, so reading `t` reads a blob of its own.
+    // A page per frame, so reading `t` reads a frame of its own.
     let options = StateOptions {
-        chunk_pages: 1,
+        frame_pages: 1,
         ..StateOptions::default()
     };
     let mut db = Db::open(store.clone(), options).await?;
@@ -63,11 +63,11 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         .await?;
     db.execute("INSERT INTO t VALUES(1,10)").await?;
     db.checkpoint().await?;
-    db.save().await?;
+    db.save_checkpointed().await?;
     Ok(store)
 }
 
-/// Blob reads happen during the query, not at open.
+/// Pack reads happen during the query, not at open.
 fn no_prefetch() -> StateOptions {
     StateOptions {
         prefetch_pages: 0,
@@ -84,7 +84,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
         store.fail_reads.store(true, Ordering::SeqCst);
         match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
-            Err(e) => assert!(e.to_string().contains("injected blob-read failure")),
+            Err(e) => assert!(e.to_string().contains("injected pack-read failure")),
         }
         drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);

@@ -101,18 +101,18 @@ export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, '
  * loading every page; and no journal kept after an invocation completes,
  * since it holds every page it read.
  *
- * TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
+ * TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
  */
 export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its root and blobs in the object's state, `v16/...`; and
+ * journal view (its head, tail, manifests and packs in the object's state, `v20/...`; and
  * the `sync` runs after its writes).
  */
 export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v16/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v20/',
 };
 
 // Marks the handlers made here.
@@ -135,6 +135,7 @@ function host(ctx: restate.ObjectContext | restate.ObjectSharedContext, shared: 
     get: (name, serde, entry) => ctx.get(name, serde, entry),
     set: (name, value, serde, entry) => exclusive.set(name, value, serde, entry),
     clear: (name, entry) => exclusive.clear(name, entry),
+    stateKeys: () => ctx.stateKeys(),
     run: (name, action) => exclusive.run(name, action),
     genericSend: (send) => ctx.genericSend(send),
   };

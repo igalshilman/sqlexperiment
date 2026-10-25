@@ -2,8 +2,10 @@
 //!
 //! The host passes its asyncio event loop and one dispatcher function,
 //! `dispatch(op, key, value, reply)`, which `restate_sql/__init__.py` builds from
-//! a store object (`get`, `set`, `clear`, `sync`). Every request is scheduled
-//! on the loop with `call_soon_threadsafe`, which runs callbacks in the order
+//! a store object (`get`, `set`, `clear`, `sync`, and `keys` if it lists its
+//! keys: then a checkpoint deletes the packs no checkpoint needs, see
+//! [`state::State::collect_garbage`]). Every request is scheduled on the loop
+//! with `call_soon_threadsafe`, which runs callbacks in the order
 //! they were scheduled, so a read sees the writes before it.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
@@ -27,6 +29,7 @@ const GET: u32 = 0;
 const SET: u32 = 1;
 const CLEAR: u32 = 2;
 const SYNC: u32 = 3;
+const KEYS: u32 = 4;
 
 /// What a request's reply carries: the value read, or the store's error.
 type Answer = Result<Option<Vec<u8>>, String>;
@@ -88,7 +91,7 @@ impl PyStore {
         .map_err(io_error)
     }
 
-    /// A request that answers: a read, or a sync.
+    /// A request that answers: a read, a sync, or the keys.
     async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
         let (sender, receiver) = oneshot::channel();
         let reply = Reply {
@@ -118,6 +121,20 @@ impl KvStore for PyStore {
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async { self.request(SYNC, "").await.map(drop) })
+    }
+
+    /// The store's keys, one per line; nothing where it has no `keys`.
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        Box::pin(async move {
+            let Some(lines) = self.request(KEYS, "").await? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the store has no keys",
+                ));
+            };
+            let lines = std::str::from_utf8(&lines).map_err(io_error)?;
+            Ok(lines.lines().map(str::to_owned).collect())
+        })
     }
 }
 
@@ -328,5 +345,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SET", SET)?;
     module.add("CLEAR", CLEAR)?;
     module.add("SYNC", SYNC)?;
+    module.add("KEYS", KEYS)?;
     Ok(())
 }

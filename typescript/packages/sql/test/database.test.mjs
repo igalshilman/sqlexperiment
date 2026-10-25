@@ -357,9 +357,58 @@ test('a statement that commits resolves once its writes are stored, however many
     'INSERT INTO t(b) SELECT randomblob(3000) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)',
   );
   assert.equal(backend.unconfirmed.length, 0);
-  assert.ok(backend.stored.size > 500, `${backend.stored.size} keys stored`);
+  const tail = [...backend.stored.keys()].filter((key) => key.startsWith('v20/tail/')).length;
+  assert.ok(tail > 8, `${tail} tail parts stored`);
   await db.save();
 });
+
+/** How many pack parts `backend` stores. */
+const packs = (backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v20/pack/')).length;
+
+/** The pack parts left after 100 commits that each replace a row, with a store that lists its keys or not. */
+const packsAfterCommits = async (listing) => {
+  const backend = new Backend();
+  const store = backend.request();
+  // As the object's ctx.stateKeys().
+  if (listing) store.keys = async () => [...backend.stored.keys(), ...backend.unconfirmed.map(([key]) => key)];
+  const db = await open(fresh(), store);
+  await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)');
+  for (let i = 0; i < 100; i++) await db.execute('INSERT OR REPLACE INTO t VALUES(1, randomblob(3000))');
+  await db.save();
+  return packs(backend);
+};
+
+test('a store that lists its keys is collected; one that cannot keeps its packs', async () => {
+  const [collected, kept] = [await packsAfterCommits(true), await packsAfterCommits(false)];
+  assert.ok(collected < 10 && kept > 40, `${collected} pack parts left collected, ${kept} kept`);
+});
+
+for (const { how, keys } of [
+  { how: 'rejects', keys: async () => Promise.reject(new Error('listing failed')) },
+  {
+    how: 'throws',
+    keys: () => {
+      throw new Error('listing failed');
+    },
+  },
+]) {
+  test(`a listing that ${how} fails the commit that collects, which landed`, async () => {
+    const backend = new Backend();
+    const ns = fresh();
+    const store = backend.request();
+    store.keys = keys;
+    const db = await open(ns, store);
+    await db.execute('CREATE TABLE t(n INTEGER)');
+    let committed = 1;
+    // A commit that checkpoints collects.
+    await assert.rejects(async () => {
+      for (; committed < 40; committed++) await db.execute('INSERT INTO t VALUES (?)', [committed]);
+    }, /listing failed/);
+    const reopened = await open(ns, backend.request());
+    assert.deepEqual(await reopened.query('SELECT count(*) FROM t'), [[committed]]);
+    await reopened.close();
+  });
+}
 
 /** A reader's view of `backend`: what is stored and written so far, and no writes. */
 const readerOf = (backend) => ({

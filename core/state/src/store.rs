@@ -1,52 +1,37 @@
-//! The stored state: immutable blobs, and one root that names them.
+//! The state as stored: a checkpoint, and the tail of flushes since, applied
+//! in memory (see [`crate::format`] for what is stored where).
 //!
-//! | Key            | Holds                                                                     |
-//! | -------------- | ------------------------------------------------------------------------- |
-//! | `v16/root`     | The commit point: the directory of files and records, and what each names |
-//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, a map node, or a record or log entry |
+//! **Flush.** A flush encodes its mutation as one tail entry (each page it
+//! wrote a zstd frame of its own), puts it and the head, and syncs: one round
+//! trip. Its pages join the *overlay*: the pages written since the
+//! checkpoint, kept as their frames.
 //!
-//! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
-//! each. A chunk is stored as a *base*, a frame of its pages compressed
-//! against its file's [`Base`] pages (a VM's golden image) if it has one, and,
-//! maybe, a *delta*: a frame of its pages now, compressed against the base,
-//! so it costs about what changed since the base. A chunk with neither is
-//! its file's base pages, or zeros. A flush writes each chunk it changed as a
-//! new delta against the chunk's base, or, once that delta passes
-//! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
-//! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
-//! are in the root. A log's entries are blobs of their own, one each, from
-//! the first not yet truncated, written once: the root, which every flush
-//! rewrites, holds only their numbers.
+//! **Checkpoint.** Now and then, a flush first writes the durable state as a
+//! checkpoint: each frame the overlay changed, rebuilt from its frame in the
+//! last checkpoint and the overlay's pages, the records set and the log
+//! entries appended since, into one new pack, and a manifest, in Restate,
+//! that names those, and every other frame and value where the checkpoints
+//! before put them. The live frames and values of packs mostly dead move into it too
+//! (compaction). The flush's head then names it, and the overlay empties.
 //!
-//! **One rule.** A blob is written before the first root that names it, and
-//! deleted only once no root a reader may hold names it. The store keeps
-//! writes in issue order, so a root is stored only with the blobs it names:
-//! whatever prefix of a flush's writes a crash keeps, the root stored names
-//! only blobs that are there. There is no log to replay, nothing is
-//! overwritten, and nothing needs repair after a crash.
+//! **Open.** Get the head; then, together, the checkpoint's manifest and the
+//! tail entries since it, which the open applies; then, together, the large
+//! records and log entries the manifest stores, and small files' frames. An
+//! owner whose cache holds the state of the head it read reads nothing more.
 //!
-//! **Flush.** Delete the blobs that died [`StateOptions::garbage_after`]
-//! flushes ago or earlier; put the flush's blobs, at numbers no durable root
-//! has used; put the root, at the next version, naming them, and listing the
-//! blobs it no longer names as garbage, with its version; sync once.
-//!
-//! **Open.** Get the root, and the blobs of its large records (and, cold, of a
-//! small file), in one more round trip. A page read gets its chunk's base and
-//! delta together, in one.
-//!
-//! **Readers and caching.** A blob's content never changes once a durable root
-//! names it, so any state may cache it under its number (and its database's
-//! random identity, which a namespace made again changes) forever, and a
-//! state reads the root it opened as a consistent snapshot while the owner
-//! flushes, for [`StateOptions::garbage_after`] of the owner's flushes. (A
-//! crashed flush's blobs, which no durable root names, are overwritten by
-//! the next flush: nothing caches them, since nothing caches a blob before a
-//! durable root names it.)
+//! **Read.** A page in the overlay is decoded from its frame; any other is
+//! sliced from its frame in a pack, fetched with one ranged get, which the
+//! cache keeps under its location: a pack never changes, and its name is
+//! unique.
 use crate::{
     Base, PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
-    kv::KvStore,
-    map::{MAX_FANOUT, Map, Node, Nodes, Shape},
+    format::{
+        Checkpoint, Entry, FileChange, FileIndex, Head, Location, LogChange, LogIndex,
+        MAX_FILE_BYTES, MAX_FRAME_PAGES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_NAMES,
+        MAX_RECORD_BYTES, Manifest, PackId, Value, invalid,
+    },
+    tail::Tiered,
     zstd,
 };
 use bytes::Bytes;
@@ -57,82 +42,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// The root's key: the one key a flush overwrites, and its commit. An open
-/// reads it first, so a host whose store can send keys ahead of the first
-/// read (Restate's eager state) should send this one.
-pub const ROOT_KEY: &str = "v16/root";
-pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
-const ROOT_MAGIC: &[u8; 4] = b"SR16";
-/// Bytes of a record's value, or of a log entry.
-pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
-/// Entries a log holds: appending past it is refused, until a truncation
-/// makes room.
-pub const MAX_LOG_ENTRIES: u64 = 4096;
-/// Bytes of a record's or file's name.
-pub const MAX_NAME_BYTES: usize = 255;
-/// Bytes of a paged file: 10 GiB.
-pub const MAX_FILE_BYTES: u64 = 10 << 30;
-/// Most pages a chunk holds: 1 MiB.
-pub(crate) const MAX_CHUNK_PAGES: u64 = 256;
-/// Files and records a root may name.
-const MAX_FILES: u32 = 1 << 16;
-/// Largest version or blob number a root may hold, far from overflow.
-const MAX_SEQUENCE: u64 = 1 << 62;
-/// Largest decoded root.
-const MAX_ROOT_BYTES: usize = 64 << 20;
-/// Chunk images a state keeps decoded before it drops them all.
-const KEPT_IMAGES: usize = 1024;
-/// Map nodes a state keeps decoded before it drops them all.
-const KEPT_NODES: usize = 1024;
-/// Most map nodes an open fetches, a level a round trip, so that a cold
-/// read pays for the map at most once: 512 MiB of file at the default
-/// fanout and chunk size.
-const PREFETCH_MAP_NODES: u64 = 512;
-/// Consecutive chunk misses that start sequential readahead.
-const READAHEAD_AFTER: u32 = 2;
-/// Most chunks read ahead at once.
-const MAX_READAHEAD: u64 = 16;
-
-pub(crate) fn blob_key(n: u64) -> String {
-    format!("{BLOB_PREFIX}{n:x}")
-}
-
-/// The blob number a key names.
-#[cfg(feature = "simulation")]
-pub(crate) fn parse_blob_key(key: &str) -> Option<u64> {
-    u64::from_str_radix(key.strip_prefix(BLOB_PREFIX)?, 16).ok()
-}
-
-pub(crate) fn put_varint(out: &mut Vec<u8>, mut n: u64) {
-    while n >= 0x80 {
-        out.push(n as u8 | 0x80);
-        n >>= 7;
-    }
-    out.push(n as u8);
-}
-
-pub(crate) fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
-    let mut n = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*at)?;
-        *at += 1;
-        n |= u64::from(byte & 0x7f).checked_shl(shift)?;
-        if byte & 0x80 == 0 {
-            return (shift < 63 || byte <= 1).then_some(n);
-        }
-    }
-    None
-}
-
-pub(crate) fn invalid(what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
-}
-
-/// Put `value` in `flush` as a blob of its own: its number.
-fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<u64> {
-    let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
-    Ok(flush.put(frame, None))
-}
+/// Decoded frames a state keeps before it drops them all.
+const KEPT_FRAMES: usize = 256;
 
 fn refuse<T>(message: String) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message))
@@ -208,14 +119,6 @@ pub(crate) enum Is {
 }
 
 impl Is {
-    fn of(kind: &Kind) -> Self {
-        match kind {
-            Kind::Record(_) => Is::Record,
-            Kind::Paged { .. } => Is::Paged,
-            Kind::Log { .. } => Is::Log,
-        }
-    }
-
     /// Refuse the name `name`, held as `self`, as `wanted`.
     pub fn refuse(self, name: &str, wanted: Is) -> String {
         format!("{name:?} is {}, not {}", self.article(), wanted.article())
@@ -233,356 +136,261 @@ impl Is {
 /// What a flush wrote.
 #[derive(Clone, Debug, Default)]
 pub struct FlushReport {
-    /// Bytes of the blobs it put: its chunks' deltas and bases, and its large
-    /// records.
-    pub blob_bytes: usize,
-    /// Bytes of the root it put; 0 when nothing changed.
-    pub root_bytes: usize,
-    /// Chunks whose base it replaced with a new one, rather than write a
-    /// delta against it.
-    pub rebased: usize,
+    /// Bytes of its tail entry: the records, log entries and pages it wrote.
+    pub entry_bytes: usize,
+    /// Bytes of the head it put; 0 when nothing changed.
+    pub head_bytes: usize,
+    /// What the checkpoint its head names did, if it named a new one
+    /// ([`crate::StateOptions::checkpoint_entries`]).
+    pub checkpoint: Option<Checkpointed>,
+    /// Why the checkpoint that was due failed: the flush went on without
+    /// it, the tail grows, and the next flush tries again.
+    pub checkpoint_failed: Option<String>,
 }
 
-/// Where a chunk is stored: its base, and its delta against that base; a
-/// chunk with neither is its file's base pages, or zeros.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Chunk {
-    pub base: Option<u64>,
-    pub delta: Option<u64>,
-}
-
-impl Chunk {
-    /// The blob holding the chunk's pages now.
-    fn current(self) -> Option<u64> {
-        self.delta.or(self.base)
-    }
-
-    pub(crate) fn blobs(self) -> impl Iterator<Item = u64> {
-        self.base.into_iter().chain(self.delta)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Value {
-    Inline(Bytes),
-    Blob(u64),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Kind {
-    Record(Value),
-    /// Its size, its base's id ([`Base::id`]), and the map of its chunks:
-    /// as many as its size needs.
-    Paged {
-        size: u64,
-        base: Option<u64>,
-        map: Map,
-    },
-    /// The index of its first entry, and the blobs of its entries from
-    /// there, in order.
-    Log {
-        first: u64,
-        entries: Vec<u64>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Entry {
-    pub name: String,
-    pub kind: Kind,
-}
-
-/// The root: the commit point.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Root {
-    /// The database's identity, drawn at random when its first root was
-    /// made: its blob numbers are unique under it, and the cache keys them
-    /// by both (a namespace emptied and made again counts from 0 again).
-    pub id: u64,
-    /// The flushes that changed something, ever.
+/// What a checkpoint did ([`FlushReport::checkpoint`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Checkpointed {
+    /// The version it holds the state of.
     pub version: u64,
-    /// The next blob number: none at or past it is named.
-    pub next_blob: u64,
-    /// Pages per chunk, set when the namespace was made.
-    pub chunk_pages: u64,
-    /// Entries per node of a file's chunk map, set when the namespace was
-    /// made.
-    pub fanout: u64,
-    /// Blobs no root names since the version given, to delete.
-    pub garbage: BTreeMap<u64, u64>,
-    pub next_file: u32,
-    pub directory: BTreeMap<u32, Entry>,
+    /// Frames it wrote, rebuilt from the overlay.
+    pub frames: usize,
+    /// Frames it patched instead: their pages written, as the tail held them.
+    pub patched: usize,
+    /// Large records and log entries it wrote.
+    pub values: usize,
+    /// Bytes of its pack: none if it stored nothing outside its manifest.
+    pub pack_bytes: usize,
+    /// Bytes of its manifest, in Restate.
+    pub manifest_bytes: usize,
+    /// Packs mostly dead, whose live frames and values it moved into its own.
+    pub compacted: usize,
+    /// Packs its garbage collection deleted ([`crate::State::collect_garbage`]).
+    pub deleted: usize,
 }
 
-/// Reads varints and byte strings from a decoded root or map node, failing
-/// on any overrun.
-pub(crate) struct Reading<'a> {
-    bytes: &'a [u8],
-    at: usize,
-    /// What it reads, for errors.
-    what: &'static str,
+/// A checkpoint put, for the next head to name.
+pub(crate) struct Staged {
+    pub checkpoint: Checkpoint,
+    pub manifest: Arc<Manifest>,
+    pub report: Checkpointed,
+    /// The frames it rebuilt, decoded.
+    pub images: HashMap<Location, Arc<Bytes>>,
 }
 
-impl<'a> Reading<'a> {
-    pub fn new(bytes: &'a [u8], what: &'static str) -> Self {
-        Self { bytes, at: 0, what }
-    }
+/// A paged file as of a head: its size, its base's id, and the pages written
+/// since the checkpoint (its overlay), each a frame (`None`: a hole).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct FileState {
+    pub size: u64,
+    pub base: Option<u64>,
+    pub pages: BTreeMap<u64, Option<Bytes>>,
+    /// The fewest pages the file had since the checkpoint, if it shrank:
+    /// the checkpoint's pages from there on are cut, holes.
+    pub cut: Option<u64>,
+}
 
-    pub fn invalid(&self) -> io::Error {
-        invalid(self.what)
-    }
-
-    pub fn varint(&mut self) -> io::Result<u64> {
-        get_varint(self.bytes, &mut self.at).ok_or_else(|| self.invalid())
-    }
-
-    /// A varint of at most `max`.
-    fn bounded(&mut self, max: u64) -> io::Result<u64> {
-        Some(self.varint()?)
-            .filter(|&n| n <= max)
-            .ok_or_else(|| self.invalid())
-    }
-
-    fn bytes(&mut self) -> io::Result<&'a [u8]> {
-        let len = self.varint()? as usize;
-        let end = (self.at.checked_add(len))
-            .filter(|&end| end <= self.bytes.len())
-            .ok_or_else(|| self.invalid())?;
-        let bytes = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(bytes)
-    }
-
-    /// Fail unless every byte was read.
-    pub fn end(&self) -> io::Result<()> {
-        match self.at == self.bytes.len() {
-            true => Ok(()),
-            false => Err(self.invalid()),
-        }
+impl FileState {
+    /// Whether the checkpoint's page `page` is cut.
+    fn cut(&self, page: u64) -> bool {
+        self.cut.is_some_and(|cut| page >= cut)
     }
 }
 
-/// Blob numbers as deltas from the previous one of their stream, zigzagged,
-/// plus one: 0 is none. A row of chunks written together costs a byte
-/// each, and zstd folds runs of them.
-pub(crate) fn put_ref(out: &mut Vec<u8>, previous: &mut u64, n: Option<u64>) {
-    let Some(n) = n else {
-        return out.push(0);
-    };
-    let delta = n.wrapping_sub(*previous) as i64;
-    put_varint(out, ((delta << 1) ^ (delta >> 63)) as u64 + 1);
-    *previous = n;
+/// The state as of a head: its checkpoint's manifest, and its tail entries,
+/// applied. Immutable once made, so that the cache may keep it for the
+/// owner's next open.
+#[derive(Clone, Debug)]
+pub(crate) struct Durable {
+    pub head: Head,
+    pub manifest: Arc<Manifest>,
+    pub files: BTreeMap<String, FileState>,
+    pub records: Records,
+    pub logs: Logs,
+    /// Records set since the checkpoint.
+    pub dirty: BTreeSet<String>,
 }
 
-pub(crate) fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
-    let z = r.varint()?;
-    if z == 0 {
-        return Ok(None);
+impl Durable {
+    /// About the bytes it takes in memory: the values and pages it holds,
+    /// and the manifest's locations.
+    pub fn estimated_bytes(&self) -> usize {
+        const LOCATION: usize = 40;
+        let files = (self.manifest.files.values())
+            .map(|file| (file.frames.len() + file.patches.len()) * LOCATION)
+            .sum::<usize>();
+        let pages = (self.files.values())
+            .flat_map(|file| file.pages.values())
+            .map(|page| page.as_ref().map_or(0, Bytes::len) + LOCATION)
+            .sum::<usize>();
+        let records = (self.records.iter())
+            .map(|(name, value)| name.len() + value.len() + LOCATION)
+            .sum::<usize>();
+        let logs = (self.logs.values())
+            .flat_map(|log| &log.values)
+            .map(|value| value.len() + LOCATION)
+            .sum::<usize>();
+        files + pages + records + logs
     }
-    let delta = ((z - 1) >> 1) as i64 ^ -(((z - 1) & 1) as i64);
-    *previous = previous.wrapping_add(delta as u64);
-    Ok(Some(*previous))
-}
 
-impl Root {
-    fn new(chunk_pages: u64, fanout: u64) -> Self {
+    /// The state of `head` with nothing in it.
+    pub fn empty(head: Head) -> Self {
         Self {
-            id: cache::random(),
-            version: 0,
-            next_blob: 0,
-            chunk_pages,
-            fanout,
-            garbage: BTreeMap::new(),
-            next_file: 0,
-            directory: BTreeMap::new(),
+            head,
+            manifest: Arc::default(),
+            files: BTreeMap::new(),
+            records: Records::new(),
+            logs: Logs::new(),
+            dirty: BTreeSet::new(),
         }
     }
 
-    pub fn file_id(&self, name: &str) -> Option<u32> {
-        (self.directory.iter())
-            .find(|(_, entry)| entry.name == name)
-            .map(|(&id, _)| id)
-    }
-
-    fn chunk_bytes(&self) -> usize {
-        self.chunk_pages as usize * PAGE as usize
-    }
-
-    /// The shape of the map of a file of `size` bytes.
-    pub fn shape(&self, size: u64) -> Shape {
-        Shape {
-            fanout: self.fanout,
-            count: size.div_ceil(self.chunk_pages * PAGE),
+    /// The state of `head`'s checkpoint, whose manifest is `manifest`, with
+    /// the values it stores in `values`.
+    fn checkpointed(
+        head: Head,
+        manifest: Arc<Manifest>,
+        values: &HashMap<Location, Bytes>,
+    ) -> io::Result<Self> {
+        let value = |value: &Value| match value {
+            Value::Inline(bytes) => Ok(bytes.clone()),
+            Value::Stored(at) => decode_value(&values[at]),
+        };
+        let records = (manifest.records.iter())
+            .map(|(name, record)| Ok((name.clone(), value(record)?)))
+            .collect::<io::Result<_>>()?;
+        let logs = (manifest.logs.iter())
+            .map(|(name, log)| {
+                let values = log.values.iter().map(value).collect::<io::Result<_>>()?;
+                let first = log.first;
+                Ok((name.clone(), Entries { first, values }))
+            })
+            .collect::<io::Result<_>>()?;
+        let frame_bytes = head.frame_bytes();
+        let mut files = BTreeMap::new();
+        for (name, file) in &manifest.files {
+            if file.frames.len() as u64 != file.size.div_ceil(frame_bytes) {
+                return Err(invalid("manifest"));
+            }
+            let state = FileState {
+                size: file.size,
+                base: file.base,
+                ..FileState::default()
+            };
+            files.insert(name.clone(), state);
+        }
+        let durable = Self {
+            head,
+            manifest,
+            files,
+            records,
+            logs,
+            dirty: BTreeSet::new(),
+        };
+        let names = durable.files.len() + durable.records.len() + durable.logs.len();
+        match names == durable.names().len() {
+            true => Ok(durable),
+            false => Err(invalid("manifest: a name of two kinds")),
         }
     }
 
-    pub fn encode(&self) -> Bytes {
-        let mut body = self.id.to_le_bytes().to_vec();
-        put_varint(&mut body, self.version);
-        put_varint(&mut body, self.next_blob);
-        put_varint(&mut body, self.chunk_pages);
-        put_varint(&mut body, self.fanout);
-        put_varint(&mut body, self.garbage.len() as u64);
-        let mut previous = 0;
-        for (&n, &since) in &self.garbage {
-            put_varint(&mut body, n - previous);
-            put_varint(&mut body, self.version - since);
-            previous = n;
+    /// Every name, and what it is.
+    fn names(&self) -> HashMap<&str, Is> {
+        (self.records.keys().map(|name| (name.as_str(), Is::Record)))
+            .chain(self.files.keys().map(|name| (name.as_str(), Is::Paged)))
+            .chain(self.logs.keys().map(|name| (name.as_str(), Is::Log)))
+            .collect()
+    }
+
+    pub fn is(&self, name: &str) -> Option<Is> {
+        if self.records.contains_key(name) {
+            Some(Is::Record)
+        } else if self.files.contains_key(name) {
+            Some(Is::Paged)
+        } else {
+            self.logs.contains_key(name).then_some(Is::Log)
         }
-        put_varint(&mut body, u64::from(self.next_file));
-        put_varint(&mut body, self.directory.len() as u64);
-        let mut next = 0;
-        for (&id, entry) in &self.directory {
-            put_varint(&mut body, u64::from(id - next));
-            next = id + 1;
-            put_varint(&mut body, entry.name.len() as u64);
-            body.extend_from_slice(entry.name.as_bytes());
-            match &entry.kind {
-                Kind::Record(Value::Inline(bytes)) => {
-                    body.push(0);
-                    put_varint(&mut body, bytes.len() as u64);
-                    body.extend_from_slice(bytes);
-                }
-                Kind::Record(Value::Blob(n)) => {
-                    body.push(1);
-                    put_varint(&mut body, *n);
-                }
-                Kind::Paged { size, base, map } => {
-                    body.push(2);
-                    put_varint(&mut body, size / 512);
-                    put_varint(&mut body, base.map_or(0, |id| id + 1));
-                    map.encode(&mut body);
-                }
-                Kind::Log { first, entries } => {
-                    body.push(3);
-                    put_varint(&mut body, *first);
-                    put_varint(&mut body, entries.len() as u64);
-                    for n in entries {
-                        put_varint(&mut body, *n);
-                    }
-                }
+    }
+
+    /// Apply the tail entry `entry`, which a flush made of this state.
+    fn apply(&mut self, entry: &Entry) -> io::Result<()> {
+        let kind = |this: &Self, name: &str, wanted: Is| match this.is(name) {
+            Some(held) if held != wanted => Err(invalid("tail entry: a name of two kinds")),
+            _ => Ok(()),
+        };
+        for (name, value) in &entry.records {
+            kind(self, name, Is::Record)?;
+            self.records.insert(name.clone(), value.clone());
+            self.dirty.insert(name.clone());
+        }
+        for (name, change) in &entry.logs {
+            kind(self, name, Is::Log)?;
+            let held = self.logs.entry(name.clone()).or_default();
+            let dropped = (change.before.saturating_sub(held.first)).min(held.values.len() as u64);
+            held.values.drain(..dropped as usize);
+            held.first = held.first.max(change.before);
+            if !change.values.is_empty() && change.from != held.next() {
+                return Err(invalid("tail entry: an append out of order"));
+            }
+            held.values.extend(change.values.iter().cloned());
+            if held.values.len() as u64 > MAX_LOG_ENTRIES {
+                return Err(invalid("tail entry: a log too long"));
             }
         }
-        let mut out = ROOT_MAGIC.to_vec();
-        zstd::compress(&body, &[], |frame| out.extend_from_slice(frame))
-            .expect("compressing in memory");
-        Bytes::from(out)
-    }
-
-    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let frame = (bytes.strip_prefix(ROOT_MAGIC)).ok_or_else(|| invalid("root"))?;
-        let body = zstd::decompress_sized(frame, &[], MAX_ROOT_BYTES)?;
-        let (id, rest) = body.split_first_chunk().ok_or_else(|| invalid("root"))?;
-        let id = u64::from_le_bytes(*id);
-        let mut r = Reading::new(rest, "root");
-        let version = r.bounded(MAX_SEQUENCE)?;
-        let next_blob = r.bounded(MAX_SEQUENCE)?;
-        let chunk_pages = r.bounded(MAX_CHUNK_PAGES)?;
-        let fanout = r.bounded(MAX_FANOUT)?;
-        if chunk_pages == 0 || fanout < 2 {
-            return Err(invalid("root"));
-        }
-        let mut root = Root {
-            id,
-            version,
-            next_blob,
-            ..Root::new(chunk_pages, fanout)
-        };
-        let blob = |n: u64| {
-            Some(n)
-                .filter(|&n| n < next_blob)
-                .ok_or_else(|| invalid("root"))
-        };
-        let mut previous = 0u64;
-        for _ in 0..r.bounded(next_blob)? {
-            previous = blob(
-                previous
-                    .checked_add(r.varint()?)
-                    .ok_or_else(|| invalid("root"))?,
-            )?;
-            let since = version
-                .checked_sub(r.varint()?)
-                .ok_or_else(|| invalid("root"))?;
-            root.garbage.insert(previous, since);
-        }
-        root.next_file = r.bounded(MAX_FILES.into())? as u32;
-        let mut next = 0u32;
-        for _ in 0..r.bounded(root.next_file.into())? {
-            let id = next
-                .checked_add(r.bounded(MAX_FILES.into())? as u32)
-                .filter(|&id| id < root.next_file)
-                .ok_or_else(|| invalid("root"))?;
-            next = id + 1;
-            let name = String::from_utf8(r.bytes()?.to_vec()).map_err(|_| invalid("root"))?;
-            if name.len() > MAX_NAME_BYTES {
-                return Err(invalid("root"));
+        for (name, change) in &entry.files {
+            kind(self, name, Is::Paged)?;
+            let file = self.files.entry(name.clone()).or_insert_with(|| FileState {
+                base: change.base,
+                ..FileState::default()
+            });
+            if file.base != change.base {
+                return Err(invalid("tail entry: a file's base changed"));
             }
-            // A record's value, after its tag.
-            let value = |r: &mut Reading, tag: u64| match tag {
-                0 => Ok(Value::Inline(Bytes::copy_from_slice(r.bytes()?))),
-                1 => Ok(Value::Blob(blob(r.varint()?)?)),
-                _ => Err(invalid("root")),
-            };
-            let kind = match r.varint()? {
-                tag @ (0 | 1) => Kind::Record(value(&mut r, tag)?),
-                2 => {
-                    let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
-                    let base = r.varint()?.checked_sub(1);
-                    let map = Map::decode(&mut r, root.shape(size), next_blob)?;
-                    Kind::Paged { size, base, map }
-                }
-                3 => {
-                    let first = r.bounded(MAX_SEQUENCE)?;
-                    let entries = (0..r.bounded(MAX_LOG_ENTRIES)?)
-                        .map(|_| blob(r.varint()?))
-                        .collect::<io::Result<_>>()?;
-                    Kind::Log { first, entries }
-                }
-                _ => return Err(invalid("root")),
-            };
-            root.directory.insert(id, Entry { name, kind });
+            if change.size < file.size {
+                let end = change.size.div_ceil(PAGE);
+                file.pages.retain(|&page, _| page < end);
+                file.cut = Some(file.cut.map_or(end, |cut| cut.min(end)));
+            }
+            file.size = change.size;
+            file.pages.extend(change.pages.iter().cloned());
         }
-        r.end()?;
-        Ok(root)
+        match self.files.len() + self.records.len() + self.logs.len() <= MAX_NAMES {
+            true => Ok(()),
+            false => Err(invalid("tail entry: too many names")),
+        }
+    }
+
+    /// This state, once the checkpoint `staged` of it is named: the same
+    /// files, records and logs, and an empty overlay.
+    fn rebased(&self, staged: &Staged) -> Self {
+        let mut files = self.files.clone();
+        for file in files.values_mut() {
+            file.pages.clear();
+            file.cut = None;
+        }
+        Self {
+            head: self.head.clone(),
+            manifest: staged.manifest.clone(),
+            files,
+            records: self.records.clone(),
+            logs: self.logs.clone(),
+            dirty: BTreeSet::new(),
+        }
     }
 }
 
-/// A chunk's frame, decoded against `prefix`: exactly `size` bytes.
-pub(crate) fn decode_chunk(frame: &[u8], prefix: &[u8], size: usize) -> io::Result<Arc<Image>> {
-    let mut pages = Vec::with_capacity(size);
-    zstd::decompress(&mut pages, frame, prefix)?;
-    if pages.len() != size {
-        return Err(invalid("chunk"));
-    }
-    Ok(Arc::new(Image {
-        pages: pages.into(),
-        stored: frame.len(),
-    }))
+/// A record's value, or a log entry, as a pack stores it: a zstd frame.
+pub(crate) fn decode_value(frame: &[u8]) -> io::Result<Bytes> {
+    zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES).map(Bytes::from)
 }
 
-/// The chunks a flush changes when it writes `written` into a file of
-/// `current` bytes, with `per` pages a chunk: those it writes below its new
-/// size, and the last one kept when it shrinks (pages past the end become
-/// holes).
-fn touched(written: &Written, current: u64, per: u64) -> impl Iterator<Item = u64> {
-    let size = written.size_after(current);
-    let mut touched: BTreeSet<u64> = (written.pages.keys())
-        .map(|page| page / per)
-        .filter(|&chunk| chunk * per * PAGE < size)
-        .collect();
-    if size < current && !size.is_multiple_of(per * PAGE) {
-        touched.insert(size / (per * PAGE));
-    }
-    touched.into_iter()
-}
-
-/// What chunk `chunk` holds without a stored base: its file's `base` pages,
-/// or zeros.
-fn implicit(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u8> {
-    let mut pages = vec![0; (chunk_pages * PAGE) as usize];
+/// What frame `index` of a file holds where nothing is stored: its `base`'s
+/// pages, or zeros.
+pub(crate) fn implicit(base: Option<&Arc<dyn Base>>, frame_pages: u64, index: u64) -> Vec<u8> {
+    let mut pages = vec![0; (frame_pages * PAGE) as usize];
     if let Some(base) = base {
         for (i, page) in pages.chunks_mut(PAGE as usize).enumerate() {
-            if let Some(image) = base.page(chunk * chunk_pages + i as u64) {
+            if let Some(image) = base.page(index * frame_pages + i as u64) {
                 page.copy_from_slice(image);
             }
         }
@@ -590,151 +398,48 @@ fn implicit(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u
     pages
 }
 
-/// What a chunk's base blob is compressed against: its file's `base` pages
-/// (zeros past them), or nothing for a file without one.
-pub(crate) fn reference(base: Option<&Arc<dyn Base>>, chunk_pages: u64, chunk: u64) -> Vec<u8> {
-    match base {
-        Some(_) => implicit(base, chunk_pages, chunk),
-        None => Vec::new(),
+/// The base's page `page`; nothing without a base.
+pub(crate) fn base_page(base: Option<&Arc<dyn Base>>, page: u64) -> &[u8] {
+    base.and_then(|base| base.page(page)).unwrap_or_default()
+}
+
+/// A page written, as a tail entry keeps it: a zstd frame, against its
+/// `reference` (see [`Snapshot::reference`]).
+fn encode_page(image: &[u8], reference: &[u8]) -> io::Result<Bytes> {
+    zstd::compress(image, reference, Bytes::copy_from_slice)
+}
+
+pub(crate) fn decode_page(frame: &[u8], reference: &[u8]) -> io::Result<Page> {
+    let image = zstd::decompress_sized(frame, reference, PAGE as usize)?;
+    match image.len() == PAGE as usize {
+        true => Ok(image.into()),
+        false => Err(invalid("page")),
     }
 }
 
-/// A decoded chunk: its pages, and the bytes of the blob that held them.
-pub(crate) struct Image {
-    pub pages: Bytes,
-    stored: usize,
-}
-
-/// A blob being fetched, which concurrent reads of it share.
+/// A pack range being fetched, which concurrent reads of it share.
 type Fetch = Shared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>;
 /// A fetch held only by its readers: when all of them are dropped, so is
 /// the request.
-type Fetching = HashMap<u64, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>>;
+type Fetching = HashMap<Location, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>>;
 
 /// The committed view a session reads and extends.
 pub(crate) struct Snapshot {
-    store: Arc<dyn KvStore>,
+    tiered: Arc<Tiered>,
     options: StateOptions,
     /// The namespace in the process's [`crate::PageCache`].
     cache: Option<NamespaceCache>,
-    root: Arc<Root>,
-    /// The root's exact bytes (`None` when absent).
-    root_bytes: Option<Bytes>,
-    records: Records,
-    logs: Logs,
+    /// A reader's: it changes nothing in the cache.
+    reader: bool,
+    pub(crate) durable: Arc<Durable>,
     /// The bases files were opened with, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace.
     pub(crate) unchanged: bool,
-    /// A reader's: it changes nothing in the cache.
-    reader: bool,
-    /// Chunk images decoded, by the blob that holds them: blobs never change,
-    /// so every view of the state shares them.
-    images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
-    /// Map nodes decoded, by blob, shared the same way.
-    nodes: Arc<Mutex<HashMap<u64, Arc<Node>>>>,
+    /// Frames decoded, by location: packs never change, so every view of
+    /// the state shares them.
+    frames: Arc<Mutex<HashMap<Location, Arc<Bytes>>>>,
     fetching: Arc<Mutex<Fetching>>,
-    readahead: Mutex<Readahead>,
-}
-
-/// Detects sequential chunk misses.
-#[derive(Default)]
-struct Readahead {
-    /// The file and last chunk the previous miss fetched.
-    last: Option<(u32, u64)>,
-    run: u32,
-    window: u64,
-}
-
-impl Readahead {
-    /// Chunks to fetch after a miss of chunk `chunk` of file `file`.
-    fn miss(&mut self, file: u32, chunk: u64) -> u64 {
-        self.run = match self.last {
-            Some(last) if last == (file, chunk.wrapping_sub(1)) => self.run + 1,
-            _ => 1,
-        };
-        self.window = match self.run >= READAHEAD_AFTER {
-            true => (self.window * 2).clamp(2, MAX_READAHEAD),
-            false => 0,
-        };
-        self.last = Some((file, chunk + self.window));
-        self.window
-    }
-}
-
-/// A flush being built: the next root, and the blobs it puts and frees.
-struct Flush {
-    root: Root,
-    /// Blobs to put, with the chunk images they hold.
-    fresh: Vec<(u64, Bytes, Option<Arc<Image>>)>,
-    /// Blobs the next root no longer names.
-    dead: Vec<u64>,
-    /// The map nodes it puts, decoded.
-    nodes: Vec<(u64, Arc<Node>)>,
-    /// Chunks given a new base in place of their old one.
-    rebased: usize,
-}
-
-impl Flush {
-    fn new(root: &Root) -> Self {
-        let mut root = root.clone();
-        root.version += 1;
-        Self {
-            root,
-            fresh: Vec::new(),
-            dead: Vec::new(),
-            nodes: Vec::new(),
-            rebased: 0,
-        }
-    }
-
-    /// The id of the file `name`, made with `kind` if new (within
-    /// [`MAX_FILES`]: checked).
-    fn file(&mut self, name: &str, kind: impl FnOnce() -> Kind) -> u32 {
-        if let Some(id) = self.root.file_id(name) {
-            return id;
-        }
-        let id = self.root.next_file;
-        self.root.next_file += 1;
-        let entry = Entry {
-            name: name.into(),
-            kind: kind(),
-        };
-        self.root.directory.insert(id, entry);
-        id
-    }
-
-    /// Put `frame`, which holds a chunk's `pages` if any, at the next blob
-    /// number: the number.
-    fn put(&mut self, frame: Bytes, pages: Option<Bytes>) -> u64 {
-        let n = self.root.next_blob;
-        self.root.next_blob += 1;
-        let stored = frame.len();
-        let image = pages.map(|pages| Arc::new(Image { pages, stored }));
-        self.fresh.push((n, frame, image));
-        n
-    }
-
-    /// Put map node `node`, which [`Map::update`] numbered `n`.
-    fn put_node(&mut self, n: u64, node: Arc<Node>) -> io::Result<()> {
-        assert_eq!(n, self.root.next_blob, "map nodes are numbered in order");
-        self.root.next_blob += 1;
-        self.fresh.push((n, node.frame()?, None));
-        self.nodes.push((n, node));
-        Ok(())
-    }
-}
-
-/// A file a flush writes.
-struct FileWrite<'a> {
-    id: u32,
-    /// The base it was opened with.
-    base: Option<&'a Arc<dyn Base>>,
-    /// It was made with a base, and opened without it.
-    missing: bool,
-    written: &'a Written,
-    /// Its size after the flush.
-    size: u64,
 }
 
 impl Snapshot {
@@ -742,419 +447,355 @@ impl Snapshot {
     /// cache, or whose last flush had an unknown outcome, syncs alongside, so
     /// that what it reads is durable; a `reader` reads what is stored.
     pub async fn open(
-        store: Arc<dyn KvStore>,
+        tiered: Arc<Tiered>,
         options: StateOptions,
         cache: Option<NamespaceCache>,
         reader: bool,
     ) -> io::Result<Self> {
+        if !(1..=MAX_FRAME_PAGES).contains(&options.frame_pages) {
+            return refuse(format!("frame_pages {} is invalid", options.frame_pages));
+        }
         let owner = cache.as_ref().filter(|_| !reader);
         let unsettled = owner.and_then(NamespaceCache::unsettled);
         let settle = !reader && (owner.is_none() || unsettled.is_some());
         let settle = async {
             match settle {
-                true => store.sync().await,
+                true => tiered.restate.sync().await,
                 false => Ok(()),
             }
         };
-        let (root_bytes, ()) = futures::try_join!(store.get(ROOT_KEY), settle)?;
+        let (head_bytes, ()) = futures::try_join!(tiered.head(), settle)?;
         if let (Some(owner), Some(unknown)) = (owner, unsettled) {
             owner.settled(unknown);
         }
-        let root = match &root_bytes {
-            Some(bytes) => Root::decode(bytes)?,
-            None if !(1..=MAX_CHUNK_PAGES).contains(&options.chunk_pages) => {
-                return refuse(format!("chunk_pages {} is invalid", options.chunk_pages));
-            }
-            None if !(2..=MAX_FANOUT).contains(&options.fanout) => {
-                return refuse(format!("fanout {} is invalid", options.fanout));
-            }
-            None => Root::new(options.chunk_pages, options.fanout),
+        let head = match &head_bytes {
+            Some(bytes) => Head::decode(bytes)?,
+            None => Head::new(cache::random(), options.frame_pages),
         };
+        let known = owner.is_some_and(|owner| owner.validate(head_bytes.as_deref()));
+        let reused = owner.filter(|_| known).and_then(NamespaceCache::durable);
         let mut snapshot = Self {
-            store,
-            options: options.clone(),
+            tiered,
+            options,
             cache: cache.clone(),
-            root: Arc::new(root),
-            root_bytes,
-            records: Records::new(),
-            logs: Logs::new(),
+            reader,
+            durable: Arc::new(Durable::empty(head.clone())),
             bases: BTreeMap::new(),
             unchanged: false,
-            reader,
-            images: Arc::default(),
-            nodes: Arc::default(),
+            frames: Arc::default(),
             fetching: Arc::default(),
-            readahead: Mutex::default(),
         };
-        // The large records' and log entries' blobs and every chunk of a
-        // small file, together, beside the maps of all but the largest files.
-        let (small, fetched) = {
-            let snapshot = &snapshot;
-            let small = async {
-                let mut wanted = BTreeSet::new();
-                let mut small = Vec::new();
-                for (&id, entry) in &snapshot.root.directory {
-                    match &entry.kind {
-                        Kind::Record(Value::Blob(n)) => {
-                            wanted.insert(*n);
-                        }
-                        Kind::Log { entries, .. } => wanted.extend(entries),
-                        Kind::Paged {
-                            size, base: None, ..
-                        } if size.div_ceil(PAGE) <= options.prefetch_pages => {
-                            let numbers: Vec<u64> = (0..snapshot.root.shape(*size).count).collect();
-                            let chunks = snapshot.chunks(id, &numbers).await?;
-                            for (chunk, stored) in numbers.into_iter().zip(chunks) {
-                                if stored.current().is_some() {
-                                    wanted.extend(stored.blobs());
-                                    small.push((id, chunk, stored));
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let wanted: Vec<u64> = wanted.into_iter().collect();
-                let blobs = snapshot.blobs(&wanted).await?;
-                let fetched: HashMap<u64, Bytes> = wanted.into_iter().zip(blobs).collect();
-                Ok::<_, io::Error>((small, fetched))
-            };
-            futures::try_join!(small, snapshot.prefetch_maps())?.0
+        snapshot.durable = match reused {
+            Some(durable) => durable,
+            None => Arc::new(snapshot.load(head).await?),
         };
-        for (id, chunk, stored) in small {
-            snapshot.decode(id, chunk, stored, &fetched)?;
-        }
-        let value = |value: &Value| match value {
-            Value::Inline(bytes) => Ok(bytes.clone()),
-            Value::Blob(n) => {
-                zstd::decompress_sized(&fetched[n], &[], MAX_RECORD_BYTES).map(Bytes::from)
-            }
-        };
-        for entry in snapshot.root.directory.values() {
-            let name = entry.name.clone();
-            match &entry.kind {
-                Kind::Record(stored) => {
-                    snapshot.records.insert(name, value(stored)?);
-                }
-                Kind::Log { first, entries } => {
-                    let values = (entries.iter())
-                        .map(|&n| value(&Value::Blob(n)))
-                        .collect::<io::Result<_>>()?;
-                    let first = *first;
-                    snapshot.logs.insert(name, Entries { first, values });
-                }
-                Kind::Paged { .. } => {}
-            }
-        }
         if let Some(owner) = owner {
-            let root = &snapshot.root;
-            let known = owner.validate(snapshot.root_bytes.as_deref());
-            snapshot.unchanged = known && owner.committed() == Some(root.version);
-            owner.record(
-                snapshot.root_bytes.clone(),
-                (!known).then_some(root.version),
-            );
+            let version = snapshot.version();
+            snapshot.unchanged = known && owner.committed() == Some(version);
+            let committed = (!known).then_some(version);
+            owner.record(head_bytes, committed, snapshot.durable.clone());
         }
         Ok(snapshot)
     }
 
+    /// The state of `head`: its checkpoint's manifest and its tail together,
+    /// then the values the manifest stores and small files' frames together.
+    async fn load(&self, head: Head) -> io::Result<Durable> {
+        let manifest = async {
+            match &head.checkpoint {
+                Some(checkpoint) => self.manifest(checkpoint).await,
+                None => Ok(Manifest::default()),
+            }
+        };
+        let tail = self.tiered.tail(&head, head.checkpointed() + 1);
+        let (manifest, entries) = futures::try_join!(manifest, tail)?;
+        let values: Vec<Location> = (manifest.records.values())
+            .chain(manifest.logs.values().flat_map(|log| &log.values))
+            .filter_map(|value| match value {
+                Value::Stored(at) => Some(*at),
+                Value::Inline(_) => None,
+            })
+            .collect();
+        let small: Vec<&FileIndex> = (manifest.files.values())
+            .filter(|file| file.base.is_none())
+            .filter(|file| file.size.div_ceil(PAGE) <= self.options.prefetch_pages)
+            .collect();
+        let wanted: Vec<Location> = (values.iter().copied())
+            .chain(
+                small
+                    .iter()
+                    .flat_map(|file| file.frames.iter().flatten().copied()),
+            )
+            .chain(small.iter().flat_map(|file| file.patches.values().copied()))
+            .collect();
+        let fetched = try_join_all(wanted.iter().copied().map(|at| self.raw(at))).await?;
+        let fetched: HashMap<Location, Bytes> = wanted.into_iter().zip(fetched).collect();
+        for file in &small {
+            let frames: Vec<Option<Arc<Bytes>>> = (file.frames.iter())
+                .map(|at| {
+                    at.map(|at| self.decode_frame(&fetched[&at], None, head.frame_pages, 0, at))
+                })
+                .map(Option::transpose)
+                .collect::<io::Result<_>>()?;
+            for (&page, &at) in &file.patches {
+                let frame = frames
+                    .get((page / head.frame_pages) as usize)
+                    .cloned()
+                    .flatten();
+                let offset = ((page % head.frame_pages) * PAGE) as usize;
+                let reference = frame.map_or(Bytes::new(), |frame| {
+                    frame.slice(offset..offset + PAGE as usize)
+                });
+                self.keep(at, Arc::new(decode_page(&fetched[&at], &reference)?));
+            }
+        }
+        let mut durable = Durable::checkpointed(head, Arc::new(manifest), &fetched)?;
+        for entry in &entries {
+            durable.apply(entry)?;
+        }
+        Ok(durable)
+    }
+
     pub fn version(&self) -> u64 {
-        self.root.version
+        self.durable.head.version
+    }
+
+    pub fn head(&self) -> &Head {
+        &self.durable.head
     }
 
     pub fn records(&self) -> &Records {
-        &self.records
+        &self.durable.records
     }
 
     /// The log `name`'s entries; none if it was never appended to.
     pub fn log(&self, name: &str) -> Entries {
-        self.logs.get(name).cloned().unwrap_or_default()
+        self.durable.logs.get(name).cloned().unwrap_or_default()
     }
 
     /// The log `name`'s first index, and the next.
     pub fn log_bounds(&self, name: &str) -> (u64, u64) {
-        self.logs
-            .get(name)
-            .map_or((0, 0), |entries| (entries.first, entries.next()))
+        (self.durable.logs.get(name)).map_or((0, 0), |entries| (entries.first, entries.next()))
     }
 
     pub fn file_size(&self, name: &str) -> u64 {
-        match self
-            .root
-            .file_id(name)
-            .map(|id| &self.root.directory[&id].kind)
-        {
-            Some(Kind::Paged { size, .. }) => *size,
-            _ => 0,
-        }
+        self.durable.files.get(name).map_or(0, |file| file.size)
     }
 
     /// What the name `name` is, if the state holds it.
     pub(crate) fn is(&self, name: &str) -> Option<Is> {
-        let id = self.root.file_id(name)?;
-        Some(Is::of(&self.root.directory[&id].kind))
+        self.durable.is(name)
     }
 
-    /// The base the file `id` was opened with: `Err` for a file made with one
-    /// that it was not opened with.
-    fn base_of(&self, id: u32) -> io::Result<Option<&Arc<dyn Base>>> {
-        let entry = &self.root.directory[&id];
-        match (&entry.kind, self.bases.get(&entry.name)) {
-            (Kind::Paged { base: Some(_), .. }, None) => Err(io::Error::other(format!(
-                "{:?} has a base: open it with it",
-                entry.name
+    /// The base the file `name` was opened with: `Err` for a file made with
+    /// one that it was not opened with.
+    fn base_of(&self, name: &str) -> io::Result<Option<&Arc<dyn Base>>> {
+        let made = self.durable.files.get(name).and_then(|file| file.base);
+        match (made, self.bases.get(name)) {
+            (Some(_), None) => Err(io::Error::other(format!(
+                "{name:?} has a base: open it with it"
             ))),
             (_, base) => Ok(base),
         }
     }
 
-    /// The map of the paged file `id`, and its shape.
-    fn map(&self, id: u32) -> Option<(&Map, Shape)> {
-        match &self.root.directory.get(&id)?.kind {
-            Kind::Paged { size, map, .. } => Some((map, self.root.shape(*size))),
-            Kind::Record(_) | Kind::Log { .. } => None,
-        }
-    }
-
-    /// Run `walk` over the map nodes it needs: those decoded, and those it
-    /// lacked, fetched together (a level of the map a round trip), until it
-    /// lacks none.
-    async fn with_nodes<T>(&self, mut walk: impl FnMut(&Nodes) -> T) -> io::Result<T> {
-        let mut fetched: HashMap<u64, Arc<Node>> = HashMap::new();
-        loop {
-            let (out, missing) = {
-                let get = |n: u64| {
-                    let kept = || self.nodes.lock().unwrap().get(&n).cloned();
-                    fetched.get(&n).cloned().or_else(kept)
-                };
-                let nodes = Nodes::new(&get);
-                (walk(&nodes), nodes.missing())
-            };
-            if missing.is_empty() {
-                return Ok(out);
-            }
-            let blobs: Vec<u64> = missing.iter().map(|need| need.blob).collect();
-            for (need, frame) in missing.into_iter().zip(self.blobs(&blobs).await?) {
-                let node = Arc::new(Node::from_frame(&frame, need)?);
-                fetched.insert(need.blob, node.clone());
-                self.keep_nodes([(need.blob, node)]);
-            }
-        }
-    }
-
-    /// The map nodes of every file of at most [`PREFETCH_MAP_NODES`], a
-    /// level of all of them a round trip.
-    async fn prefetch_maps(&self) -> io::Result<()> {
-        let maps: Vec<(&Map, Shape)> = (self.root.directory.keys())
-            .filter_map(|&id| self.map(id))
-            .filter(|(_, shape)| (1..=PREFETCH_MAP_NODES).contains(&shape.nodes()))
-            .collect();
-        self.with_nodes(|nodes| {
-            for &(map, shape) in &maps {
-                map.walk(shape, nodes, &mut |_| {});
-            }
-        })
-        .await
-    }
-
-    /// Chunks `chunks` of the file `id`, each below its count, as stored.
-    async fn chunks(&self, id: u32, chunks: &[u64]) -> io::Result<Vec<Chunk>> {
-        let Some((map, shape)) = self.map(id) else {
-            return Ok(vec![Chunk::default(); chunks.len()]);
-        };
-        let get = |nodes: &Nodes| (chunks.iter()).map(|&c| map.get(shape, c, nodes)).collect();
-        self.with_nodes(get).await
-    }
-
     /// Page `page` of the file `name`; `None` for zeros (a hole of a file
     /// without a base, or past its end).
     pub async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
-        let Some(id) = self.root.file_id(name) else {
+        let Some(file) = self.durable.files.get(name) else {
             return Ok(None);
         };
-        let (chunk, at) = (page / self.root.chunk_pages, page % self.root.chunk_pages);
-        let at = at as usize * PAGE as usize;
-        if self.map(id).is_none_or(|(_, shape)| chunk >= shape.count) {
-            return Ok(None);
-        }
-        let stored = self.chunks(id, &[chunk]).await?[0];
-        if stored.current().is_none() {
-            return Ok(self
-                .base_of(id)?
+        let base = self.base_of(name)?;
+        let image = match file.pages.get(&page) {
+            Some(None) => None,
+            Some(Some(frame)) => {
+                let reference = self.reference(&self.durable.manifest, None, name, page);
+                Some(decode_page(frame, &reference.await?)?)
+            }
+            None if file.cut(page) => None,
+            None => {
+                let manifest = &self.durable.manifest;
+                match manifest
+                    .files
+                    .get(name)
+                    .and_then(|file| file.patches.get(&page))
+                {
+                    Some(&at) => Some(self.patch(name, page, at).await?),
+                    None => self.stored_page(manifest, None, name, page).await?,
+                }
+            }
+        };
+        let based = base.is_some_and(|base| base.page(page).is_some());
+        Ok(match image {
+            // Zeros where the base has no page read as a hole.
+            Some(image) if based || image.iter().any(|&byte| byte != 0) => Some(image),
+            Some(_) => None,
+            None => base
                 .and_then(|base| base.page(page))
-                .map(Page::copy_from_slice));
+                .map(Page::copy_from_slice),
+        })
+    }
+
+    /// Frame `index` of the file `name`, stored at `at`: decoded, or fetched
+    /// and decoded (and kept).
+    async fn frame(&self, name: &str, index: u64, at: Location) -> io::Result<Arc<Bytes>> {
+        if let Some(frame) = self.frames.lock().unwrap().get(&at) {
+            return Ok(frame.clone());
         }
-        let image = self.image(id, chunk, stored).await?;
-        let image = image.pages.slice(at..at + PAGE as usize);
-        // Zeros where the base has no page read as a hole.
-        let based = self
-            .base_of(id)?
-            .is_some_and(|base| base.page(page).is_some());
-        Ok((based || image.iter().any(|&byte| byte != 0)).then_some(image))
+        let base = self.base_of(name)?;
+        let raw = self.raw(at).await?;
+        self.decode_frame(&raw, base, self.durable.head.frame_pages, index, at)
     }
 
-    /// Chunk `chunk` of the file `id`, `stored` in a blob: decoded, or
-    /// fetched with its base, and with the chunks after it when reads are
-    /// sequential, in one round trip.
-    async fn image(&self, id: u32, chunk: u64, stored: Chunk) -> io::Result<Arc<Image>> {
-        let current = stored.current().expect("a stored chunk");
-        if let Some(image) = self.images.lock().unwrap().get(&current) {
-            return Ok(image.clone());
+    /// Page `page` of the file `name`, as its patch at `at` holds it:
+    /// decoded, or fetched and decoded (and kept). A patch is compressed
+    /// against the page its frame holds, else its base's page.
+    async fn patch(&self, name: &str, page: u64, at: Location) -> io::Result<Page> {
+        if let Some(image) = self.frames.lock().unwrap().get(&at) {
+            return Ok((**image).clone());
         }
-        let ahead = self.readahead.lock().unwrap().miss(id, chunk);
-        let count = self.map(id).map_or(0, |(_, shape)| shape.count);
-        let after: Vec<u64> = (chunk + 1..(chunk + 1 + ahead).min(count)).collect();
-        let after = (after.iter().copied())
-            .zip(self.chunks(id, &after).await?)
-            .filter(|&(_, stored)| !self.has(stored));
-        let wanted = std::iter::once((chunk, stored)).chain(after).collect();
-        let mut images = self.fetch(id, wanted).await?;
-        Ok(images.swap_remove(0))
+        let stored = self.stored_page(&self.durable.manifest, None, name, page);
+        let (raw, stored) = futures::try_join!(self.raw(at), stored)?;
+        let reference = match stored {
+            Some(stored) => stored,
+            None => Bytes::copy_from_slice(base_page(self.base_of(name)?, page)),
+        };
+        let image = decode_page(&raw, &reference)?;
+        self.keep(at, Arc::new(image.clone()));
+        Ok(image)
     }
 
-    /// Chunks `wanted` of the file `id`, as stored in blobs: the blobs
-    /// fetched together, in one round trip, and decoded (and kept).
-    async fn fetch(&self, id: u32, wanted: Vec<(u64, Chunk)>) -> io::Result<Vec<Arc<Image>>> {
-        if wanted.is_empty() {
-            return Ok(Vec::new());
-        }
-        let blobs: Vec<u64> = (wanted.iter())
-            .flat_map(|(_, stored)| stored.blobs())
-            .collect();
-        let fetched: HashMap<u64, Bytes> = blobs
-            .iter()
-            .copied()
-            .zip(self.blobs(&blobs).await?)
-            .collect();
-        (wanted.into_iter())
-            .map(|(chunk, stored)| self.decode(id, chunk, stored, &fetched))
-            .collect()
-    }
-
-    /// The base blob `n` of a chunk, decoded.
-    async fn base_image(&self, id: u32, chunk: u64, n: u64) -> io::Result<Arc<Image>> {
-        if let Some(image) = self.images.lock().unwrap().get(&n) {
-            return Ok(image.clone());
-        }
-        let frame = self.blob(n).await?;
-        let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
-        decode_chunk(&frame, &prefix, self.root.chunk_bytes())
-    }
-
-    fn has(&self, chunk: Chunk) -> bool {
-        chunk
-            .current()
-            .is_none_or(|n| self.images.lock().unwrap().contains_key(&n))
-    }
-
-    /// Decode chunk `chunk` of the file `id`, `stored` in blobs that
-    /// `fetched` holds, and keep its base and its pages now, which it
-    /// returns.
-    fn decode(
+    /// What the tail compresses page `page` of the file `name` against,
+    /// under the checkpoint `manifest`: the page as the checkpoint holds it
+    /// (its patch, else its frame), else its base's page, else nothing. It
+    /// stays the same for every entry of the tail, so an entry decodes
+    /// alone. `images` are frames and patches the checkpoint just wrote.
+    async fn reference(
         &self,
-        id: u32,
-        chunk: u64,
-        stored: Chunk,
-        fetched: &HashMap<u64, Bytes>,
-    ) -> io::Result<Arc<Image>> {
-        let size = self.root.chunk_bytes();
-        let decode = |n: u64, prefix: &[u8]| decode_chunk(&fetched[&n], prefix, size);
-        let base = match stored.base {
-            Some(n) => {
-                let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
-                Some((n, decode(n, &prefix)?))
-            }
-            None => None,
-        };
-        let delta = match (stored.delta, &base) {
-            (Some(n), Some((_, base))) => Some((n, decode(n, &base.pages)?)),
-            (Some(_), None) => return Err(invalid("chunk: a delta without a base")),
-            (None, _) => None,
-        };
-        let current = delta
-            .as_ref()
-            .or(base.as_ref())
-            .expect("a stored chunk")
-            .1
-            .clone();
-        self.keep(base.into_iter().chain(delta));
-        Ok(current)
-    }
-
-    /// Keep decoded images, dropping them all first once there are
-    /// [`KEPT_IMAGES`].
-    fn keep(&self, decoded: impl IntoIterator<Item = (u64, Arc<Image>)>) {
-        let mut images = self.images.lock().unwrap();
-        for (n, image) in decoded {
-            if images.len() >= KEPT_IMAGES {
-                images.clear();
-            }
-            images.insert(n, image);
+        manifest: &Manifest,
+        images: Option<&HashMap<Location, Arc<Bytes>>>,
+        name: &str,
+        page: u64,
+    ) -> io::Result<Bytes> {
+        let patched = (manifest.files.get(name)).and_then(|file| file.patches.get(&page));
+        if let Some(&at) = patched {
+            return match images.and_then(|images| images.get(&at)) {
+                Some(image) => Ok((**image).clone()),
+                None => self.patch(name, page, at).await,
+            };
+        }
+        match self.stored_page(manifest, images, name, page).await? {
+            Some(stored) => Ok(stored),
+            None => Ok(Bytes::copy_from_slice(base_page(self.base_of(name)?, page))),
         }
     }
 
-    /// Keep decoded map nodes, dropping them all first once there are
-    /// [`KEPT_NODES`].
-    fn keep_nodes(&self, decoded: impl IntoIterator<Item = (u64, Arc<Node>)>) {
-        let mut nodes = self.nodes.lock().unwrap();
-        for (n, node) in decoded {
-            if nodes.len() >= KEPT_NODES {
-                nodes.clear();
-            }
-            nodes.insert(n, node);
+    /// Page `page` of the file `name` as its frame in `manifest` holds it;
+    /// `None` if the frame is not stored.
+    async fn stored_page(
+        &self,
+        manifest: &Manifest,
+        images: Option<&HashMap<Location, Arc<Bytes>>>,
+        name: &str,
+        page: u64,
+    ) -> io::Result<Option<Bytes>> {
+        let frame_pages = self.durable.head.frame_pages;
+        let index = page / frame_pages;
+        let stored = (manifest.files.get(name))
+            .and_then(|file| file.frames.get(index as usize).copied().flatten());
+        let Some(at) = stored else {
+            return Ok(None);
+        };
+        let frame = match images.and_then(|images| images.get(&at)) {
+            Some(image) => image.clone(),
+            None => self.frame(name, index, at).await?,
+        };
+        let at = ((page % frame_pages) * PAGE) as usize;
+        Ok(Some(frame.slice(at..at + PAGE as usize)))
+    }
+
+    /// Decode frame `index` of a file with `base`, as stored at `at`, and
+    /// keep it.
+    fn decode_frame(
+        &self,
+        raw: &[u8],
+        base: Option<&Arc<dyn Base>>,
+        frame_pages: u64,
+        index: u64,
+        at: Location,
+    ) -> io::Result<Arc<Bytes>> {
+        let prefix = match base {
+            Some(_) => implicit(base, frame_pages, index),
+            None => Vec::new(),
+        };
+        let size = (frame_pages * PAGE) as usize;
+        let mut image = Vec::with_capacity(size);
+        zstd::decompress(&mut image, raw, &prefix)?;
+        if image.len() != size {
+            return Err(invalid("frame"));
         }
+        let image = Arc::new(Bytes::from(image));
+        self.keep(at, image.clone());
+        Ok(image)
     }
 
-    /// Blobs `wanted`, in order: from the cache, or the store, together.
-    async fn blobs(&self, wanted: &[u64]) -> io::Result<Vec<Bytes>> {
-        try_join_all(wanted.iter().map(|&n| self.blob(n))).await
+    /// Keep a decoded frame, dropping them all first once there are
+    /// [`KEPT_FRAMES`].
+    fn keep(&self, at: Location, image: Arc<Bytes>) {
+        let mut frames = self.frames.lock().unwrap();
+        if frames.len() >= KEPT_FRAMES {
+            frames.clear();
+        }
+        frames.insert(at, image);
     }
 
-    async fn blob(&self, n: u64) -> io::Result<Bytes> {
+    /// The manifest of `checkpoint`, from the cache or Restate.
+    async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
+        if let Some(cache) = &self.cache
+            && let Some(encoded) = cache.manifest(checkpoint.pack).await
+        {
+            return Manifest::decode(&encoded);
+        }
+        let encoded = self.tiered.encoded_manifest(checkpoint).await?;
+        if let Some(cache) = &self.cache {
+            cache.insert_manifest(checkpoint.pack, encoded.clone());
+        }
+        Manifest::decode(&encoded)
+    }
+
+    /// The bytes at `at`, in a pack: from the cache, or the pack store.
+    async fn raw(&self, at: Location) -> io::Result<Bytes> {
         let cache = self.cache.clone();
         if let Some(cache) = &cache
-            && let Some(value) = cache.get(self.root.id, n).await
+            && let Some(value) = cache.get(at).await
         {
             return Ok(value);
         }
-        // A reader's root may be a write not yet durable (as the store shows
-        // it), whose blobs a crash could lose and the next flush reuse: only
-        // the owner, whose roots are durable, caches what it fetches.
-        let cache = cache.filter(|_| !self.reader);
-        let database = self.root.id;
         let fetch = {
             let mut fetching = self.fetching.lock().unwrap();
-            if let Some(fetch) = fetching.get(&n).and_then(WeakShared::upgrade) {
+            if let Some(fetch) = fetching.get(&at).and_then(WeakShared::upgrade) {
                 fetch
             } else {
-                let store = self.store.clone();
+                let tiered = self.tiered.clone();
                 let fetch: Fetch = async move {
-                    let value = store.get(&blob_key(n)).await.map_err(Arc::new)?;
-                    let value = value.ok_or_else(|| {
-                        Arc::new(io::Error::other(format!(
-                            "blob {n} is gone: the owner deleted it since this state opened"
-                        )))
-                    })?;
-                    // A durable root names it: it never changes now.
+                    let value = (tiered.get(at.pack, at.range()).await).map_err(Arc::new)?;
+                    // A pack never changes, and its name is never reused.
                     if let Some(cache) = cache {
-                        cache.insert(database, n, value.clone());
+                        cache.insert(at, value.clone());
                     }
                     Ok(value)
                 }
                 .boxed()
                 .shared();
-                fetching.insert(n, fetch.downgrade().expect("not polled yet"));
+                fetching.insert(at, fetch.downgrade().expect("not polled yet"));
                 fetch
             }
         };
         let value = fetch.await;
         // Gone once no read awaits it, unless a newer fetch took its place.
         let mut fetching = self.fetching.lock().unwrap();
-        if fetching
-            .get(&n)
-            .is_some_and(|fetch| fetch.upgrade().is_none())
-        {
-            fetching.remove(&n);
+        if (fetching.get(&at)).is_some_and(|fetch| fetch.upgrade().is_none()) {
+            fetching.remove(&at);
         }
         drop(fetching);
         value.map_err(|error| io::Error::new(error.kind(), error.to_string()))
@@ -1211,74 +852,30 @@ impl Snapshot {
             if !size.is_multiple_of(512) || size > MAX_FILE_BYTES {
                 return refuse(format!("{name:?}: invalid size {size}"));
             }
-            if written
-                .pages
-                .keys()
-                .any(|&page| page >= MAX_FILE_BYTES / PAGE)
-            {
+            if (written.pages.keys()).any(|&page| page >= MAX_FILE_BYTES / PAGE) {
                 return refuse(format!("{name:?}: a page past the largest file"));
             }
-            if self.lacks_its_base(name) && !self.drops_chunks_only(name, written).await? {
-                return refuse(format!("{name:?} has a base: open it with it"));
-            }
+            // A checkpoint rebuilds its frames against its base.
+            self.base_of(name)?;
         }
         let new = (records.keys().chain(writes.keys()).chain(logs.keys()))
-            .filter(|name| self.root.file_id(name).is_none())
+            .filter(|name| self.is(name).is_none())
             .count();
-        if u64::from(self.root.next_file) + new as u64 > u64::from(MAX_FILES) {
+        if self.durable.names().len() + new > MAX_NAMES {
             return refuse("too many files".into());
         }
         Ok(())
     }
 
-    /// The file `name` was made with a base, and opened without it.
-    fn lacks_its_base(&self, name: &str) -> bool {
-        let id = self.root.file_id(name);
-        let based = id.is_some_and(|id| {
-            matches!(
-                self.root.directory[&id].kind,
-                Kind::Paged { base: Some(_), .. }
-            )
-        });
-        based && !self.bases.contains_key(name)
-    }
-
-    /// `written` only makes whole chunks holes, or cuts the file's length:
-    /// all a file can do without its base, whose chunks it cannot decode.
-    async fn drops_chunks_only(&self, name: &str, written: &Written) -> io::Result<bool> {
-        let Some(id) = self.root.file_id(name) else {
-            return Ok(true);
-        };
-        if !written.pages.values().all(Option::is_none) {
-            return Ok(false);
-        }
-        let current = self.file_size(name);
-        let size = written.size_after(current);
-        let per = self.root.chunk_pages;
-        let count = self.root.shape(current).count;
-        let touched: Vec<u64> = touched(written, current, per).collect();
-        let held: Vec<u64> = touched.iter().copied().filter(|&c| c < count).collect();
-        let stored: HashMap<u64, Chunk> = (held.iter().copied())
-            .zip(self.chunks(id, &held).await?)
-            .collect();
-        Ok(touched.into_iter().all(|chunk| {
-            let current = stored.get(&chunk).and_then(|c| c.current());
-            (chunk * per..(chunk + 1) * per)
-                .all(|page| page * PAGE >= size || written.pages.contains_key(&page))
-                || current.is_none()
-        }))
-    }
-
-    /// Flush `writes` and `records`, which [`Self::check`] passed: see the
-    /// module documentation.
-    pub(crate) async fn commit(
+    /// Drop from a mutation what changes nothing; whether anything is left.
+    pub(crate) fn changes(
         &self,
-        mut writes: Writes,
-        mut records: Records,
-        mut logs: Appends,
-    ) -> io::Result<(FlushReport, Self)> {
+        writes: &mut Writes,
+        records: &mut Records,
+        logs: &mut Appends,
+    ) -> bool {
         records.retain(|name, value| {
-            (self.records.get(name)).map_or(!value.is_empty(), |held| held != value)
+            (self.records().get(name)).map_or(!value.is_empty(), |held| held != value)
         });
         writes.retain(|name, written| {
             let current = self.file_size(name);
@@ -1287,295 +884,420 @@ impl Snapshot {
         logs.retain(|name, appended| {
             !appended.values.is_empty() || appended.before > self.log(name).first
         });
-        if writes.is_empty() && records.is_empty() && logs.is_empty() {
-            return Ok((
-                FlushReport::default(),
-                self.continued(self.root.clone(), self.root_bytes.clone()),
-            ));
-        }
-        let mut flush = Flush::new(&self.root);
-        for (name, written) in &writes {
-            self.commit_file(&mut flush, name, written).await?;
-        }
-        let records = self.commit_records(&mut flush, records)?;
-        let logs = self.commit_logs(&mut flush, logs)?;
-        self.write(flush, records, logs).await
+        !(writes.is_empty() && records.is_empty() && logs.is_empty())
     }
 
-    /// Write `written` into the file `name` of `flush`'s root.
-    async fn commit_file(
-        &self,
-        flush: &mut Flush,
-        name: &str,
-        written: &Written,
-    ) -> io::Result<()> {
-        let base = self.bases.get(name);
-        let id = flush.file(name, || Kind::Paged {
-            size: 0,
-            base: base.map(|base| base.id()),
-            map: Map::empty(),
-        });
-        let current = self.file_size(name);
-        let size = written.size_after(current);
-        let (old, new) = (flush.root.shape(current), flush.root.shape(size));
-        let based = matches!(
-            flush.root.directory[&id].kind,
-            Kind::Paged { base: Some(_), .. }
+    /// Whether the tail is long enough to checkpoint before the next flush.
+    pub(crate) fn due(&self) -> bool {
+        let head = self.head();
+        let since = head.version - head.checkpointed();
+        let (entries, bytes) = (
+            self.options.checkpoint_entries,
+            self.options.checkpoint_bytes,
         );
-        let file = FileWrite {
-            id,
-            base,
-            // Without its base, a file made with one only drops chunks
-            // (checked).
-            missing: based && base.is_none(),
-            written,
-            size,
+        // With packs in Restate, a checkpoint costs only its bytes: one is
+        // due once the tail passes what the checkpoint holds (its packs and
+        // its manifest), as it costs more to read, and to write against its
+        // pages, than a checkpoint.
+        let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
+        let held: u64 = self.durable.manifest.sizes.values().sum::<u64>() + manifest;
+        let limit = match self.tiered.packs_in_restate {
+            true => bytes.min(held),
+            false => bytes,
         };
-        let touched: Vec<u64> = touched(written, current, flush.root.chunk_pages).collect();
-        // The stored ones, and their pages, together.
-        let held: Vec<u64> = touched.iter().copied().filter(|&c| c < old.count).collect();
-        let stored: HashMap<u64, Chunk> = (held.iter().copied())
-            .zip(self.chunks(id, &held).await?)
-            .collect();
-        if !file.missing {
-            let undecoded = (stored.iter())
-                .filter(|&(_, &chunk)| !self.has(chunk))
-                .map(|(&c, &chunk)| (c, chunk));
-            self.fetch(id, undecoded.collect()).await?;
-        }
-        let mut changes = BTreeMap::new();
-        for chunk in touched {
-            let held = stored.get(&chunk).copied().unwrap_or_default();
-            let now = self.commit_chunk(flush, &file, chunk, held).await?;
-            if now != held {
-                changes.insert(chunk, now);
-            }
-        }
-        // The map, with the nodes on the changed paths put anew.
-        let Some(Entry {
-            kind: Kind::Paged { map, .. },
-            ..
-        }) = flush.root.directory.get(&id)
-        else {
-            unreachable!("checked: a paged file");
-        };
-        let (map, next) = (map.clone(), flush.root.next_blob);
-        let update = (self.with_nodes(|nodes| map.update(old, new, &changes, nodes, next))).await?;
-        for (n, node) in update.fresh {
-            flush.put_node(n, node)?;
-        }
-        flush.dead.extend(update.dead);
-        let Some(Entry {
-            kind:
-                Kind::Paged {
-                    size: held_size,
-                    map: held_map,
-                    ..
-                },
-            ..
-        }) = flush.root.directory.get_mut(&id)
-        else {
-            unreachable!("checked: a paged file");
-        };
-        *held_size = size;
-        *held_map = update.map;
-        Ok(())
+        head.version > 0
+            && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= limit))
     }
 
-    /// Chunk `chunk` of `file`, `stored` until now, with its writes: as it
-    /// was, holes only (nothing stored), a delta against its base while that
-    /// stays small beside the base, or else a new base.
-    async fn commit_chunk(
+    /// Flush `writes`, `records` and `logs`, which [`Self::check`] passed,
+    /// with a head that names `staged`, a checkpoint of this state, if
+    /// given: see the module documentation.
+    pub(crate) async fn commit(
         &self,
-        flush: &mut Flush,
-        file: &FileWrite<'_>,
-        chunk: u64,
-        stored: Chunk,
-    ) -> io::Result<Chunk> {
-        let per = flush.root.chunk_pages;
-        let hole = implicit(file.base, per, chunk);
-        let (base_image, now) = match stored.current() {
-            Some(_) if !file.missing => {
-                let base_image = match stored.base {
-                    Some(n) => Some(self.base_image(file.id, chunk, n).await?),
+        mut writes: Writes,
+        mut records: Records,
+        mut logs: Appends,
+        staged: Option<Staged>,
+    ) -> io::Result<(FlushReport, Self)> {
+        if !self.changes(&mut writes, &mut records, &mut logs) {
+            return Ok((FlushReport::default(), self.continued(self.durable.clone())));
+        }
+        let mut entry = Entry::default();
+        // The entry builds on the checkpoint its head names.
+        let (manifest, images) = match &staged {
+            Some(staged) => (&staged.manifest, Some(&staged.images)),
+            None => (&self.durable.manifest, None),
+        };
+        for (name, written) in writes {
+            let held = self.durable.files.get(&name);
+            let base = self.bases.get(&name);
+            let size = written.size_after(held.map_or(0, |file| file.size));
+            // A page past the end is a hole.
+            let written: Vec<(u64, Option<Page>)> = (written.pages.into_iter())
+                .map(|(page, image)| (page, image.filter(|_| page * PAGE < size)))
+                .collect();
+            let mut references = Vec::new();
+            for (page, image) in &written {
+                if image.is_some() {
+                    references.push(self.reference(manifest, images, &name, *page));
+                }
+            }
+            let references = try_join_all(references).await?;
+            let mut references = references.into_iter();
+            let mut pages = Vec::with_capacity(written.len());
+            for (page, image) in written {
+                let frame = match image {
+                    Some(image) => {
+                        let reference = references.next().expect("one a page");
+                        Some(encode_page(&image, &reference)?)
+                    }
                     None => None,
                 };
-                (
-                    base_image,
-                    self.image(file.id, chunk, stored).await?.pages.to_vec(),
-                )
+                pages.push((page, frame));
             }
-            _ => (None, hole.clone()),
-        };
-        let mut pages = now.clone();
-        for (i, page) in pages.chunks_mut(PAGE as usize).enumerate() {
-            let index = chunk * per + i as u64;
-            let hole = &hole[i * PAGE as usize..(i + 1) * PAGE as usize];
-            match file.written.pages.get(&index) {
-                _ if index * PAGE >= file.size => page.copy_from_slice(hole),
-                Some(image) => page.copy_from_slice(image.as_deref().unwrap_or(hole)),
-                None => {}
-            }
-        }
-        if pages == now && stored.current().is_some() && !file.missing {
-            return Ok(stored);
-        }
-        flush.dead.extend(stored.delta);
-        if pages == hole || file.missing {
-            flush.dead.extend(stored.base);
-            return Ok(Chunk::default());
-        }
-        let pages = Bytes::from(pages);
-        if let Some(base) = &base_image {
-            let delta = zstd::compress(&pages, &base.pages, Bytes::copy_from_slice)?;
-            if delta.len() as f64 <= self.options.rebase_ratio * base.stored as f64 {
-                return Ok(Chunk {
-                    base: stored.base,
-                    delta: Some(flush.put(delta, Some(pages))),
-                });
-            }
-        }
-        // Against its file's base pages, if it has them.
-        let prefix = if file.base.is_some() { &hole[..] } else { &[] };
-        let frame = zstd::compress(&pages, prefix, Bytes::copy_from_slice)?;
-        flush.rebased += usize::from(stored.base.is_some());
-        flush.dead.extend(stored.base);
-        Ok(Chunk {
-            base: Some(flush.put(frame, Some(pages))),
-            delta: None,
-        })
-    }
-
-    /// Set `records` in `flush`'s root, inline or in blobs of their own:
-    /// the records after it.
-    fn commit_records(&self, flush: &mut Flush, records: Records) -> io::Result<Records> {
-        let mut after = self.records.clone();
-        for (name, value) in records {
-            let id = flush.file(&name, || Kind::Record(Value::Inline(Bytes::new())));
-            if let Kind::Record(Value::Blob(n)) = flush.root.directory[&id].kind {
-                flush.dead.push(n);
-            }
-            let stored = self.store_value(flush, &value)?;
-            flush.root.directory.get_mut(&id).expect("allocated").kind = Kind::Record(stored);
-            after.insert(name, value);
-        }
-        Ok(after)
-    }
-
-    /// Append to and truncate `logs` in `flush`'s root: the logs after it.
-    /// An entry appended and truncated by the same flush is never stored.
-    fn commit_logs(&self, flush: &mut Flush, logs: Appends) -> io::Result<Logs> {
-        let mut after = self.logs.clone();
-        for (name, appended) in logs {
-            let id = flush.file(&name, || Kind::Log {
-                first: 0,
-                entries: Vec::new(),
-            });
-            let held = after.entry(name).or_default();
-            let mut fresh = Vec::new();
-            for (value, index) in appended.values.into_iter().zip(held.next()..) {
-                if index >= appended.before {
-                    fresh.push(put_value(flush, &value)?);
-                }
-                held.values.push(value);
-            }
-            let Kind::Log { first, entries } =
-                &mut flush.root.directory.get_mut(&id).expect("allocated").kind
-            else {
-                unreachable!("checked: a log");
+            let made = held.map_or_else(|| base.map(|base| base.id()), |file| file.base);
+            let change = FileChange {
+                size,
+                base: made,
+                pages,
             };
-            let dropped = appended
-                .before
-                .saturating_sub(*first)
-                .min(held.values.len() as u64) as usize;
-            held.values.drain(..dropped);
-            held.first += dropped as u64;
-            // Those appended and dropped at once were never stored.
-            let stored_dropped = dropped.min(entries.len());
-            flush.dead.extend(entries.drain(..stored_dropped));
-            entries.extend(fresh);
-            *first = held.first;
+            entry.files.push((name, change));
         }
-        Ok(after)
-    }
-
-    /// `value` as the root keeps a record's: inline, or in a blob of its own.
-    fn store_value(&self, flush: &mut Flush, value: &Bytes) -> io::Result<Value> {
-        match value.len() <= self.options.inline_record_bytes {
-            true => Ok(Value::Inline(value.clone())),
-            false => Ok(Value::Blob(put_value(flush, value)?)),
+        entry.records = records.into_iter().collect();
+        for (name, appended) in logs {
+            let (mut from, mut values) = (appended.from, appended.values);
+            if values.is_empty() {
+                from = self.log(&name).next();
+            }
+            // Appended and truncated at once: never stored.
+            let dropped = (appended.before.saturating_sub(from)).min(values.len() as u64);
+            values.drain(..dropped as usize);
+            from += dropped;
+            let change = LogChange {
+                from,
+                values,
+                before: appended.before,
+            };
+            entry.logs.push((name, change));
         }
-    }
-
-    /// Write `flush`: delete the garbage past its grace, put the blobs, then
-    /// the root that names them; then one sync.
-    async fn write(
-        &self,
-        flush: Flush,
-        records: Records,
-        logs: Logs,
-    ) -> io::Result<(FlushReport, Self)> {
-        let Flush {
-            mut root,
-            fresh,
-            dead,
-            nodes,
-            rebased,
-        } = flush;
+        let parts = entry.encode();
+        let entry_bytes: usize = parts.iter().map(Bytes::len).sum();
+        let mut next = match &staged {
+            Some(staged) => self.durable.rebased(staged),
+            None => (*self.durable).clone(),
+        };
+        next.apply(&entry)?;
+        let held = &self.durable.head;
+        let mut head = Head {
+            version: held.version + 1,
+            tail_bytes: held.tail_bytes + entry_bytes as u64,
+            ..held.clone()
+        };
+        head.parts.push(parts.len() as u32);
+        let mut deletes = Vec::new();
+        if let Some(staged) = &staged {
+            // The tail the checkpoint before covered goes; the tail this one
+            // covers stays, for readers that opened on it.
+            if let Some(before) = held.checkpoint {
+                for version in held.tail_first..=before.version() {
+                    deletes.extend(held.entry_keys(version));
+                }
+                head.parts
+                    .drain(..(before.version() + 1 - held.tail_first) as usize);
+                head.tail_first = before.version() + 1;
+            }
+            head.previous = held.checkpoint;
+            head.checkpoint = Some(staged.checkpoint);
+            head.tail_bytes = entry_bytes as u64;
+        }
+        next.head = head;
         let cache = self.cache.as_ref();
         if cache.is_some_and(|cache| !cache.claim(self.version())) {
             return refuse("another state flushed since this one opened; reopen".into());
         }
-        let version = root.version;
-        // The garbage old enough that no reader holds a root naming it.
-        let grace = self.options.garbage_after.max(1);
-        let (old, kept): (Vec<_>, Vec<_>) =
-            (root.garbage.iter()).partition(|&(_, &since)| since + grace <= version);
-        let old: Vec<u64> = old.into_iter().map(|(&n, _)| n).collect();
-        root.garbage = kept.into_iter().map(|(&n, &since)| (n, since)).collect();
-        root.garbage.extend(dead.into_iter().map(|n| (n, version)));
-        let write = |key: &str, value: Option<Bytes>| {
-            let queued = match value {
-                Some(value) => self.store.put(key, value),
-                None => self.store.delete(key),
-            };
-            queued.map_err(|error| self.failed(error))
-        };
-        for n in old {
-            write(&blob_key(n), None)?;
-        }
-        let mut blob_bytes = 0;
-        for (n, value, _) in &fresh {
-            blob_bytes += value.len();
-            write(&blob_key(*n), Some(value.clone()))?;
-        }
-        let bytes = root.encode();
-        let root_bytes = bytes.len();
-        write(ROOT_KEY, Some(bytes.clone()))?;
-        if let Err(error) = self.store.sync().await {
+        if let Err(error) = self.tiered.write(&next.head, parts, &deletes).await {
             return Err(self.failed(error));
         }
+        let head_bytes = next.head.encode();
+        let next = Arc::new(next);
         if let Some(cache) = cache {
-            for (n, value, _) in &fresh {
-                cache.insert(root.id, *n, value.clone());
-            }
-            cache.flushed(bytes.clone(), version);
+            cache.flushed(head_bytes.clone(), next.head.version, next.clone());
         }
-        let mut after = self.continued(Arc::new(root), Some(bytes));
-        after.records = records;
-        after.logs = logs;
-        after.keep(
-            fresh
-                .into_iter()
-                .filter_map(|(n, _, image)| Some((n, image?))),
-        );
-        after.keep_nodes(nodes);
         let report = FlushReport {
-            blob_bytes,
-            root_bytes,
-            rebased,
+            entry_bytes,
+            head_bytes: head_bytes.len(),
+            checkpoint: staged.map(|staged| staged.report),
+            checkpoint_failed: None,
         };
-        Ok((report, after))
+        Ok((report, self.continued(next)))
+    }
+
+    /// Write this state, the head's, as a checkpoint: each frame the overlay
+    /// changed, the records set since the last one, the log entries appended
+    /// since, and the live frames and values of packs mostly dead, into one
+    /// new pack, put, for the next head to name.
+    pub(crate) async fn checkpoint(&self) -> io::Result<Staged> {
+        let durable = &self.durable;
+        let head = &durable.head;
+        let (frame_pages, frame_bytes) = (head.frame_pages, head.frame_bytes());
+        let pack = PackId {
+            version: head.version,
+            nonce: cache::random(),
+        };
+        let old = &durable.manifest;
+        let mut manifest = Manifest {
+            files: old.files.clone(),
+            records: old.records.clone(),
+            logs: BTreeMap::new(),
+            sizes: BTreeMap::new(),
+        };
+        let mut body = Vec::new();
+        let put = |body: &mut Vec<u8>, bytes: &[u8]| {
+            let at = Location {
+                pack,
+                offset: body.len() as u64,
+                len: bytes.len() as u64,
+            };
+            body.extend_from_slice(bytes);
+            at
+        };
+        // The frames the overlay changed. One whose patches stay under half
+        // its size is patched: each page it changed is put compressed
+        // against the frame's page. The others are rebuilt, from their old
+        // frames and patches, fetched together, and the overlay.
+        let mut written = Vec::new();
+        let mut patching = Vec::new();
+        let mut rebuilt = Vec::new();
+        let (mut frames, mut patched) = (0, 0);
+        for (name, file) in &durable.files {
+            let count = file.size.div_ceil(frame_bytes);
+            let held = old.files.get(name);
+            let mut dirty: BTreeSet<u64> = (file.pages.keys())
+                .map(|page| page / frame_pages)
+                .filter(|&index| index < count)
+                .collect();
+            // The frames it held past a cut.
+            if let (Some(cut), Some(held)) = (file.cut, held) {
+                let stored = (held.frames.iter().enumerate())
+                    .filter(|&(index, at)| at.is_some() && (index as u64 + 1) * frame_pages > cut)
+                    .map(|(index, _)| index as u64);
+                dirty.extend(stored.filter(|&index| index < count));
+            }
+            let index = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
+                base: file.base,
+                ..FileIndex::default()
+            });
+            index.size = file.size;
+            index.frames.resize(count as usize, None);
+            index.patches.retain(|&page, _| page < count * frame_pages);
+            for frame in dirty {
+                let stored = index.frames[frame as usize];
+                let range = frame * frame_pages..(frame + 1) * frame_pages;
+                let pages: Vec<(u64, &Bytes)> = (file.pages.range(range.clone()))
+                    .filter_map(|(&page, frame)| Some((page, frame.as_ref()?)))
+                    .collect();
+                let patch = stored.is_some_and(|at| {
+                    let holes = file.pages.range(range.clone()).count() > pages.len();
+                    let kept: u64 = (index.patches.range(range.clone()))
+                        .filter(|(page, _)| !file.pages.contains_key(page))
+                        .map(|(_, at)| at.len)
+                        .sum();
+                    let new: u64 = pages.iter().map(|(_, frame)| frame.len() as u64).sum();
+                    !holes && !file.cut(range.end - 1) && (kept + new) * 2 <= at.len
+                });
+                if patch {
+                    patching.extend(pages.into_iter().map(|(page, frame)| (name, page, frame)));
+                    patched += 1;
+                } else {
+                    let patches: Vec<(u64, Location)> = (index.patches.range(range.clone()))
+                        .map(|(&p, &at)| (p, at))
+                        .collect();
+                    index.patches.retain(|page, _| !range.contains(page));
+                    rebuilt.push((name, file, frame, stored, patches));
+                }
+            }
+        }
+        let olds = try_join_all(rebuilt.iter().cloned().map(
+            |(name, _, index, stored, patches)| async move {
+                let old = match stored {
+                    Some(at) => Some(self.frame(name, index, at).await?),
+                    None => None,
+                };
+                let patches = patches.into_iter().map(|(page, at)| async move {
+                    Ok::<_, io::Error>((page, self.patch(name, page, at).await?))
+                });
+                Ok::<_, io::Error>((old, try_join_all(patches).await?))
+            },
+        ))
+        .await?;
+        for ((name, file, index, _, _), (old, patches)) in rebuilt.into_iter().zip(olds) {
+            let base = self.base_of(name)?;
+            let hole = implicit(base, frame_pages, index);
+            let mut image = old
+                .as_ref()
+                .map_or_else(|| hole.clone(), |old| old.to_vec());
+            let first = index * frame_pages;
+            let at =
+                |page: u64| ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
+            for (page, patched) in patches {
+                image[at(page)].copy_from_slice(&patched);
+            }
+            let end = file.size.div_ceil(PAGE);
+            for page in first..first + frame_pages {
+                let at = at(page);
+                match file.pages.get(&page) {
+                    Some(Some(frame)) if page < end => {
+                        // Its reference: the page as the checkpoint held it.
+                        let reference = match &old {
+                            Some(_) => &image[at.clone()],
+                            None => base_page(base, page),
+                        };
+                        let decoded = decode_page(frame, reference)?;
+                        image[at].copy_from_slice(&decoded)
+                    }
+                    None if page < end && !file.cut(page) => {}
+                    _ => image[at.clone()].copy_from_slice(&hole[at]),
+                }
+            }
+            let stored = match image == hole {
+                true => None,
+                false => {
+                    let prefix = if base.is_some() { &hole[..] } else { &[] };
+                    let frame = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
+                    let at = put(&mut body, &frame);
+                    written.push((at, frame, Some(Arc::new(Bytes::from(image)))));
+                    frames += 1;
+                    Some(at)
+                }
+            };
+            manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
+        }
+        let images = try_join_all(patching.iter().map(|&(name, page, frame)| async move {
+            let reference = self.reference(old, None, name, page);
+            let stored = self.stored_page(old, None, name, page);
+            let (reference, stored) = futures::try_join!(reference, stored)?;
+            let image = decode_page(frame, &reference)?;
+            let stored = stored.expect("a patched frame is stored");
+            Ok::<_, io::Error>((encode_page(&image, &stored)?, image))
+        }))
+        .await?;
+        for ((name, page, _), (patch, image)) in patching.into_iter().zip(images) {
+            let at = put(&mut body, &patch);
+            written.push((at, patch, Some(Arc::new(image))));
+            let index = manifest.files.get_mut(name).expect("indexed");
+            index.patches.insert(page, at);
+        }
+        let before = written.len();
+        // Values: inline if small, else a frame of their own.
+        let inline = self.options.inline_record_bytes;
+        let mut store = |body: &mut Vec<u8>, value: &Bytes| -> io::Result<Value> {
+            if value.len() <= inline {
+                return Ok(Value::Inline(value.clone()));
+            }
+            let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
+            let at = put(body, &frame);
+            written.push((at, frame, None));
+            Ok(Value::Stored(at))
+        };
+        for (name, value) in &durable.records {
+            if durable.dirty.contains(name) || !manifest.records.contains_key(name) {
+                let value = store(&mut body, value)?;
+                manifest.records.insert(name.clone(), value);
+            }
+        }
+        for (name, log) in &durable.logs {
+            let held = old.logs.get(name);
+            let mut values = Vec::with_capacity(log.values.len());
+            for (index, value) in (log.first..).zip(&log.values) {
+                let kept = held.and_then(|held| {
+                    let at = index.checked_sub(held.first)?;
+                    held.values.get(at as usize).cloned()
+                });
+                values.push(match kept {
+                    Some(kept) => kept,
+                    None => store(&mut body, value)?,
+                });
+            }
+            let first = log.first;
+            manifest
+                .logs
+                .insert(name.clone(), LogIndex { first, values });
+        }
+        let values = written.len() - before;
+        // Compaction: what packs mostly dead still hold moves into this one.
+        let mut live: HashMap<PackId, u64> = HashMap::new();
+        for at in manifest.locations().filter(|at| at.pack != pack) {
+            *live.entry(at.pack).or_default() += at.len;
+        }
+        let sparse: BTreeSet<PackId> = (live.iter())
+            .filter(|&(held, &live)| live * 2 < old.sizes.get(held).copied().unwrap_or(0))
+            .map(|(&held, _)| held)
+            .collect();
+        let moving: BTreeSet<Location> = (manifest.locations())
+            .filter(|at| sparse.contains(&at.pack))
+            .copied()
+            .collect();
+        let moving: Vec<Location> = moving.into_iter().collect();
+        let fetched = try_join_all(moving.iter().copied().map(|at| self.raw(at))).await?;
+        let mut moved = HashMap::new();
+        for (at, raw) in moving.into_iter().zip(fetched) {
+            moved.insert(at, put(&mut body, &raw));
+            written.push((moved[&at], raw, None));
+        }
+        manifest.relocate(&moved);
+        for held in manifest.packs() {
+            if held != pack {
+                manifest
+                    .sizes
+                    .insert(held, old.sizes.get(&held).copied().unwrap_or(0));
+            }
+        }
+        // A checkpoint that stores nothing outside its manifest (the values
+        // it set are inline) puts no pack.
+        if !body.is_empty() {
+            manifest.sizes.insert(pack, body.len() as u64);
+        }
+        let encoded = manifest.encode();
+        let checkpoint = Checkpoint {
+            pack,
+            manifest: encoded.len() as u64,
+        };
+        let report = Checkpointed {
+            version: head.version,
+            frames,
+            patched,
+            values,
+            pack_bytes: body.len(),
+            manifest_bytes: encoded.len(),
+            compacted: sparse.len(),
+            deleted: 0,
+        };
+        if !body.is_empty() {
+            self.tiered.put_pack(pack, body.into()).await?;
+        }
+        self.tiered.put_manifest(pack, encoded.clone()).await?;
+        // The pack's name is never reused, and no head names it before it is
+        // durable: what it holds may be kept, its manifest too (the next
+        // writer's open reads it).
+        if let Some(cache) = &self.cache {
+            cache.insert_manifest(pack, encoded);
+        }
+        let mut images = HashMap::new();
+        for (at, raw, image) in written {
+            if let Some(cache) = &self.cache {
+                cache.insert(at, raw);
+            }
+            if let Some(image) = image {
+                self.keep(at, image.clone());
+                images.insert(at, image);
+            }
+        }
+        Ok(Staged {
+            checkpoint,
+            manifest: Arc::new(manifest),
+            report,
+            images,
+        })
     }
 
     fn failed(&self, error: io::Error) -> io::Error {
@@ -1585,22 +1307,17 @@ impl Snapshot {
         error
     }
 
-    fn continued(&self, root: Arc<Root>, root_bytes: Option<Bytes>) -> Self {
+    fn continued(&self, durable: Arc<Durable>) -> Self {
         Self {
-            store: self.store.clone(),
+            tiered: self.tiered.clone(),
             options: self.options.clone(),
             cache: self.cache.clone(),
-            root,
-            root_bytes,
-            records: self.records.clone(),
-            logs: self.logs.clone(),
+            reader: self.reader,
+            durable,
             bases: self.bases.clone(),
             unchanged: false,
-            reader: self.reader,
-            images: self.images.clone(),
-            nodes: self.nodes.clone(),
+            frames: self.frames.clone(),
             fetching: self.fetching.clone(),
-            readahead: Mutex::default(),
         }
     }
 
@@ -1608,21 +1325,15 @@ impl Snapshot {
         if base.id() == u64::MAX {
             return refuse("a base's id must be below u64::MAX".into());
         }
-        if let Some(id) = self.root.file_id(name) {
-            match &self.root.directory[&id].kind {
-                Kind::Paged {
-                    base: Some(held), ..
-                } if *held == base.id() => {}
-                _ => return refuse(format!("{name:?} was made with another base, or none")),
+        if self.is(name).is_some() {
+            let made = self.durable.files.get(name).and_then(|file| file.base);
+            if made != Some(base.id()) {
+                return refuse(format!("{name:?} was made with another base, or none"));
             }
         }
-        let mut with = self.continued(self.root.clone(), self.root_bytes.clone());
+        let mut with = self.continued(self.durable.clone());
         with.unchanged = self.unchanged;
         with.bases.insert(name.to_owned(), base);
         Ok(with)
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/store.rs"]
-mod tests;

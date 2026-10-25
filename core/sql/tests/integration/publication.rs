@@ -1,6 +1,7 @@
-//! End-to-end SQL campaign: every backend mutation of a save fails in every
-//! outcome, with and without a crash and an owner cache. The save is atomic, the
-//! database stays consistent and the next save works.
+//! End-to-end SQL campaign: every backend mutation of a save and the garbage
+//! collection after it fails in every outcome, with and without a crash and an owner
+//! cache. The save is atomic, the database stays consistent and the next
+//! save works.
 use crate::host::Db;
 use crate::host::StateSetup;
 use state::simulation::Namespace;
@@ -13,14 +14,17 @@ use std::sync::Arc;
 fn options(cache: Option<&Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            garbage_after: 1,
+            checkpoint_entries: 1,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
+        packs: None,
     }
 }
 
-/// Two saves: the second leaves garbage for the next to delete.
+/// Two sessions, a checkpoint each flush, and a collection: the next save
+/// deletes the tail its checkpoint covers, and the collection after it the
+/// packs no checkpoint needs.
 async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
@@ -33,7 +37,8 @@ async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let mut db = Db::open(kv, options(cache)).await?;
     db.execute("UPDATE t SET n = n + 100 WHERE id % 3 = 0")
         .await?;
-    db.save().await?;
+    db.flush().await?;
+    db.state().collect_garbage().await?;
     Ok(store)
 }
 
@@ -75,7 +80,11 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                 effect,
                                 cancel: false,
                             });
-                            let result = db.save().await;
+                            let (flushed, result) = match db.flush().await {
+                                Ok(_) => (true, db.state().collect_garbage().await.map(drop)),
+                                Err(error) => (false, Err(error)),
+                            };
+                            drop(db);
                             let faulted = store.events().iter().any(|e| e.faulted);
                             store.disarm();
                             if !faulted {
@@ -89,7 +98,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                 cache = cached.then(fresh_namespace);
                             }
                             let durable = changed(store.clone(), options(cache.as_ref())).await?;
-                            if result.is_ok() {
+                            if flushed {
                                 assert!(durable, "acknowledged save was lost");
                             }
                             // The next save works and survives a crash.
@@ -103,8 +112,8 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                 }
             }
         }
-        // Blob puts, a root put and garbage deletes, cached or not.
-        assert!(cases >= 40, "{cases}");
+        // Pack, tail and head puts, and tail and pack deletes, cached or not.
+        assert!(cases >= 30, "{cases}");
         println!("SQL save failpoints: {cases} cases");
         Ok(())
     })

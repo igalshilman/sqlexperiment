@@ -37,6 +37,13 @@ if (perMille > 0) {
       maybeAbort();
       return store.sync();
     },
+    // A store that cannot list its keys stays one: it is never swept.
+    keys:
+      store.keys &&
+      (async () => {
+        maybeAbort();
+        return store.keys!();
+      }),
   }));
 }
 

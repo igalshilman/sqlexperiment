@@ -53,6 +53,11 @@ harness = false
 required-features = ["simulation"]
 
 [[bench]]
+name = "read_latency"
+harness = false
+required-features = ["simulation"]
+
+[[bench]]
 name = "cache_cpu"
 harness = false
 required-features = ["simulation"]

@@ -31,6 +31,24 @@ impl KvStore for Stalled {
     }
 }
 
+/// A store that cannot list its keys (the default [`KvStore::keys`]).
+struct Unlisted(Arc<MemoryKv>);
+
+impl KvStore for Unlisted {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.0.put(key, value)
+    }
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.0.delete(key)
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        self.0.sync()
+    }
+}
+
 /// The state reads as last flushed, whatever a mutation holds, until that mutation
 /// flushes; a second mutation flushes on top of the first.
 #[test]
@@ -359,6 +377,153 @@ fn a_parked_value_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Re
             let state = State::open(store.clone()).cached(&cache, namespace).await?;
             assert_eq!(state.take_parked::<u32>("engine"), expected, "{namespace}");
         }
+        Ok(())
+    })
+}
+
+/// What a host spawns on a multi-threaded runtime is `Send`: opening,
+/// flushing (checkpoints included), and collecting garbage.
+#[test]
+fn opening_flushing_and_collecting_are_send() -> Result<()> {
+    fn send<T: Send>(value: T) -> T {
+        value
+    }
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        for n in 0..3 {
+            let state = send(State::open(store.clone()).options(options.clone())).await?;
+            let mut mutation = state.mutation();
+            mutation.write(&state.file("db")?, n, Some(page(1)))?;
+            send(mutation.flush()).await?;
+            send(state.collect_garbage()).await?;
+        }
+        Ok(())
+    })
+}
+
+/// A store that cannot list its keys keeps its garbage: its checkpoints
+/// collect nothing, and its flushes go on.
+#[test]
+fn a_store_that_cannot_list_keeps_its_packs() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let state = State::open(Arc::new(Unlisted(memory.clone())))
+            .options(options)
+            .await?;
+        let file = state.file("db")?;
+        for n in 0..6 {
+            let mut mutation = state.mutation();
+            mutation.write(&file, 0, Some(page(n)))?;
+            let report = mutation.flush().await?;
+            assert_eq!(report.checkpoint.map_or(0, |c| c.deleted), 0);
+        }
+        assert_eq!(file.read(0).await?, Some(page(5)));
+        assert!(memory.packs().len() > state.needed_packs().await?.len());
+        Ok(())
+    })
+}
+
+/// Where Restate cannot list its keys, packs in S3 are still collected: only
+/// the manifests, in Restate, stay.
+#[test]
+fn packs_in_s3_are_collected_where_restate_cannot_list() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = Arc::new(MemoryKv::default());
+        let packs = MemoryBlobs::default();
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let state = State::open(Arc::new(Unlisted(memory.clone())))
+            .checkpoints(Arc::new(packs.clone()))
+            .options(options)
+            .await?;
+        let file = state.file("db")?;
+        let mut deleted = 0;
+        for n in 0..6 {
+            let mut mutation = state.mutation();
+            mutation.write(&file, 0, Some(page(n)))?;
+            let report = mutation.flush().await?;
+            deleted += report.checkpoint.map_or(0, |c| c.deleted);
+        }
+        assert!(deleted > 0);
+        assert_eq!(packs.len(), state.needed_packs().await?.len());
+        assert!(memory.manifests().len() > state.needed_manifests().len());
+        Ok(())
+    })
+}
+
+/// A checkpoint that fails fails nothing: the flush goes on and says why,
+/// and the next flush checkpoints.
+#[test]
+fn a_checkpoint_that_fails_is_reported_and_the_flush_goes_on() -> Result<()> {
+    futures::executor::block_on(async {
+        let packs = MemoryBlobs::default();
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let state = State::open(Arc::new(MemoryKv::default()))
+            .checkpoints(Arc::new(packs.clone()))
+            .options(options)
+            .await?;
+        let file = state.file("db")?;
+        let flush = async |n: u8| {
+            let mut mutation = state.mutation();
+            mutation.write(&file, 0, Some(page(n)))?;
+            mutation.flush().await
+        };
+        flush(1).await?;
+        packs.fail_after(Some(0));
+        let report = flush(2).await?;
+        assert!(report.checkpoint.is_none());
+        let failed = report.checkpoint_failed.expect("the checkpoint failed");
+        assert!(!failed.is_empty());
+        packs.fail_after(None);
+        let report = flush(3).await?;
+        assert!(report.checkpoint.is_some() && report.checkpoint_failed.is_none());
+        assert_eq!(file.read(0).await?, Some(page(3)));
+        Ok(())
+    })
+}
+
+/// With packs in Restate, a collection lists the keys once, and stores its
+/// deletes, of packs and manifests together, with one sync.
+#[test]
+fn a_collection_lists_once_and_syncs_once() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let state = State::open(memory.clone()).options(options).await?;
+        let file = state.file("db")?;
+        let mut collected = 0;
+        for n in 0..6 {
+            memory.reset_stats();
+            let mut mutation = state.mutation();
+            mutation.write(&file, 0, Some(page(n)))?;
+            mutation.flush().await?;
+            // The flush's sync; then, collecting, a listing and a sync.
+            let stats = memory.stats();
+            assert!(stats.lists <= 1 && stats.syncs <= 2, "{stats:?}");
+            if stats.kind("manifest").deletes > 0 {
+                assert_eq!((stats.lists, stats.syncs), (1, 2));
+                collected += 1;
+            }
+        }
+        assert!(collected > 0);
+        assert_eq!(memory.manifests(), state.needed_manifests());
+        assert_eq!(memory.packs(), state.needed_packs().await?);
         Ok(())
     })
 }

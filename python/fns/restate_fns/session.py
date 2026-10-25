@@ -49,7 +49,7 @@ class SqlOptions(typing.TypedDict):
     journal_retention: timedelta
 
 
-# TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
+# TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
 sql_options: SqlOptions = {
     "enable_lazy_state": True,
     "journal_retention": timedelta(0),
@@ -201,6 +201,10 @@ class SqlHost(Protocol):
         """An empty run: done once every command before it is stored."""
         ...
 
+    def sql_keys(self) -> Awaitable[list[str]]:
+        """The object's state keys, issued now: a sweep's."""
+        ...
+
     def sql_send(
         self,
         service: str,
@@ -256,6 +260,9 @@ class _ObjectStore:
     def sync(self) -> Awaitable[Any]:
         return self._host.sql_sync()
 
+    def keys(self) -> Awaitable[list[str]]:
+        return self._host.sql_keys()
+
 
 class _ReaderStore:
     """
@@ -279,8 +286,8 @@ class _ReaderStore:
         pass
 
 
-# A transaction's sends commit with it, in the database's root (its
-# effects): the outbox, which holds each committed transaction's sends until
+# A transaction's sends commit with it, in the database's record of its
+# effects: the outbox, which holds each committed transaction's sends until
 # they are stored. They are made once the transaction commits; a later open
 # makes again those still in the outbox, with the same idempotency keys
 # (`transaction/<id>/<index>`, with a random id of the transaction), so making

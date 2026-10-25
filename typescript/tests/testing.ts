@@ -30,6 +30,7 @@ export function memoryStore(map = new Map<string, Uint8Array>(), fence = { close
       map.delete(key);
     },
     sync: async () => {},
+    keys: async () => [...map.keys()],
   };
 }
 
@@ -129,6 +130,10 @@ export function sqlAttempt({
     clear: (k: string) => {
       check();
       map.delete(k);
+    },
+    stateKeys: async () => {
+      onRequest();
+      return [...map.keys()];
     },
     run: async () => {},
     genericSend: (s: restate.GenericSend<Uint8Array>) => {

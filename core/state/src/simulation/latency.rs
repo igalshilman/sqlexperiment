@@ -1,6 +1,6 @@
 //! Critical-path latency in round trips, measured on a virtual clock.
 //!
-//! A get or a sync takes exactly one round trip; a write is queued, and costs
+//! A get, a list or a sync takes exactly one round trip; a write is queued, and costs
 //! none. A request issued at virtual time `t` completes at `t + 1`, and the
 //! clock advances to the latest completion observed. Requests issued together
 //! overlap: a batch of reads costs one round trip, while dependent requests
@@ -59,6 +59,9 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     }
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.timed(self.inner.sync())
+    }
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        self.timed(KvStore::keys(&self.inner))
     }
 }
 

@@ -21,10 +21,11 @@ fn owner(cache: &Namespace) -> Setup {
     Setup(
         StateSetup {
             options: StateOptions {
-                garbage_after: 4,
+                checkpoint_entries: 4,
                 ..StateOptions::default()
             },
             cache: Some(cache.clone()),
+            packs: None,
         },
         Durability::Commit,
     )
@@ -109,7 +110,13 @@ impl Ending {
                 cancel(db.execute(LONG_WRITE), polls);
             }
             Ending::FailedFlush(operation, effect) => {
-                let plan = failpoint(operation, "", 1, effect, false);
+                // The flush's own put: a failed put of a checkpoint's pack
+                // fails only the checkpoint, and the flush goes on.
+                let prefix = match operation {
+                    Operation::Put => state::TAIL_PREFIX,
+                    _ => "",
+                };
+                let plan = failpoint(operation, prefix, 1, effect, false);
                 let (hit, ended) = under(store, plan, db.execute(LONG_WRITE)).await;
                 assert!(hit && ended.failed(), "{self:?}");
             }
@@ -227,7 +234,7 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
                 3 => {
                     session.begin().await?;
                     session.query(LONG_WRITE, None).await?;
-                    let plan = failpoint(Operation::Put, "v16/root", 1, Effect::After, false);
+                    let plan = failpoint(Operation::Put, state::HEAD_KEY, 1, Effect::After, false);
                     let (hit, _) =
                         under(&store, plan, session.commit(Some(Bytes::from("e")))).await;
                     assert!(hit);

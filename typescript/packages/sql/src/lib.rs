@@ -1,8 +1,11 @@
 //! Node.js bindings: SQL over a key/value store implemented in JavaScript.
 //!
 //! The host passes one dispatcher function, `([op, key, value])`, which `index.js`
-//! builds from a store object `{ get, set, clear, sync }`. Every request goes
-//! through it in the order it was issued, so a read sees the writes before it.
+//! builds from a store object `{ get, set, clear, sync, keys? }`. Every request
+//! goes through it in the order it was issued, so a read sees the writes
+//! before it. With `keys`, a checkpoint deletes the packs no checkpoint
+//! needs (see [`state::State::collect_garbage`]); a store without keeps its
+//! garbage.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
@@ -25,6 +28,7 @@ const GET: u32 = 0;
 const SET: u32 = 1;
 const CLEAR: u32 = 2;
 const SYNC: u32 = 3;
+const KEYS: u32 = 4;
 
 type Args = (u32, String, Option<Buffer>);
 type Dispatch = ThreadsafeFunction<Args, Promise<Option<Uint8Array>>, Args, Status, false, true>;
@@ -81,6 +85,20 @@ impl KvStore for JsQueue {
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async { self.request(SYNC, "").await.map(drop) })
+    }
+
+    /// The store's keys, one per line; nothing where it has no `keys`.
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        Box::pin(async move {
+            let Some(lines) = self.request(KEYS, "").await? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the store has no keys",
+                ));
+            };
+            let lines = std::str::from_utf8(&lines).map_err(io_error)?;
+            Ok(lines.lines().map(str::to_owned).collect())
+        })
     }
 }
 

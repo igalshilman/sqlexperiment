@@ -1,5 +1,7 @@
-//! Corrupted stored values: truncated, bit-flipped or garbage, at the root
-//! or a blob. Open and reads fail or read what was flushed, never panic.
+//! Corrupted stored values: truncated, bit-flipped or garbage, at the head,
+//! a tail entry or a part of a pack. Open and reads fail or read what was
+//! flushed, never panic; and garbage collected after them never takes what
+//! the head needs.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -10,16 +12,16 @@ use support::*;
 
 fn options() -> StateOptions {
     StateOptions {
-        chunk_pages: 2,
-        rebase_ratio: 0.5,
+        frame_pages: 2,
         inline_record_bytes: 200,
         prefetch_pages: 2,
+        checkpoint_entries: 2,
         ..StateOptions::default()
     }
 }
 
-/// A namespace with every kind of key: the root, and blobs of chunks (bases
-/// and deltas) and of records.
+/// A namespace with every kind of key: the head, tail entries and packs,
+/// which hold frames, values and manifests.
 async fn flushed() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
     let mut model = Model::default();
@@ -33,6 +35,8 @@ async fn flushed() -> Result<(MemoryKv, Model)> {
         session.flush(&ops).await?;
         model = model.applied(&ops);
     }
+    let session = Session::open(Arc::new(memory.clone()), options()).await?;
+    session.state.collect_garbage().await?;
     Ok((memory, model))
 }
 
@@ -51,8 +55,12 @@ fn corruptions(value: &[u8], rng: &mut Rng) -> Vec<(String, Vec<u8>)> {
     let garbage = 1 + rng.below(2 * len as u64 + 8) as usize;
     let garbage = rng.bytes(garbage);
     out.push(("garbage".into(), garbage));
-    for _ in 0..12 {
-        let at = rng.below(len as u64) as usize;
+    // A short value has a bit flipped in every byte.
+    let flips: Vec<usize> = match len <= 16 {
+        true => (0..len).collect(),
+        false => (0..12).map(|_| rng.below(len as u64) as usize).collect(),
+    };
+    for at in flips {
         let mut flipped = value.to_vec();
         flipped[at] ^= 1 << rng.below(8);
         out.push((format!("bit flipped at {at}"), flipped));
@@ -68,21 +76,30 @@ enum Read {
     Otherwise,
 }
 
-/// Open the namespace and read everything, without a cache or with one.
-async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> Read {
-    let options = Setup {
+/// Open the namespace and read everything, without a cache or with one;
+/// then collect garbage, and read again as a new owner: what it left.
+async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> (Read, Read) {
+    let options = |cached: bool| Setup {
         options: options(),
         cache: cached.then(fresh_namespace),
+        packs: None,
     };
-    let read = async {
-        let session = Session::open(store, options).await?;
+    let read = async |collected: bool| {
+        let session = Session::open(store.clone(), options(cached && !collected)).await?;
+        if collected {
+            // Its failure is a read's to find.
+            let _ = session.state.collect_garbage().await;
+            let session = Session::open(store.clone(), options(false)).await?;
+            return model.matches(&session).await;
+        }
         model.matches(&session).await
     };
-    match read.await {
+    let outcome = |read: Result<bool>| match read {
         Err(_) => Read::Failed,
         Ok(true) => Read::AsFlushed,
         Ok(false) => Read::Otherwise,
-    }
+    };
+    (outcome(read(false).await), outcome(read(true).await))
 }
 
 #[test]
@@ -90,7 +107,7 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
     futures::executor::block_on(async {
         let (memory, model) = flushed().await?;
         let keys = memory.keys();
-        for prefix in ["v16/root", "v16/blob/"] {
+        for prefix in ["v20/head", "v20/tail/", "v20/manifest/", "v20/pack/"] {
             assert!(
                 keys.iter().any(|key| key.starts_with(prefix)),
                 "{prefix}: {keys:?}"
@@ -102,14 +119,18 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
             let value = memory.get(key).await?.unwrap();
             for (corruption, bytes) in corruptions(&value, &mut rng) {
                 let corrupted = memory.fork();
-                corrupted.put(key, bytes.into())?;
+                corrupted.corrupt(key, bytes.into());
                 for cached in [false, true] {
                     let case = format!("{key} {corruption}, cached {cached}");
                     let store: Arc<dyn KvStore> = Arc::new(corrupted.clone());
                     let read = AssertUnwindSafe(read(store, &model, cached)).catch_unwind();
-                    let Ok(read) = read.await else {
+                    let Ok((read, collected)) = read.await else {
                         panic!("{case}: panicked");
                     };
+                    // Garbage is only what the head does not need.
+                    if read == Read::AsFlushed && collected != Read::AsFlushed {
+                        panic!("{case}: read as flushed, then after collecting {collected:?}");
+                    }
                     // A bit flip may stay undetected: frames have a
                     // checksum, but not their headers.
                     let flipped = corruption.starts_with("bit");

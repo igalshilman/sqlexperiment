@@ -2,18 +2,12 @@ use crate::host::Db;
 use state::{Result, StateOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
-fn options(garbage_after: u64) -> StateOptions {
+/// A checkpoint every `every` flushes.
+fn options(every: u64) -> StateOptions {
     StateOptions {
-        garbage_after,
+        checkpoint_entries: every,
         ..StateOptions::default()
     }
-}
-
-/// Blobs the current root names: at most one base and one delta per chunk
-/// of the database, and one per record.
-async fn live(db: &mut Db) -> Result<usize> {
-    let pages = db.query("PRAGMA page_count").await?[0][0].as_int().unwrap() as usize;
-    Ok(2 * pages.div_ceil(state::CHUNK_PAGES as usize) + 8)
 }
 
 async fn summary(db: &mut Db) -> Result<(i64, i64)> {
@@ -23,11 +17,12 @@ async fn summary(db: &mut Db) -> Result<(i64, i64)> {
     Ok((rows[0][0].as_int().unwrap(), rows[0][1].as_int().unwrap()))
 }
 
-/// Many SQL sessions with inserts, deletes, a schema change and changing
-/// garbage graces keep the same results as an in-memory model, while the
-/// blobs stay bounded: the live ones, and the garbage of the last flushes.
+/// Many SQL sessions with inserts, deletes, a schema change and checkpoints
+/// at changing intervals keep the same results as an in-memory model, while
+/// a collection a round leaves only the packs the head needs, and those
+/// hold at most a few times the database.
 #[test]
-fn sql_sessions_match_a_model_across_garbage_graces() -> Result<()> {
+fn sql_sessions_match_a_model_across_checkpoint_intervals() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
         let mut db = Db::open(Arc::new(store.clone()), options(3)).await?;
@@ -35,11 +30,10 @@ fn sql_sessions_match_a_model_across_garbage_graces() -> Result<()> {
             .await?;
         db.save().await?;
 
-        let mut written = std::collections::VecDeque::new();
         let mut model = std::collections::BTreeMap::new();
         for round in 0..24i64 {
-            let grace = [3, 3, 1, 8][(round / 6) as usize];
-            let mut db = Db::open(Arc::new(store.clone()), options(grace)).await?;
+            let every = [3, 3, 1, 8][(round / 6) as usize];
+            let mut db = Db::open(Arc::new(store.clone()), options(every)).await?;
             let start = round * 25;
             db.execute(&format!(
                 "WITH RECURSIVE n(x) AS (VALUES({start}) UNION ALL SELECT x+1 FROM n WHERE x<{}) \
@@ -59,25 +53,25 @@ fn sql_sessions_match_a_model_across_garbage_graces() -> Result<()> {
             if round == 10 {
                 db.execute("CREATE INDEX by_payload ON t(payload)").await?;
             }
-            let before = store.blob_count();
-            db.save().await?;
-            // Each flush writes blobs; garbage goes once `grace` more
-            // flushes landed, so what is kept is the live blobs and those
-            // written by the last `grace` flushes (plus slack for a lowered
-            // grace).
-            written.push_front(store.blob_count().saturating_sub(before) + 1);
-            let recent: usize = written.iter().take(8 + 1).sum();
+            db.flush().await?;
+            db.state().collect_garbage().await?;
+            assert_eq!(
+                store.packs(),
+                db.state().needed_packs().await?,
+                "round {round}"
+            );
 
             let expected = (
                 model.len() as i64,
                 model.iter().map(|(id, len)| id * len).sum::<i64>(),
             );
-            let mut db = Db::open(Arc::new(store.clone()), options(grace)).await?;
+            let mut db = Db::open(Arc::new(store.clone()), options(every)).await?;
             assert_eq!(summary(&mut db).await?, expected, "round {round}");
-            let blobs = store.blob_count();
+            let pages = db.query("PRAGMA page_count").await?[0][0].as_int().unwrap();
+            let stored = store.stored_bytes();
             assert!(
-                blobs <= live(&mut db).await? + recent,
-                "round {round}: {blobs} blobs"
+                stored < 3 * pages as usize * 4096 + (64 << 10),
+                "round {round}: {stored} bytes stored for {pages} pages"
             );
         }
         let mut db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;

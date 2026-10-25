@@ -24,12 +24,13 @@ fn opts(cache: &Namespace, durability: Durability) -> Setup {
                 ..StateOptions::default()
             },
             cache: Some(cache.clone()),
+            packs: None,
         },
         durability,
     )
 }
 
-/// Reads the value of a blob, then holds it until released.
+/// Reads a range of a pack, then holds it until released.
 struct GateKv {
     inner: MemoryKv,
     started: Mutex<Option<oneshot::Sender<()>>>,
@@ -39,7 +40,7 @@ impl KvStore for GateKv {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            let gate = match key.starts_with("v16/blob/") {
+            let gate = match key.starts_with(state::blobs::KV_PREFIX) {
                 true => self.release.lock().unwrap().clone(),
                 false => None,
             };
@@ -70,10 +71,10 @@ async fn value(db: &mut Db, id: i64) -> Result<String> {
         .to_string())
 }
 
-/// A chunk's get issued before another session's flushes replaced that chunk
+/// A pack's get issued before another session's flushes replaced its pages
 /// must not serve the old image to later sessions, which would then save on
-/// top of it: the cache keeps it under its blob's number, which no later root
-/// names.
+/// top of it: the cache keeps it under its pack's name, which a later head
+/// names only where the page is unchanged.
 #[test]
 fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
     futures::executor::block_on(async {
@@ -84,12 +85,13 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
             release: Mutex::new(None),
         });
         let plain: Arc<dyn KvStore> = Arc::new(memory.clone());
-        // Setup without a cache: one large save, every chunk a base.
+        // Setup without a cache: one large save, checkpointed, so the
+        // reader reads its pages from a pack.
         let mut db = Db::open(plain.clone(), StateOptions::default()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)")
             .await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<600) INSERT INTO t SELECT x, 'old' || x || '|' || hex(randomblob(700)) FROM n").await?;
-        db.save().await?;
+        db.save_checkpointed().await?;
 
         let ns = fresh_namespace();
         let mut reader = Db::open(gate.clone(), opts(&ns, Durability::Save)).await?;
@@ -102,7 +104,7 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         let mut writer = Db::open(
             plain.clone(),
             opts(&ns, Durability::Commit).with(|o| StateOptions {
-                garbage_after: 1,
+                checkpoint_entries: 1,
                 ..o
             }),
         )
@@ -110,7 +112,6 @@ fn an_overlapping_read_never_caches_a_replaced_page() -> Result<()> {
         let read = value(&mut reader, 250);
         let write = async {
             started.await.unwrap();
-            eprintln!("writer starts");
             writer
                 .execute("UPDATE t SET v = 'new250' WHERE id = 250")
                 .await?;

@@ -20,11 +20,12 @@ use std::sync::Arc;
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            garbage_after: 2,
+            checkpoint_entries: 2,
             prefetch_pages: 0,
             ..StateOptions::default()
         },
         cache,
+        packs: None,
     }
 }
 
@@ -47,7 +48,7 @@ async fn baseline() -> Result<MemoryKv> {
     for k in 0..3 {
         db.execute(&format!("CREATE TABLE a{k}(x)")).await?;
     }
-    // Small flushes: deltas over their chunks' bases, and garbage.
+    // Small flushes: tail entries, and checkpoints that leave garbage.
     for k in 0..6 {
         db.execute(&format!("UPDATE t SET n = {k} WHERE id = 1"))
             .await?;

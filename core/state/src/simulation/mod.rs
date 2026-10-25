@@ -1,13 +1,17 @@
 //! Opt-in in-memory simulation, fault injection and measurement support.
 //! Enabled by the `simulation` Cargo feature; excluded from the default library.
+mod blobs;
 mod fault;
 mod latency;
 mod memory;
 mod monitor;
+mod restate;
+pub use blobs::{BlobFaults, MemoryBlobs};
 pub use fault::{Effect, Event, Failpoint, FaultKv, Operation};
 pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
 pub use monitor::MonitorKv;
+pub use restate::Restate;
 
 use crate::{Open, PageCache, PageCacheConfig, State, StateOptions, kv::KvStore};
 use std::sync::Arc;
@@ -68,22 +72,26 @@ pub(crate) fn fresh_namespace_cache() -> crate::cache::NamespaceCache {
     namespace.cache.namespace(&namespace.key)
 }
 
-/// How a test opens a state: its options, and the namespace it keeps warm
-/// in, if any.
+/// How a test opens a state: its options, the namespace it keeps warm in,
+/// if any, and where its checkpoints are, if not in the store.
 #[derive(Clone, Default)]
 pub struct Setup {
     pub options: StateOptions,
     pub cache: Option<Namespace>,
+    pub packs: Option<MemoryBlobs>,
 }
 
 impl Setup {
     /// Open a state over `store` this way.
     pub fn open(&self, store: Arc<dyn KvStore>) -> Open {
-        let open = State::open(store).options(self.options.clone());
-        match &self.cache {
-            Some(namespace) => open.cached(&namespace.cache, &namespace.key),
-            None => open,
+        let mut open = State::open(store).options(self.options.clone());
+        if let Some(namespace) = &self.cache {
+            open = open.cached(&namespace.cache, &namespace.key);
         }
+        if let Some(packs) = &self.packs {
+            open = open.checkpoints(Arc::new(packs.clone()));
+        }
+        open
     }
 }
 
@@ -91,7 +99,7 @@ impl From<StateOptions> for Setup {
     fn from(options: StateOptions) -> Self {
         Self {
             options,
-            cache: None,
+            ..Self::default()
         }
     }
 }
@@ -111,7 +119,13 @@ pub(crate) async fn yield_now() {
     .await
 }
 
-/// The key of blob `n`.
-pub fn blob_key(n: u64) -> String {
-    crate::store::blob_key(n)
+/// The key of the part `part` of the tail entry of `version`.
+pub fn tail_key(version: u64, part: u32) -> String {
+    crate::format::tail_key(version, part)
 }
+
+/// Where the tail's entries are.
+pub const TAIL_PREFIX: &str = crate::format::TAIL_PREFIX;
+
+/// Where checkpoints' packs are named, in a blob store.
+pub const PACK_PREFIX: &str = crate::format::PACK_PREFIX;

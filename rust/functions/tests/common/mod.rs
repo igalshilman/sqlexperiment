@@ -87,9 +87,9 @@ impl Store {
         state.log("memory/turns").entries().len()
     }
 
-    /// Blobs in the store: chunks of pages, and large records.
-    pub fn blobs(&self) -> usize {
-        self.kv.blob_count()
+    /// Checkpoints' packs in the store: frames of pages, and large values.
+    pub fn packs(&self) -> usize {
+        self.kv.packs().len()
     }
 }
 

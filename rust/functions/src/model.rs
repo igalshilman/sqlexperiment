@@ -543,11 +543,12 @@ pub struct View {
     /// Pages the last turn compared: those it wrote to by default, all pages
     /// in the benchmark-only full-scan build.
     pub examined_pages: usize,
-    /// Bytes of the blobs the last turn's flush put: the chunks of pages it
-    /// changed (memory and tables), compressed against what they replace.
-    pub blob_bytes: usize,
-    /// Bytes of the root it put.
-    pub root_bytes: usize,
+    /// Bytes of the tail entry the last turn's flush put: the pages it
+    /// changed (memory and tables), each compressed against the page as the
+    /// checkpoint holds it, and the records it set.
+    pub entry_bytes: usize,
+    /// Bytes of the head it put.
+    pub head_bytes: usize,
 }
 
 /// FNV-1a: a stable 64-bit fingerprint, to tell versions and runs apart. Not

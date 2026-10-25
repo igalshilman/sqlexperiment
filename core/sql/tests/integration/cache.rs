@@ -10,10 +10,9 @@ use std::sync::Arc;
 
 fn cached(cache: &Namespace) -> StateSetup {
     StateSetup {
-        options: StateOptions {
-            ..StateOptions::default()
-        },
+        options: StateOptions::default(),
         cache: Some(cache.clone()),
+        packs: None,
     }
 }
 
@@ -21,9 +20,10 @@ async fn create(store: Arc<dyn KvStore>, options: StateSetup) -> Result<()> {
     let mut db = Db::open(store, options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
         .await?;
-    // Incompressible: a large save, of more blobs than a small cache holds.
+    // Incompressible: a large save, of more frames than a small cache holds,
+    // checkpointed.
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<400) INSERT INTO t SELECT x,randomblob(900) FROM n").await?;
-    db.save().await?;
+    db.save_checkpointed().await?;
     Ok(())
 }
 
@@ -46,20 +46,21 @@ fn an_owner_cache_serves_reopened_sessions_in_one_round_trip() -> Result<()> {
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
         let stats = store.inner.stats();
         assert_eq!(store.round_trips(), 1, "meta and probe together: {stats:?}");
-        assert_eq!((stats.kind("blob").gets, stats.puts), (0, 0));
+        assert_eq!((stats.kind("pack").gets, stats.puts), (0, 0));
 
         store.inner.reset_stats();
         assert_eq!(
             payload_sum(store.clone(), StateOptions::default().into()).await?,
             expected
         );
-        assert!(store.inner.stats().kind("blob").gets > 0);
+        assert!(store.inner.stats().kind("pack").gets > 0);
         Ok(())
     })
 }
 
-/// Writers without the cache, deleting garbage at once or late, never leave
-/// the owner's cache stale: it keeps blobs by number, which never change.
+/// Writers without the cache, checkpointing each flush or rarely, never
+/// leave the owner's cache stale: it keeps ranges of packs, which never
+/// change.
 #[test]
 fn other_writers_never_leave_the_cache_stale() -> Result<()> {
     futures::executor::block_on(async {
@@ -68,9 +69,9 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
         create(store.clone(), cached(&cache)).await?;
         let mut expected = 400 * 900 + 400 * 401 / 2;
         assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
-        for (round, garbage_after) in [(0, 1), (1, 16), (2, 16), (3, 1)] {
+        for (round, checkpoint_entries) in [(0, 1), (1, 16), (2, 16), (3, 1)] {
             let other = StateOptions {
-                garbage_after,
+                checkpoint_entries,
                 ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
@@ -88,10 +89,9 @@ fn other_writers_never_leave_the_cache_stale() -> Result<()> {
 
 fn owner(cache: &Namespace) -> StateSetup {
     StateSetup {
-        options: StateOptions {
-            ..StateOptions::default()
-        },
+        options: StateOptions::default(),
         cache: Some(cache.clone()),
+        packs: None,
     }
 }
 async fn count(db: &mut Db) -> Result<i64> {
@@ -144,11 +144,11 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
         assert_eq!(count(&mut db).await?, 1);
         drop(db);
 
-        // Another writer's flush forces a fresh engine, whenever its garbage
-        // goes.
-        for (expected, garbage_after) in [(2, 16), (3, 1)] {
+        // Another writer's flush forces a fresh engine, whether it
+        // checkpoints or not.
+        for (expected, checkpoint_entries) in [(2, 16), (3, 1)] {
             let other = StateOptions {
-                garbage_after,
+                checkpoint_entries,
                 ..StateOptions::default()
             };
             let mut db = Db::open(store.clone(), other).await?;
@@ -168,7 +168,7 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v16/root".into(),
+            key_prefix: state::HEAD_KEY.into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,
@@ -182,8 +182,9 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
     })
 }
 
-/// Another owner's saves cost this owner's cache only the blobs they wrote:
-/// every other blob is unchanged, so still cached.
+/// Another owner's saves cost this owner's cache only what they wrote: the
+/// tail, and the packs of any checkpoint they made. Every other pack is
+/// unchanged, so still cached.
 #[test]
 fn another_owner_costs_the_cache_only_what_it_wrote() -> Result<()> {
     futures::executor::block_on(async {
@@ -202,14 +203,23 @@ fn another_owner_costs_the_cache_only_what_it_wrote() -> Result<()> {
                 .await?;
                 db.save().await?;
             }
-            let written = store.inner.stats().kind("blob").puts;
+            let written = store.inner.stats();
             store.inner.reset_stats();
             let expected = 400 * 900 + 400 * 401 / 2 - 100 * saves;
             assert_eq!(payload_sum(store.clone(), cached(&cache)).await?, expected);
-            let fetched = store.inner.stats().kind("blob").gets;
+            let fetched = store.inner.stats();
+            // The tail since the checkpoint: what the other owner wrote,
+            // and the checkpointing flush's own entry, which its checkpoint
+            // does not hold.
+            let tail = (fetched.kind("tail").gets, written.kind("tail").puts);
             assert!(
-                0 < fetched && fetched <= written,
-                "{saves} saves: {fetched} blobs fetched of {written} written"
+                tail.0 <= tail.1 + 1,
+                "{saves} saves: {tail:?} tail parts fetched, written"
+            );
+            let packs = (fetched.kind("pack").gets, written.kind("pack").puts);
+            assert!(
+                packs.0 <= packs.1,
+                "{saves} saves: {packs:?} pack parts fetched, written"
             );
         }
         Ok(())
@@ -227,10 +237,11 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
             .collect();
         let options = |n: usize| StateSetup {
             options: StateOptions {
-                garbage_after: 1,
+                checkpoint_entries: 1,
                 ..StateOptions::default()
             },
             cache: Some(Namespace::new(cache, &format!("shared-{n}"))),
+            packs: None,
         };
         // The same history shape, so the same meta, with different values.
         for (n, store) in stores.iter().enumerate() {
@@ -258,12 +269,12 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
     })
 }
 
-/// Blobs evicted from memory are served from disk.
+/// Frames evicted from memory are served from disk.
 #[test]
-fn evicted_blobs_are_read_from_disk() -> Result<()> {
+fn evicted_frames_are_read_from_disk() -> Result<()> {
     use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
-        // Room for a few blobs (of a chunk each) per shard, not the table.
+        // Room for a few frames per shard, not the table.
         let cache = open_cache(cache_config(256 << 10, 64 << 20));
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let namespace = Namespace::new(&cache, "spilled");
@@ -279,7 +290,7 @@ fn evicted_blobs_are_read_from_disk() -> Result<()> {
             payload_sum(store.clone(), cached(&namespace)).await?,
             expected
         );
-        assert_eq!(store.inner.stats().kind("blob").gets, 0);
+        assert_eq!(store.inner.stats().kind("pack").gets, 0);
         Ok(())
     })
 }
@@ -379,6 +390,7 @@ fn a_reused_engine_has_fresh_connection_counters() -> state::Result<()> {
         let options = StateSetup {
             options: state::StateOptions::default(),
             cache: Some(state::simulation::fresh_namespace()),
+            packs: None,
         };
         let mut db = Db::open(store.clone(), options.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
@@ -402,7 +414,7 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
     use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
         let cache = open_cache(state::PageCacheConfig {
-            namespaces: 1,
+            namespace_bytes: 1,
             ..cache_config(1 << 20, 64 << 20)
         });
         let store = Arc::new(MemoryKv::default());
@@ -413,6 +425,7 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
                         ..StateOptions::default()
                     },
                     cache: Some(namespace),
+                    packs: None,
                 },
                 Durability::Commit,
             )

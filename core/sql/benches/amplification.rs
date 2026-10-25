@@ -33,7 +33,7 @@ struct Sample {
 impl Sample {
     fn emit(&self, phase: &str, store: &MemoryKv, local_db: u64, local_wal: u64) {
         let s = store.stats();
-        for kind in ["all", "blob", "root", "other"] {
+        for kind in ["all", "head", "tail", "pack", "other"] {
             let t = if kind == "all" {
                 sum(&s)
             } else {
@@ -347,15 +347,15 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     Ok(())
 }
 
-/// Crash a save, then measure the open that follows. A save puts its blobs,
-/// then its root, in one sync.
+/// Crash a save, then measure the open that follows. A save puts its tail
+/// entry, then its head, in one sync.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     // (operation, effect of the failed sync, writes lost, committed)
     for (op, effect, lost, committed) in [
         // Every write of the save.
         ("commit_lost", Effect::None, usize::MAX, false),
-        // The root: the blobs are stored, but nothing names them.
-        ("root_lost", Effect::None, 1, false),
+        // The head: the tail entry is stored, but nothing names it.
+        ("head_lost", Effect::None, 1, false),
         // Nothing: stored, then the sync failed.
         ("sync_ack_lost", Effect::After, 0, true),
     ] {

@@ -81,6 +81,15 @@ class FakeHost:
     async def sql_sync(self) -> None:
         self.log.append(("sync", "", None))
 
+    async def sql_keys(self) -> list[str]:
+        keys = set(self.state)
+        for op, k, _ in self.log:
+            if op == "set":
+                keys.add(k)
+            elif op == "clear":
+                keys.discard(k)
+        return sorted(keys)
+
     def sql_send(self, service, handler, parameter, key, send_delay, idempotency_key, headers) -> None:
         self.log.append(("send", idempotency_key, (f"{service}/{key}/{handler}", parameter, send_delay)))
 
