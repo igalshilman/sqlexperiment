@@ -35,8 +35,8 @@ async function open(namespace, store, { reader = false } = {}) {
         if (failure) return Promise.reject(failure);
         return Promise.resolve(store.sync()).then(() => null);
       case KEYS:
-        // Every key, one per line: a sweep's (none where the store cannot
-        // list its keys, and it is never swept).
+        // Every key, one per line, for a garbage collection; none where the
+        // store cannot list its keys, which then keeps its garbage.
         if (!store.keys) return Promise.resolve(null);
         return Promise.resolve(store.keys()).then((keys) => Buffer.from(keys.join('\n')));
       default:
