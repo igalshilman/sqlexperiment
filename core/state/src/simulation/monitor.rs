@@ -35,8 +35,8 @@ use crate::{
     kv::KvStore,
     map::{Map, Node, Nodes, Shape, Visit},
     store::{
-        BLOB_PREFIX, CLAIM_KEY, Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, SWEEP_KEY, Sweep,
-        Value, decode_chunk, decode_claim, parse_blob_key, reference,
+        CLAIM_KEY, Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, SWEEP_KEY, Sweep, Value,
+        decode_chunk, decode_claim, parse_blob_key, reference,
     },
     zstd,
 };
@@ -419,10 +419,10 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.inner.sync()
     }
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
-            let keys = self.inner.list(prefix).await?;
-            if prefix == BLOB_PREFIX {
+            let keys = KvStore::keys(&self.inner).await?;
+            {
                 // Which blobs are there: those a crash lost are not.
                 let listed: BTreeSet<u64> = keys.iter().filter_map(|k| parse_blob_key(k)).collect();
                 let mut known = self.known.lock().unwrap();

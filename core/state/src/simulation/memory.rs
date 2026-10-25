@@ -263,14 +263,10 @@ impl KvStore for MemoryKv {
             Ok(())
         })
     }
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
             yield_now().await;
-            let inner = self.inner.lock().unwrap();
-            Ok((inner.values.keys())
-                .filter(|key| key.starts_with(prefix))
-                .cloned()
-                .collect())
+            Ok(self.inner.lock().unwrap().values.keys().cloned().collect())
         })
     }
     fn unfenced_blobs(&self) -> bool {

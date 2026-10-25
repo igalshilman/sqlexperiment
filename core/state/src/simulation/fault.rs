@@ -191,8 +191,8 @@ impl KvStore for FaultKv {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(self.run(Operation::Sync, "", self.inner.sync()))
     }
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
-        self.inner.list(prefix)
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        KvStore::keys(&self.inner)
     }
     fn unfenced_blobs(&self) -> bool {
         self.inner.unfenced_blobs()

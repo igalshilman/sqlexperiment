@@ -144,11 +144,13 @@ impl KvStore for SplitStore {
         })
     }
 
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+    /// The blob store's keys, and those queued for it: a sweep needs only
+    /// the blobs, so the root store's are left out (no round trip to it).
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
-            let mut keys = self.blobs.list(prefix).await?;
+            let mut keys = self.blobs.list("").await?;
             for (key, value) in self.queued.lock().unwrap().iter() {
-                if key.starts_with(prefix) && !in_root(key) {
+                if !in_root(key) {
                     match value {
                         Some(_) => keys.push(key.clone()),
                         None => keys.retain(|listed| listed != key),

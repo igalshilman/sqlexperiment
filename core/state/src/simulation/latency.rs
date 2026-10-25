@@ -60,8 +60,8 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.timed(self.inner.sync())
     }
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
-        self.timed(self.inner.list(prefix))
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        self.timed(KvStore::keys(&self.inner))
     }
     fn unfenced_blobs(&self) -> bool {
         self.inner.unfenced_blobs()

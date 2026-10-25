@@ -198,7 +198,11 @@ impl<'a> Nodes<'a> {
 /// number.
 pub(crate) enum Visit {
     Node(u64),
-    Chunk(u64, Chunk),
+    // The number: the protocol monitor's (simulation).
+    Chunk(
+        #[cfg_attr(not(feature = "simulation"), allow(dead_code))] u64,
+        Chunk,
+    ),
 }
 
 /// A file's map: its height, and its top node, which the root holds.

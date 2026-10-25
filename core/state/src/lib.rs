@@ -246,7 +246,7 @@ impl Shared {
             done: false,
         };
         let store = self.snapshot().store().clone();
-        let listed = match store.list(store::BLOB_PREFIX).await {
+        let listed = match store.keys().await {
             Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
                 sweeping.done = true;
                 return Ok(None);
@@ -540,7 +540,7 @@ impl State {
     /// reader's, beside the owner's flushes: in the owner's handler, or in a
     /// separate worker where the blobs are elsewhere than the root
     /// ([`blobs::SplitStore`]). It needs a store that lists its keys
-    /// ([`KvStore::list`]): one that cannot fails before anything is
+    /// ([`KvStore::keys`]): one that cannot fails before anything is
     /// written, and the state goes on. Any other failure ends the state, as
     /// a failed flush does.
     pub async fn collect_garbage(&self) -> Result<Collected> {

@@ -37,11 +37,11 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
-    /// Every key under `prefix`, stored or written since: what a sweep
-    /// ([`crate::State::collect_garbage`]) needs. A store that cannot list
-    /// fails with [`io::ErrorKind::Unsupported`]; its garbage stays.
-    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
-        let _ = prefix;
+    /// Every key, stored or written since, as Restate's `getKeys`: what a
+    /// sweep ([`crate::State::collect_garbage`]) needs, which keeps the
+    /// blobs' and ignores the others. A store that cannot fails with
+    /// [`io::ErrorKind::Unsupported`]; its garbage stays.
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
