@@ -68,7 +68,7 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
    the Rust v7 fallback, and regenerate the Rust patch
    (`patches/regenerate.sh`).
 
-## The root with the invocation (eager state keys)
+## The head with the invocation (eager state keys)
 
 **Waits on:** SDK releases whose service options set
 `eagerStateKeysWhitelist` (the TypeScript SDK 1.17.4, the Python SDK 1.1.0
@@ -76,14 +76,14 @@ and the Rust SDK's `main` have no such option). Restate has it since 1.8.0
 ([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
 
 **Now:** SQL objects set lazy state, so an invocation does not start with
-every blob, and a session's first read is the root (`v17/root`): a round
-trip, cached or not.
+every tail entry and pack, and a session's first read is the head
+(`v19/head`): a round trip, cached or not.
 
-**Then:** with lazy state still on, whitelist `v17/root` (and `v17/claim`,
-which an open reads beside the root, where blobs are kept in S3); the server
-ships them with the invocation (best effort, within its eager-state size
-limit), and the open starts with them. Blob names change with each flush, so
-only these can be listed. The options are in `restate-fns` (`sqlOptions` in
+**Then:** with lazy state still on, whitelist `v19/head` (`state::HEAD_KEY`);
+the server ships it with the invocation (best effort, within its
+eager-state size limit), and the open starts with it. Tail entries and packs
+change names with each flush and checkpoint, so only the head can be
+listed. The options are in `restate-fns` (`sqlOptions` in
 `typescript/packages/fns/src/index.ts`, `sql_options` in
 `python/fns/restate_fns/session.py`) and the durable functions'
 `ServiceOptions` (`rust/functions/src/restate.rs`); their `TODO:`s mark them.

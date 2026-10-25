@@ -1,112 +1,116 @@
 # Storage format
 
-Only this format (v17) is implemented. Use a dedicated namespace. Constants
-and keys live in `src/store.rs`; there is no migration or format discovery.
-Storage is assumed reliable (a value reads back as written); every zstd frame
-carries a checksum, and decoding checks structure and the bounds below.
+Only this format (v19) is implemented. Use a dedicated namespace. Keys,
+encodings and bounds live in `src/format.rs`; there is no migration or
+format discovery. Storage is assumed reliable (a value reads back as
+written); every zstd frame carries a checksum, and decoding checks
+structure and the bounds below.
 
-| Key                          | Value                                                                                                |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `v17/root`                   | The root; absent until the first flush                                                               |
-| `v17/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record, or a log entry; written once |
-| `v17/claim`                  | The claim, where blobs are not fenced (beside the root, in Restate); absent until the first flush    |
-| `v17/sweep`                  | The sweep's record (beside the blobs); absent while no sweep found a blob dead                       |
+| Store                           | Key                            | Value                                                                       |
+| ------------------------------- | ------------------------------ | --------------------------------------------------------------------------- |
+| Restate                         | `v19/head`                     | The head, the commit point; absent until the first flush                    |
+| Restate                         | `v19/tail/<version>/<part>`    | A part of the tail entry of the flush that made `version`                   |
+| Packs (`BlobStore`)             | `checkpoint/<version>-<nonce>` | A pack: what a checkpoint wrote, then its manifest; put once, never changed |
+| Restate, by default (`KvBlobs`) | `v19/pack/<pack key>/<part>`   | A part of a pack, where packs are kept in Restate                           |
 
-The root is the only key whose write commits. Integers are LEB128 varints
-unless stated otherwise.
+The head is the only key whose write commits. `<version>` and `<part>` in a
+tail entry's key are decimal. A pack's `<version>` is the head version
+whose state it holds, and `<nonce>` a random number, each 16 lowercase hex
+digits: no two puts ever use one name. Where packs are kept in Restate
+(`blobs::KvBlobs`), a pack is cut into parts of 64 KiB (the last shorter),
+numbered in decimal from 0, under `v19/pack/` and its key
+(`v19/pack/checkpoint/<version>-<nonce>/<part>`); in S3
+(`blobs::ObjectStoreBlobs`), it is one object, under the namespace's prefix
+and its key.
 
-## Root
+Integers are LEB128 varints unless stated otherwise. A byte string is its
+length, then its bytes. A name is a byte string of at most 255 bytes of
+UTF-8. Nothing may follow the last field of a head, a tail entry or a
+manifest.
 
-`SR17`, then one zstd frame of the body, which carries its size (at most
-64 MiB) and a checksum:
+## Head
 
-| Field       | Encoding                                                                                                                                                |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Id          | 8 bytes, little-endian: the database's random identity, drawn when its first root was made; the cache keys blobs by it                                  |
-| Version     | Flushes that changed something, ever; at most 2^62                                                                                                      |
-| Next blob   | The number the next blob gets; at most 2^62. Every blob named is below it, and no later root names one below it that this root does not                 |
-| Chunk pages | Pages per chunk (1 to 256), set when the namespace was made                                                                                             |
-| Fanout      | Entries per map node (2 to 4096), set when the namespace was made                                                                                       |
-| Next file   | The id the next new file gets; at most 2^16; ids are never reused                                                                                       |
-| Directory   | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, its kind (below) |
+`SH19`, then, uncompressed:
 
-A file's kind is one of:
+| Field       | Encoding                                                                                              |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| Id          | 8 bytes, little-endian: the database's random identity, drawn when it was made                        |
+| Frame pages | Pages per frame (1 to 256), set when the database was made                                            |
+| Version     | Flushes that changed something, ever: 1 to 2^62                                                       |
+| Checkpoint  | `0` for none, or `1`, the pack's version and nonce, then the manifest's offset and length in the pack |
+| Previous    | The checkpoint before, which readers that opened on it may still read; as above                       |
+| Tail first  | The first version whose tail entry is kept; at least 1                                                |
+| Tail bytes  | Bytes of the tail entries since the checkpoint                                                        |
+| Parts       | Per version from tail first to the version, the number of parts of its tail entry                     |
 
-- `0`, a length and bytes: a record held inline.
-- `1` and a blob number: a record in a blob of its own.
-- `2`: a paged file. Its length in 512-byte units (at most 10 GiB), its
-  base's id plus one (`0` for none), then its chunk map (below).
-- `3`: a log. The index of its first entry (at most 2^62), a count (at most
-  4096), then the blob number of each entry.
+The previous checkpoint is older than the checkpoint, or the same version,
+and the checkpoint no newer than the version; there is no previous without
+a checkpoint. A missing head means version 0, nothing stored, and the frame
+size of the options that open it.
 
-Names are unique. Nothing may follow. A missing root means version 0 and no
-files.
+## Tail entry
 
-## Chunk maps
+What one flush changed, as it changed it: `SE19`, then, uncompressed (its
+pages are zstd frames of their own), cut into parts of at most 1 MiB, put
+at `v19/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
 
-A paged file's chunks, as many as its length needs, are named by a radix
-tree of `fanout`-entry nodes: its height is the fewest levels that hold
-them (`fanout^height ≥ chunks`, at least 1). Level 0 nodes are leaves; the
-node at level `k`, index `i` covers chunks `i × fanout^(k+1)` onward. A
-node has as many entries as the chunks below the file's length need, at
-most `fanout`.
+| Field   | Encoding                                                                                                                                                                                                                                                                                                           |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Records | Count, then per record set: its name, its value (at most 16 MiB)                                                                                                                                                                                                                                                   |
+| Logs    | Count, then per log changed: its name, the index of the first entry appended (at most 2^62), the index below which entries are dropped (at most 2^62), a count, then each entry appended (at most 16 MiB)                                                                                                          |
+| Files   | Count, then per paged file changed: its name, its size after in 512-byte units (at most 10 GiB), its base's id plus one (`0` for none), a count, then per page written, ascending: its number as the gap from the page after the one before (the first from 0), and a byte string: empty for a hole, else the page |
 
-| Node  | Entries                                                                                                           |
-| ----- | ----------------------------------------------------------------------------------------------------------------- |
-| Leaf  | Per chunk, its base and its delta                                                                                 |
-| Inner | Per child, the blob of the node below, or none: every chunk under it a hole (a chunk with neither base nor delta) |
+An entry appended and dropped by the same flush is not stored. A page is a
+zstd frame of its 4096 bytes, compressed with its *reference* as a raw
+prefix: the page as the head's checkpoint holds it (its patch, else its
+frame's page), else its file's base's page, else nothing. Every entry of a
+tail compresses against the same checkpoint, so each decodes alone. A
+page's number is below 2,621,440 (10 GiB).
 
-Each entry is `0` for none, or else a blob number as the zigzag gap from
-the previous one of its kind in the node (bases, deltas or children; the
-first from 0), plus one. A delta without a base is invalid.
+## Pack
 
-The root holds the height, then the top node (level `height − 1`, index 0).
-Every other node is a blob: its entries in one zstd frame. A node names
-only blobs below its own number, and a stored node is never all holes.
+What one checkpoint wrote, back to back: the frames it rebuilt, the
+patches, the values, the ranges it copied from older packs; then its
+manifest, which the head locates.
 
-## Blobs
+| Range  | A zstd frame of                                                                                                                                               |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Frame  | `frame_pages` pages of a file (its pages `index × frame_pages` onward), compressed with its file's base pages (zeros past them) as a raw prefix, or with none |
+| Patch  | One page of a file, compressed with the page as its frame holds it as a raw prefix                                                                            |
+| Value  | A record's value, or a log entry, past `inline_record_bytes`; at most 16 MiB                                                                                  |
+| Copied | A range of an older pack, moved as it was (compaction): any of the above                                                                                      |
 
-A chunk is `chunk_pages` pages of 4096 bytes, its file's pages
-`chunk × chunk_pages` onward; pages past the file's end are zeros.
+A frame decodes to exactly `frame_pages × 4096` bytes. A frame that would
+hold only its base's pages, or zeros, is not stored. A page of zeros where the file has
+no base page reads as a hole.
 
-| Blob          | Frame                                                                                                              |
-| ------------- | ------------------------------------------------------------------------------------------------------------------ |
-| A chunk base  | The chunk's pages, compressed with its file's base pages as a raw-prefix reference (zeros past them), or with none |
-| A chunk delta | The chunk's pages, compressed with the chunk's base (decoded) as a raw-prefix reference                            |
-| A map node    | The node's entries, as above                                                                                       |
-| A record      | The record's bytes (at most 16 MiB)                                                                                |
-| A log entry   | The entry's bytes (at most 16 MiB)                                                                                 |
+## Manifest
 
-A chunk decodes to exactly `chunk_pages × 4096` bytes. A chunk with neither
-base nor delta is its file's base pages, or zeros. In a file without a base,
-a page of zeros reads as a hole.
+`SM19`, then one zstd frame of the body (at most 1 GiB decoded):
 
-The files are records, paged files and logs. The SQL database is the paged file
-`db`; others are the host's (`State::file`). A file is never deleted, only
-emptied, and its id is never reused. A paged file with a base
-(`State::file_with_base`) is over a golden image the host holds, named by the
-base's id: its chunks decode only with that base.
+| Field   | Encoding                                                                                                                                                                                                                                                                                                                                              |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packs   | Count, then per pack the manifest names, its own included, ascending: its version, its nonce, and the bytes it stored, before its manifest (for compaction)                                                                                                                                                                                           |
+| Records | Count, then per record: its name, its value (below)                                                                                                                                                                                                                                                                                                   |
+| Logs    | Count, then per log: its name, the index of its first entry (at most 2^62), a count (at most 4096), then each entry, a value                                                                                                                                                                                                                          |
+| Files   | Count, then per paged file: its name, its size in 512-byte units (at most 10 GiB), its base's id plus one (`0` for none), a count, then a location per frame (`0` for none: its base's pages, or zeros); then a count of patches, and per patch, ascending: its page as the gap from the page after the one before (the first from 0), and a location |
 
-## Claim
+A value is `0` and a byte string (inline, up to `inline_record_bytes`), or
+`1` and a location. A location is its pack's index in the packs above plus
+one (`0` is none), its offset as the zigzagged difference from the end of
+the location before it in the manifest (the first from 0), and its length.
 
-`SC17`, then a varint (at most 2^62): the first blob number no attempt of
-the owner has claimed. An owner whose blobs are not fenced
-(`KvStore::unfenced_blobs`) numbers its blobs from the larger of the root's
-next blob and the claim, and before it puts the first of them, puts a claim
-4096 past it and syncs. Nothing may follow.
+A file has as many frames as its size needs (`⌈size / (frame_pages ×
+4096)⌉`), and patches only below its size, each in a stored frame. A page
+with a patch reads from it; any other from its frame. Names are unique
+across records, logs and files, at most 65,536 of them. A missing
+checkpoint means no files, records or logs.
 
-## Sweep record
+The files are records, paged files and logs. The SQL database is the paged
+file `db`; others are the host's (`State::file`). Nothing is deleted: a
+record is set, a file cut, a log truncated. A paged file with a base
+(`State::file_with_base`) is over a golden image the host holds, named by
+the base's id: its pages and frames decode only with that base.
 
-`SS17`, then:
-
-| Field    | Encoding                                                                                                  |
-| -------- | --------------------------------------------------------------------------------------------------------- |
-| Database | 8 bytes, little-endian: the id of the root it marked against; a record of another database is ignored     |
-| Marked   | The version of that root; at most 2^62                                                                    |
-| Dead     | Count (at most 2^24), then ascending blob numbers, each as the gap from the one before (the first from 0) |
-
-The blobs the root of version `marked` did not name, below its next blob:
-dead for good. A later sweep deletes those still listed once the root it
-reads is `garbage_after` versions past `marked`. Nothing may follow.
-
-See [DESIGN.md](DESIGN.md) for the flush, open and garbage rules.
+See [DESIGN.md](DESIGN.md) for the flush, checkpoint, open and garbage
+rules.

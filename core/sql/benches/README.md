@@ -1,9 +1,10 @@
 # Benchmarks
 
 These are standalone Cargo bench targets (`harness = false`), separate from
-tests and examples. All use the current (v17) storage format and require the
-opt-in `simulation` feature. They count logical KV operations and bytes in
-MemoryKv; they do not model a real remote backend.
+tests and examples. All use the current (v19) storage format, a tail in
+Restate and checkpoints in packs, and require the opt-in `simulation`
+feature. They count logical KV operations and bytes in MemoryKv; they do
+not model a real remote backend.
 
 Against a real Restate server, `make sql-bench` from the repository's root runs
 [the end-to-end benchmark](../../../typescript/tests/sql/bench.ts): see
@@ -14,6 +15,7 @@ Run from `core/sql`:
 
 ```sh
 cargo bench --locked --features simulation --bench flush_costs
+S3=1 cargo bench --locked --features simulation --bench flush_costs   # packs in S3, priced
 cargo bench --locked --features simulation --bench amplification -- 3 > benches/results/amplification.csv
 cargo bench --locked --features simulation --bench small_databases -- 3 > benches/results/small_databases.csv
 cargo bench --locked --features simulation --bench cache_cpu -- 3 > benches/results/cache-cpu.csv
@@ -24,21 +26,22 @@ The positional argument is the repeat count; the default is three. Cargo's
 
 ## Targets
 
-| Target            | Coverage                                                                                                                                                                                                                                                    | Evidence                                                |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `flush_costs`     | Bytes, keys and round trips per flush, stored size and cold reads, by workload, up to 1M rows; `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER`, `SWEEP_EVERY` set the options, `WORKLOAD` and `FLUSHES` pick and age the databases | [COW_EXPERIMENT.md](../../state/docs/COW_EXPERIMENT.md) |
-| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                                                                                                               | `results/amplification.csv`                             |
-| `small_databases` | Tiny databases, index counts, save grouping and a larger control                                                                                                                                                                                            | `results/small_databases.csv`                           |
-| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                                                                                                            | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)  |
+| Target            | Coverage                                                                                                                                                                                                                                                                                                                                      | Evidence                                               |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `flush_costs`     | Requests, bytes and round trips per flush (its share of checkpoints and collections included), stored size and cold reads, by workload, up to 1M rows; `S3=1` keeps packs in S3 and prices them; `FRAME_PAGES`, `INLINE_BYTES`, `CHECKPOINT_ENTRIES`, `CHECKPOINT_BYTES` set the options, `WORKLOAD` and `FLUSHES` pick and age the databases | [FRAMES.md](../../state/docs/FRAMES.md)                |
+| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                                                                                                                                                                                                 | `results/amplification.csv`                            |
+| `small_databases` | Tiny databases, index counts, save grouping and a larger control; tail and head bytes written                                                                                                                                                                                                                                                 | `results/small_databases.csv`                          |
+| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                                                                                                                                                                                              | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15) |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified.
 
 ## Measurements
 
-`amplification` resets counters between open, SQL/query, save and
-recovery-open phases. Each phase has a total row plus blob, root and
-other-key rows. Do not add totals to their components. Warm query
+`amplification` resets counters between open, SQL/query, the engine's WAL
+checkpoint, save and recovery-open phases. Each phase has a total row
+(`all`) plus a row per kind of key: `head`, `tail`, `pack` (packs kept in
+Restate) and `other`. Do not add totals to their components. Warm query
 observations reuse one session; cold totals include initialization. Unique
 keys are per-phase counts and are not summed across phases.
 

@@ -3,8 +3,9 @@
 A state is one Restate object's transactional state: paged files and small
 records. It is read; it changes only through a mutation, an owned value that
 collects records set and pages written, in memory. A flush consumes the mutation,
-writes the chunks of pages it changed as new blobs, and puts the root that
-names them, the commit point; a mutation dropped instead discards them. SQL runs on
+puts it as an entry of a tail, and puts the head that names the tail, the
+commit point; a mutation dropped instead discards them. Now and then a
+checkpoint writes the state into a pack, and the tail it covers goes. SQL runs on
 the state, and the durable functions
 runtime flushes one mutation per turn, with each extension keeping its own state
 there.
@@ -16,35 +17,40 @@ hash.
 
 ## What Restate stores
 
-A state is one Restate object's state, in two kinds of key (and two more
-where its blobs are kept in S3, or swept). Restate's own
+A state is one Restate object's state, in two kinds of key, and the packs
+of its checkpoints: in Restate too by default, or in S3. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
-and the root plays that role.
+and the head and its tail play that role.
 
-| Key            | What it holds                                                                                                                                             |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v17/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                              |
-| `v17/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record, or a log entry |
+| Key                            | What it holds                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `v19/head`                     | The head: the version, the checkpoint and the one before, and the tail entries kept. The only key whose write commits.          |
+| `v19/tail/<version>/<part>`    | One flush's mutation, as it made it: the records set, the log entries, and each page written, a zstd frame of its own           |
+| `checkpoint/<version>-<nonce>` | A pack, written once and never changed: frames of 4 pages, large records and log entries, and a manifest of where everything is |
 
-Transactions change two kinds of state:
+Without S3, a pack is kept in Restate in parts of 64 KiB
+(`v19/pack/<key>/<part>`).
+
+Transactions change three kinds of state:
 
 - **Files** are page-addressed: the engine above reads and writes 4 KiB pages at
-  random, and a flush writes the chunks that changed, as new blobs. A
-  copy-on-write radix tree, the file's chunk map, names them: up to 1 MiB it
-  fits in the root, and a file holds at most 10 GiB. SQL keeps its database in
-  the file `db`. The functions runtime keeps a Wasm VM's memory in a file opened
-  over the program's golden image, so only pages that differ from it are
-  stored.
+  random, and a flush puts the pages it wrote in its tail entry. A
+  checkpoint writes a file as a row of frames of 4 pages, each compressed
+  on its own, which the manifest names; a file holds at most 10 GiB. SQL
+  keeps its database in the file `db`. The functions runtime keeps a Wasm
+  VM's memory in a file opened over the program's golden image, so only
+  pages that differ from it are stored.
 - **Records** are named values, such as `run`, `memory` or an extension's
-  `notary/count`: inside the root up to 1 KiB, a blob of their own past it.
-- **Logs** are named sequences of entries, each a blob of its own:
-  a mutation appends entries and truncates the log from its start, so a
-  flush writes what it appends, not what came before.
+  `notary/count`: in a checkpoint's manifest up to 1 KiB, a value of their
+  own in its pack past it.
+- **Logs** are named sequences of entries: a mutation appends entries and
+  truncates the log from its start, so a flush writes what it appends, not
+  what came before.
 
 The contract it needs from Restate is small ([`kv.rs`](../src/kv.rs)): writes
 return at once and are kept in issue order, `sync()` waits until they are
 stored, a crash keeps a prefix of the unsynced writes, and `keys()` lists
-them (for a sweep). There are no multi-key transactions, locks or
+them (to collect garbage). There are no multi-key transactions, locks or
 compare-and-swap. One owner reads and writes a
 state at a time, which a Restate virtual object guarantees.
 
@@ -55,46 +61,49 @@ the mutation (and every entry appended) becomes durable at once, and dropping th
 itself shows only what was flushed. A flush queues its writes in this order,
 then syncs once:
 
-1. **Blobs:** each changed chunk's pages, compressed against the chunk's base
-   (a delta), or, once the delta grows, a new base; a new node on each path
-   of a chunk map to a changed chunk, below its top; and large records and
-   log entries.
-2. **The root:** naming them, with the small records. If this put is stored,
-   the transaction happened.
-
-A flush deletes nothing. Every 16 versions, after it synced, it sweeps: it
-lists the keys, finds the blobs below the root's next number that the root
-does not name (dead for good: numbers only grow), and deletes those the
-sweep before found dead, 16 flushes ago.
+1. **The tail entry:** the mutation as it is, each page written compressed
+   against the page as the last checkpoint holds it, so it costs about what
+   changed.
+2. **The head:** naming it. If this put is stored, the transaction
+   happened.
 
 The order makes a crash at any point safe. Restate keeps a prefix of the
-queued writes, and a blob is put before any root names it and never
-overwritten, so whatever survives, open finds a root that names only blobs
-that are there. There is nothing to replay, checkpoint or repair.
+queued writes, and an entry is put before any head names it, so whatever
+survives, open finds a head that names only what is there. Open reads the
+checkpoint and applies the tail past it, in memory; there is nothing to
+repair.
 
-- **Cost:** one sync, and a few puts: the root, a blob per changed chunk,
-  and, in a file past 1 MiB, a map node per level on each changed path.
-  A delta is compressed against its chunk's base, so it costs about what
-  changed. A mutation that changes nothing writes nothing.
-- **The cache:** an optional process-wide `PageCache` keeps blobs in memory and
-  on local disk, by number: a blob never changes, so nothing is invalidated.
-  With it, open and flush in steady state are one round trip each. An owner
-  without a cache, or whose last flush's outcome is unknown, syncs at open, so
-  that everything it reads is durable.
-- **Readers:** a shared handler reads the root it opened, a consistent
-  snapshot, beside the owner's flushes.
+**Checkpoints.** Once the tail holds 128 entries or 1 MiB (with packs in
+Restate, at most the bytes the checkpoint holds), a flush first writes a
+checkpoint: the frames the tail changed, rewritten (or, for a few pages,
+patched), and the records set and log entries appended since, in one new pack, with
+a manifest. Its head names it, and drops the tail the checkpoint before
+covered. It then collects garbage: it lists the packs and deletes those
+older than the checkpoint before that neither checkpoint needs. A store
+that cannot list its keys keeps its garbage.
+
+- **Cost:** one sync, and two puts: the tail entry and the head. A
+  checkpoint adds a pack, and reads the frames it rewrites. A mutation that
+  changes nothing writes nothing.
+- **The cache:** an optional process-wide `PageCache` keeps ranges of packs
+  in memory and on local disk, by location: a pack never changes, so
+  nothing is invalidated. With it, open and flush in steady state are one
+  round trip each. An owner without a cache, or whose last flush's outcome
+  is unknown, syncs at open, so that everything it reads is durable.
+- **Readers:** a shared handler reads the head it opened, a consistent
+  snapshot, beside the owner's flushes, until the owner's second checkpoint
+  after it.
 - **Errors:** a failed or cancelled flush has an unknown outcome, and ends the
   state. The owner settles outstanding requests and reopens, then looks at
   what landed before retrying.
 
-**Blobs in S3.** Where the blobs live beside Restate, in an object store
-(`blobs::SplitStore`), Restate fences an earlier attempt from the root but
-not from the blobs, and an upload may land after its attempt failed. So
-before its first blob, an owner claims its blob numbers: it writes
-`v17/claim` in Restate, 4096 numbers ahead, and syncs; every later attempt
-numbers past the claim. No two attempts ever put the same key, so S3 needs
-no conditional puts, and what a failed attempt or a zombie uploaded is dead
-once the root moves past it, for a sweep to delete.
+**Packs in S3.** Where the packs live beside Restate, in an object store
+(`blobs::ObjectStoreBlobs`, through `State::open(store).checkpoints(..)`),
+Restate fences an earlier attempt from the head but not from the packs, and
+an upload may land after its attempt failed. So a pack's name is its
+version and a random nonce: no two attempts ever put the same key, so S3
+needs no conditional puts, and what a failed attempt or a zombie uploaded
+is named by no head, for a collection to delete.
 
 ## Who writes the state
 
@@ -167,7 +176,7 @@ struct Notary;
 
 /// Its part of one attempt at a run.
 struct Notarized {
-    record: Record, // stored as "notary/count" in the root
+    record: Record, // stored as "notary/count", in the seal
     count: u64,     // as this turn sees it
     sealed: u64,    // as the last seal holds it
 }
@@ -186,7 +195,7 @@ impl Extension for Notary {
 impl Participant for Notarized {
     /// Before the seal: set what changed in the mutation. Its flush makes it
     /// durable with the run's memory, its SQL and every other participant,
-    /// in one root.
+    /// in one tail entry.
     async fn prepare(&mut self, mutation: &mut Mutation) -> Result<()> {
         if self.count != self.sealed {
             mutation.set(&self.record, self.count.to_string().into())?;
@@ -254,7 +263,7 @@ Not covered by the toy:
   built-ins have one today (`ctx.fs`, `ctx.llm`); a third-party extension is
   reachable only through `ctx.call`, as an operation.
 - **SQL in an extension:** `Tables` lets an extension read and write the
-  scope's SQL inside the turn's transaction, sealed in the same root. `llm` keeps
+  scope's SQL inside the turn's transaction, sealed in the same flush. `llm` keeps
   its conversations this way.
 - **Large state:** an extension writes big bytes to the scope's blobs before the
   seal and names them in a record, as `fs` does with its manifest.
