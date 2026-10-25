@@ -15,12 +15,7 @@ fn save_checkpoints_private_wal_and_reopens_database_only() -> Result<()> {
         assert!(db.io_stats().private_wal_bytes_written > 0);
         assert_eq!(store.stats().puts, 0, "local WAL must not reach backend");
         db.save().await?;
-        // A blob for the database's one chunk, then the root.
-        assert_eq!(
-            store.stats().puts,
-            2,
-            "a save is a blob per chunk and the root"
-        );
+        assert_eq!(store.stats().puts, 2, "a save is a tail entry and the head");
         store.crash(); // every acknowledged put survives
 
         let mut reopened = Db::open(store.clone(), StateOptions::default()).await?;
@@ -153,9 +148,8 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         let database_len = db.io_stats().database_len;
         db.save().await?;
         let stats = store.stats();
-        // A blob per chunk of the final pages, then the root.
-        let chunks = database_len.div_ceil(4096 * state::FRAME_PAGES);
-        assert_eq!(stats.puts, chunks + 1);
+        // A tail entry of the final pages, then the head.
+        assert_eq!(stats.puts, 2);
         assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < engine_wal / 10);
         store.crash();
@@ -260,6 +254,21 @@ fn query_columns_names_the_last_statement_columns() -> Result<()> {
             .await?;
         assert_eq!(columns, ["value"]);
         assert_eq!(rows[0][0].to_string(), "one");
+        Ok(())
+    })
+}
+
+/// The engine refuses `auto_vacuum`, so no page is a pointer map, whose
+/// first entry's type may read as a b-tree page's: were it allowed, the
+/// SQL crate leaves such a database's pages as the engine wrote them
+/// (`io::tidied`), and this test should check that they survive a reopen.
+#[test]
+fn auto_vacuum_is_refused() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let mut db = Db::open(store, StateOptions::default()).await?;
+        let refused = db.execute("PRAGMA auto_vacuum = FULL").await;
+        assert!(refused.is_err(), "auto_vacuum is allowed: {refused:?}");
         Ok(())
     })
 }
