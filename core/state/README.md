@@ -160,6 +160,9 @@ layout, with measurements against the ones before.
 
 ## Docs
 
+- [Architecture](docs/ARCHITECTURE.md): start here: the data model, the
+  state as a sequence of mutations, the head, tail, checkpoints, manifests
+  and packs and how they change over time, packs in S3, and the numbers
 - [Overview](docs/OVERVIEW.md): the state as files and records changed
   through a mutation, who writes it, and a toy durable functions extension on it
 - [Design](docs/DESIGN.md): the model, invariants, flush, checkpoint, open,

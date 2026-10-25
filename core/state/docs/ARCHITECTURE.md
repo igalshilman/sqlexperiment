@@ -1,0 +1,428 @@
+# Architecture
+
+How the state works, from the top down: the data model a user of the crate
+sees, the state as a sequence of mutations, how that sequence is stored
+(the head, the tail, checkpoints, manifests and packs), and how each of
+those changes over time. It ends with what changes when the packs are in
+S3, and with measured sizes and costs.
+
+The other docs go further on each part:
+[DESIGN.md](DESIGN.md) has the exact rules and failure cases,
+[FORMAT.md](FORMAT.md) the byte encodings, and [FRAMES.md](FRAMES.md) the
+experiment that led to this layout, with its measurements.
+
+## 1. The data model
+
+**A namespace** is the state of one Restate virtual object: one key, such
+as `chat/42`. It has **one owner at a time**: the object's exclusive
+handler, which Restate runs once per key and fences, so a former attempt's
+writes never land after a newer one's. Shared handlers may open the same
+namespace as **readers** beside the owner.
+
+A namespace's state holds three kinds of named values:
+
+| Kind       | What it is                                                              | Used for, say                                   |
+| ---------- | ----------------------------------------------------------------------- | ----------------------------------------------- |
+| **Record** | A whole value, up to 16 MiB, set and read whole                         | A request's effects; a run's progress           |
+| **File**   | A paged file: 4 KiB pages, read and written at random, up to 10 GiB     | The SQL database (the file `db`); a VM's memory |
+| **Log**    | Entries appended at the end and truncated from the start, read by index | A VM's memory turns; anything append-only       |
+
+A file may have a **base**, a golden image the host holds (such as a VM's
+initial memory): its pages are stored as differences from the base's.
+
+**The state is read, never written in place.** A change goes into a
+**mutation**: an owned value that collects records set, pages written,
+files resized, entries appended and logs truncated, in memory. A **flush**
+of the mutation makes all of it durable at once, atomically, in one round
+trip to Restate, or none of it; a mutation dropped instead discards it.
+
+```rust,ignore
+let state = State::open(store).cached(&cache, "chat/42").await?;
+let mut mutation = state.mutation();
+mutation.set(&state.record("effects"), effects)?;
+mutation.write(&state.file("db")?, 7, Some(page))?;
+mutation.flush().await?; // both durable together, or neither
+```
+
+What the state guarantees:
+
+- **Atomic.** After a crash, a flush is either all there or not at all.
+- **Durable on return.** When `flush()` returns, the mutation is stored.
+  When it fails, its outcome is unknown: the state ends, and the next open
+  reads what is there.
+- **Ordered.** Flushes are sequential; each builds on the one before.
+- **Snapshots for readers.** A reader sees the state as of the flush it
+  opened on, however many flushes the owner makes meanwhile.
+
+**SQL on top.** The [SQL crate](../../sql/README.md) runs a
+SQLite-compatible engine on the file `db`. Its statements change a private
+view; at a flush, it moves the pages its transactions committed into the
+mutation, beside whatever else the host puts there (the effects of the
+request, say), so the database and the effects become durable together.
+The language bindings flush after every call that leaves no SQL transaction
+open.
+
+## 2. The state over time: a sequence of mutations
+
+The state is a sequence. Every flush that changes something makes the next
+**version**: version 0 is empty, and
+
+```
+state(n) = state(n − 1) + mutation(n)
+```
+
+A chat agent's first turns, say:
+
+| Version | Mutation (one flush)                                   | State after                             |
+| ------- | ------------------------------------------------------ | --------------------------------------- |
+| 1       | `CREATE TABLE messages`: pages 0–1 of `db`             | An empty table                          |
+| 2       | Insert the user's message: page 1 of `db`              | 1 message                               |
+| 3       | Insert the model's reply: page 1; set record `effects` | 2 messages, and the effects of the turn |
+| 4       | Insert the next user's message: page 1                 | 3 messages                              |
+| …       | …                                                      | …                                       |
+
+Stored as is, that sequence is cheap to write (a flush puts only its own
+mutation, often a few hundred bytes) but grows without end, and opening the
+state would mean replaying all of it. Stored as whole states, opening is
+cheap but every flush rewrites everything. So the state keeps both, in two
+layers:
+
+```
+state(n) = checkpoint(c) + mutation(c + 1) + … + mutation(n)
+           └ a snapshot ┘   └──────────── the tail ─────────┘
+```
+
+- **The tail**: the mutations since the last checkpoint, stored as they
+  were. A flush appends one.
+- **A checkpoint**: the whole state as of version `c`, written now and
+  then by folding the tail into the checkpoint before it. Once a
+  checkpoint is written, the tail before it can go.
+
+Everything below is how those two layers are laid out, written and read.
+
+## 3. How it is stored: the terms
+
+```
+Restate (the object's state)                           Restate, or S3
+┌───────────────────────────────────────────────┐     ┌──────────────────────────────┐
+│ v20/head          the commit point: version,  │     │ pack: checkpoint/<v>-<nonce> │
+│                   checkpoints, tail entries   │     │   frames, patches,           │
+│ v20/tail/<v>/<p>  one per flush: its mutation │     │   large values               │
+│ v20/manifest/...  one per checkpoint: where   │────▶│                              │
+│                   every frame and value is    │     │                              │
+└───────────────────────────────────────────────┘     └──────────────────────────────┘
+```
+
+| Term                   | What it is                                                                                                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Head**               | The commit point, one key (`v20/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                             |
+| **Tail entry**         | One flush's mutation, as it was (`v20/tail/<version>/<part>`).                                                                                                                                                           |
+| **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                              |
+| **Checkpoint**         | The whole state as of a version: a pack and a manifest. Written by a flush, when the tail is long enough, before its own tail entry.                                                                                     |
+| **Frame**              | The unit a file is stored in: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                              |
+| **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                      |
+| **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `checkpoint/<version>-<nonce>`, with a random nonce, so no two puts share one. |
+| **Manifest**           | One per checkpoint (`v20/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                 |
+| **Overlay**            | The tail, decoded in memory: the pages, records and logs changed since the checkpoint. A read looks here first.                                                                                                          |
+| **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                               |
+| **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                           |
+| **Pack store**         | Where packs go: Restate by default (`KvBlobs`, in 64 KiB parts beside everything else), or S3 (`ObjectStoreBlobs`).                                                                                                      |
+
+## 4. The pieces, and how they change over time
+
+### A flush
+
+1. **Encode the mutation** as a tail entry. Each page written is a zstd
+   frame of its own, compressed against its **reference**: the page as the
+   checkpoint holds it. A row update usually changes a few bytes of a page,
+   so its page costs about 100–200 bytes, not 4 KiB.
+2. **If a checkpoint is due**, write it first (below), as of the version
+   before this flush.
+3. **Put** the tail entry, then the head; **sync**. Restate keeps writes in
+   order, and a crash keeps a prefix of them, so the head is never stored
+   without the tail entry (and, with packs in Restate, the pack and
+   manifest) put before it. That is one round trip, checkpoint or not.
+4. **Apply** the entry to the overlay in memory. The state is now at the
+   next version, without reading anything back.
+
+### The head
+
+About 80–180 bytes, uncompressed, overwritten by every flush:
+
+- the database's random identity, drawn when it was made, and its frame size;
+- the version;
+- the checkpoint (its version and nonce, and its manifest's length), and
+  the previous one, which readers that opened before the latest checkpoint
+  may still read;
+- the first tail entry kept, the tail's bytes since the checkpoint, and the
+  number of parts of each tail entry kept.
+
+It is the only key whose write commits anything. Every other key is either
+new (a tail entry for the next version) or never changed (a pack, a
+manifest), so a crash midway leaves only keys no head names.
+
+### Tail entries
+
+One per flush, for the version it makes, cut into parts of 1 MiB if large:
+
+- the records set, with their values;
+- per log changed, the entries appended and where it was truncated (an
+  entry appended and truncated in the same flush is dropped);
+- per file changed, its new size and the pages written, each compressed
+  against its reference.
+
+Every entry since a checkpoint compresses against **that** checkpoint, so
+each decodes alone. An entry is never changed; it is deleted when the
+second checkpoint after it is adopted, until which readers on the older
+checkpoint may need it.
+
+### Checkpoints
+
+**When.** A flush checkpoints first when, since the last checkpoint:
+
+- 128 flushes have been made (`checkpoint_entries`), or
+- the tail holds 1 MiB (`checkpoint_bytes`); with packs in Restate, or
+  as many bytes as the checkpoint itself holds (its packs and manifest),
+  whichever is smaller,
+
+or when the mutation asks for one (`mutation.checkpoint()`). The
+relative rule is for packs in Restate, where a checkpoint costs only its
+bytes: a 20 KiB database checkpoints every few dozen flushes and keeps a
+short tail, and a 100 MiB one every 128.
+
+**What it writes.** For each frame the overlay changed:
+
+- **Patch it** when only a few of its pages changed: each changed page is
+  stored as a patch, compressed against the frame's page, while the
+  frame's patches stay within half the frame's stored bytes. A one-row update in a
+  large database touches a frame or two, so a checkpoint of 128 such
+  flushes is about 28 KB of patches.
+- **Rebuild it** otherwise: read the old frame and its patches, apply the
+  overlay's pages, compress it again without patches.
+
+Then the records set and log entries appended since: inline in the
+manifest if up to 1 KiB, else into the pack. And **compaction**: any older
+pack the new manifest needs less than half of has its live ranges copied,
+as they are, into the new pack, so that pack can go.
+
+All of that is one pack and one manifest. The flush's head then names the
+new checkpoint, the one before becomes the previous checkpoint, and the
+tail entries the previous checkpoint covered are deleted in the same sync.
+
+A checkpoint that fails (an upload, say) fails nothing: the flush commits
+its tail entry anyway, reports why (`FlushReport::checkpoint_failed`), and
+the next flush tries again.
+
+### Manifests
+
+One per checkpoint, zstd-compressed, always in Restate, in 64 KiB parts:
+
+- the packs it uses, and the bytes each holds (for compaction);
+- every record: inline, or where its value is;
+- every log: its first index and where each entry is;
+- every file: its size, its base, a location (pack, offset, length) per
+  frame, or none for a hole, and its patches.
+
+About 1.7 bytes per frame: 3 KiB for a 100k-row database, 30 KiB for 1M
+rows. A checkpoint writes its manifest whole. Two are kept, the head's
+checkpoint's and the previous one's.
+
+### Packs
+
+One per checkpoint that stores anything outside its manifest. Put once,
+never changed, named with a random nonce, so a cache can keep any range of
+any pack forever, with nothing to invalidate. A pack lives as long as some
+manifest the head names points into it. A frame no flush touches stays in
+the pack that first wrote it, across any number of checkpoints, until
+compaction moves it.
+
+### A timeline
+
+With a checkpoint every 4 flushes (128 by default), `E5` the tail entry of
+version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
+`M4`):
+
+| Flush makes | Checkpoint first | The head names   | Tail kept | Deleted in the same sync | Garbage collected after                      |
+| ----------- | ---------------- | ---------------- | --------- | ------------------------ | -------------------------------------------- |
+| v1 … v4     | –                | no checkpoint    | E1 … E4   | –                        | –                                            |
+| v5          | C4 = P4 + M4     | C4               | E1 … E5   | –                        | –                                            |
+| v6 … v8     | –                | C4               | E1 … E8   | –                        | –                                            |
+| v9          | C8 = P8 + M8     | C8, previous C4  | E5 … E9   | E1 … E4                  | nothing older than C4                        |
+| v10 … v12   | –                | C8, previous C4  | E5 … E12  | –                        | –                                            |
+| v13         | C12 = P12 + M12  | C12, previous C8 | E9 … E13  | E5 … E8                  | M4; P4 unless M8 or M12 still points into it |
+
+- **State v10** is `C8 + E9 + E10`, and E9 and E10 compress against C8's
+  pages.
+- **A reader** that opened on v6 reads `C4 + E5 + E6`. Those stay until
+  v13, two checkpoints later; after that it fails with "is gone", and its
+  handler is retried.
+- **In Restate**, at any time: the head, the tail since the previous
+  checkpoint (at most twice 128 entries), two manifests, and the packs
+  those two manifests point into.
+
+### Opening and reading
+
+**Open**:
+
+1. **Get the head.** If this process's cache holds the state as of exactly
+   this head (it was the last to flush, say), reuse it, with its parked SQL
+   engine: done, in one round trip.
+2. Otherwise, **get the checkpoint's manifest and the tail past it**,
+   together, and apply the tail to the overlay in memory.
+3. **Get large records and log entries**, and every frame of a file of at
+   most 16 pages, such as a small database whole, together.
+
+That is at most 3 round trips, whatever the database's size.
+
+**Read a page** from the first of:
+
+1. the overlay (the tail changed it): decompress it against its reference,
+   the checkpoint's page, which may need reading first;
+2. its patch;
+3. its frame: one ranged read of the pack (a 64 KiB part in Restate, a
+   ranged GET in S3), decompressed in about 25 µs;
+4. a hole: zeros, or the base's page.
+
+A SQL query reads a page per b-tree level it descends, so a cold point
+query is a round trip per level the cache does not hold: 2 to 6.
+
+### Garbage collection
+
+After every flush that checkpoints, and whenever anyone calls
+`State::collect_garbage` (a reader may too):
+
+1. **List** Restate's keys, once (Restate's `getKeys()`), and S3's packs if
+   they are there.
+2. **Keep** the packs the head's two manifests point into, and the two
+   manifests.
+3. **Delete** listed packs and manifests older than the previous
+   checkpoint that neither manifest needs: in Restate, queued and stored by
+   one sync; in S3, one request.
+
+Collections may overlap, crash or race the owner: a later head only ever
+names packs its own manifests name, or packs newer than its previous
+checkpoint, so whatever head a collection read, it never deletes what a
+later head needs. A pack a crashed attempt put, which no head names, goes
+once the previous checkpoint passes it.
+
+### The cache
+
+One `PageCache` per process ([foyer](https://github.com/foyer-rs/foyer),
+in memory and spilling to a local disk file):
+
+- **Pack ranges**: frames, patches, values and manifests, kept by (pack,
+  offset). Packs never change, so nothing is ever invalidated.
+- **Namespace states**: per namespace, the head bytes it last read or
+  wrote and the state as of that head, kept by their bytes (256 MiB by
+  default). An open that reads the same head bytes reuses the state and
+  reads nothing more; any other head (another process flushed) loads that
+  head's state, from cached ranges where it can.
+- **Parked engines**: the SQL crate parks its engine at the end of a
+  session (64 MiB in all), so the next session skips parsing the schema.
+
+With a warm cache, a handler invocation costs two round trips: get the
+head, and the flush's sync.
+
+### Failures
+
+A crash anywhere keeps a prefix of the writes since the last sync, and
+nothing needs repair:
+
+| Interrupted        | What is left                             | What happens next                         |
+| ------------------ | ---------------------------------------- | ----------------------------------------- |
+| A flush            | Its tail entry without the head, or both | The next flush overwrites the tail entry  |
+| A checkpoint       | A pack and manifest no head names        | Garbage, collected later                  |
+| A collection       | Some deletes                             | The next collection deletes the rest      |
+| An unknown outcome | The flush may or may not be stored       | The state ends; the next open syncs first |
+
+## 5. With packs in S3
+
+`State::open(store).checkpoints(packs)` puts the packs in an object store.
+Only the packs move. The head, the tail and the manifests stay in Restate,
+so an open never needs S3 to find anything.
+
+What changes:
+
+- **A checkpoint uploads its pack** (one PUT) before the flush puts its
+  head, so a checkpointing flush, one in 128, also waits for S3.
+- **A page read is a ranged GET** of the pack's frame, about 20 ms against
+  about 2 ms for Restate.
+- **The checkpoint trigger is absolute**: 128 flushes or 1 MiB. A
+  checkpoint costs an S3 PUT and LIST, so a small database is not
+  checkpointed early, and its tail runs longer (and its pages drift further
+  from their references).
+- **No fencing in S3.** Restate fences the head and the tail; S3 fences
+  nothing, so a former attempt may still be uploading. A pack's name has a
+  random nonce, so no two uploads ever share a name, and a head only names a pack
+  its own attempt uploaded before putting it: a zombie's packs are
+  garbage, collected later.
+- **Garbage collection** lists Restate's keys and S3's packs together, and
+  deletes in one Restate sync and one S3 request.
+
+## 6. Numbers
+
+Bytes and request counts below come from the `flush_costs` bench
+(`core/sql/benches`), which runs the real encoding over in-memory stores.
+Latencies come from `read_latency`, a discrete-event simulation that
+**assumes** 2 ms per Restate round trip and 20 ms per S3 request; they show
+the shape, not production timings.
+
+### Packs in Restate (the default)
+
+Per flush, with a warm cache:
+
+| Workload           | Database | Bytes put to Restate (tail + pack + manifest + head) | Stored in Restate | Keys  | Cold open and a point read |
+| ------------------ | -------- | ---------------------------------------------------- | ----------------- | ----- | -------------------------- |
+| Chat with effects  | 180 KiB  | 1937 (1529 + 291 + 40 + 77)                          | 179 KiB           | 80    | 4 round trips, 35 gets     |
+| Small, update 1    | 20 KiB   | 554 (339 + 134 + 4 + 77)                             | 23 KiB            | 41    | 3 round trips, 19 gets     |
+| 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
+| 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
+| 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |
+
+The pack and manifest columns are spread over the flushes: a 1M-row
+database's checkpoint, every 128 flushes, writes about 28 KB of patches
+and a 30 KiB manifest.
+
+Cold reads, at 2 ms a round trip:
+
+| Database | Open | Point query (primary key) | Point query (index) | 100-row range |
+| -------- | ---- | ------------------------- | ------------------- | ------------- |
+| 100 rows | 6 ms | 0 (all in memory)         | 0                   | 0             |
+| 10k rows | 6 ms | 4 ms                      | 6 ms                | 8 ms          |
+| 1M rows  | 6 ms | 6 ms                      | 12 ms               | 10 ms         |
+
+### Packs in S3
+
+| Workload           | Bytes put to Restate per flush | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold |
+| ------------------ | ------------------------------ | ----------------- | ------------ | ---------------------------------------------- |
+| Chat with effects  | 1938                           | 223 KiB           | 0.06 MiB     | $0.07 / $1.02                                  |
+| Small, update 1    | 1735                           | 150 KiB           | 0.01 MiB     | $0.07 / $0.60                                  |
+| 10k rows, update 1 | 436                            | 34 KiB            | 1.15 MiB     | $0.08 / $2.73                                  |
+| 1M rows, update 1  | 653                            | 93 KiB            | 108 MiB      | $0.08 / $3.86                                  |
+| 1M rows, update 10 | 1078                           | 153 KiB           | 108 MiB      | $0.08 / $28.70                                 |
+
+Warm, the cost is the checkpoints' PUT and LIST, once in 128 flushes; cold,
+it is the GETs of the frames a flush reads, which follow the rows it
+touches more than the database's size. Storage is a rounding error: 108 MiB
+costs $0.0024 a month.
+
+Cold reads, at 2 ms a Restate round trip and 20 ms an S3 GET:
+
+| Database | Open  | Point query (primary key) | Point query (index) | 100-row range |
+| -------- | ----- | ------------------------- | ------------------- | ------------- |
+| 100 rows | 4 ms  | 0 (all in the tail)       | 0                   | 0             |
+| 10k rows | 24 ms | 40 ms                     | 60 ms               | 80 ms         |
+| 1M rows  | 24 ms | 60 ms                     | 120 ms              | 100 ms        |
+
+With a warm cache both modes cost the same: two Restate round trips per
+invocation, and no S3 request.
+
+### Choosing
+
+- **Packs in Restate**: one system, no unfenced writer, no credentials, and
+  cold reads about 10× faster. The whole database, compressed (about 2.5×),
+  is in Restate, a key per 64 KiB, and every collection lists them all.
+- **Packs in S3**: Restate holds kilobytes per database however large it
+  grows, and S3 costs cents per million warm flushes. Each b-tree level a
+  cold query reads costs an S3 GET, and small databases write about 3× the
+  bytes to Restate, as their tail is cut less often.
