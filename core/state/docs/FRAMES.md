@@ -7,15 +7,16 @@ Restate itself) keeps checkpoints, each one object. What changes is the
 checkpoint's format. Packs made copy-on-write unnecessary, so the radix chunk
 map, chunks, bases and deltas are gone. A file is a row of frames, each
 frame `frame_pages` pages (4: 16 KiB) compressed with zstd on its own, and
-a checkpoint rewrites the frames the tail changed.
+a checkpoint rewrites the frames the tail changed, or patches the pages it
+changed in them.
 
 ## Layout
 
-| Store   | Key                            | Holds                                                                                                         |
-| ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| Store   | Key                            | Holds                                                                                                           |
+| ------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
 | Restate | `v19/head`                     | The commit point: identity, frame size, version, the checkpoint and the one before, the tail's extent and parts |
-| Restate | `v19/tail/<version>/<part>`    | One flush's mutation: records set, log appends and truncations, sizes, pages (a zstd frame each, or a hole)    |
-| S3      | `checkpoint/<version>-<nonce>` | A pack: frames, large values, then the manifest                                                               |
+| Restate | `v19/tail/<version>/<part>`    | One flush's mutation: records set, log appends and truncations, sizes, pages (a zstd frame each, or a hole)     |
+| S3      | `checkpoint/<version>-<nonce>` | A pack: frames, large values, then the manifest                                                                 |
 
 Without S3, packs are kept in Restate in parts of 64 KiB
 (`v19/pack/<key>/<part>`). A tail entry over 1 MiB is split into parts.
@@ -23,7 +24,7 @@ Without S3, packs are kept in Restate in parts of 64 KiB
 **The manifest** is flat, compressed with zstd, at the end of the pack (the
 head says where). It lists:
 
-- every file: its size, its base's id, and where each of its frames is (pack, offset, length), or nothing for a hole;
+- every file: its size, its base's id, where each of its frames is (pack, offset, length), or nothing for a hole, and where its patches are (below);
 - every record: inline if small, else where its frame is;
 - every log: its first index, and its entries, inline or where;
 - the bytes each pack it names holds, for compaction.
@@ -32,8 +33,11 @@ head says where). It lists:
 
 1. **Entry.** The mutation, as is: records' values, log changes (appends
    that the same mutation truncates are dropped), sizes, and each page
-   written as a zstd frame of its own, against its base page if the file
-   has a base.
+   written as a zstd frame of its own, compressed against its _reference_:
+   the page as the head's checkpoint holds it (its patch, else its frame),
+   else its base's page. The reference stays the same for the whole tail,
+   so an entry decodes alone, and a small change to a page costs bytes in
+   proportion to what changed since the checkpoint.
 2. **Put** the entry's parts, then the head; **sync**: one round trip.
 3. **Apply** the entry to the overlay in memory: pages written since the
    checkpoint, the records and logs as they are, and, for a file that
@@ -41,14 +45,19 @@ head says where). It lists:
 
 ## Checkpoint
 
-When the tail is long enough (`checkpoint_entries`, `checkpoint_bytes`), a
-flush first writes the durable state as a checkpoint, then names it in its
-head:
+When the tail is long enough, a flush first writes the durable state as a
+checkpoint, then names it in its head. Long enough is `checkpoint_entries`
+(128) entries, or `checkpoint_bytes` (1 MiB); with packs in Restate, where a
+checkpoint costs only its bytes, at most the bytes the checkpoint's packs
+hold, so the tail of a small database stays short.
 
-1. **Frames.** Every frame the overlay touched (or a cut reached) is
-   rebuilt from the checkpoint's frame (fetched, in parallel) and the
-   overlay's pages, then compressed again. A frame that is all hole is not
-   stored.
+1. **Frames.** A frame the overlay changed only a few pages of is
+   _patched_: each page it changed is put as a patch, compressed against
+   the frame's page, while its patches stay within half the frame's size.
+   Any other frame the overlay touched (or a cut reached) is rebuilt from
+   the checkpoint's frame and patches (fetched, in parallel) and the
+   overlay's pages, then compressed again, without patches. A frame that
+   is all hole is not stored.
 2. **Values.** Records set since, and log entries appended since: inline
    in the manifest if small, else a frame of their own.
 3. **Compaction.** A pack that the manifest needs less than half of has
@@ -68,57 +77,100 @@ write unless it is opened with that base.
 ## Open and read
 
 - **Open:** the head; then, together, the manifest and the tail past the
-  checkpoint; then, together, stored values and the frames of small files.
-  An owner whose cache still holds this head reuses the state it left:
-  one round trip.
-- **Read:** a page from the overlay, else from its frame (a ranged GET,
-  cached forever by location; a pack never changes), else a hole.
+  checkpoint; then, together, stored values and the frames and patches of
+  small files. An owner whose cache still holds this head reuses the state
+  it left: one round trip.
+- **Read:** a page from the overlay, else its patch, else from its frame
+  (a ranged GET each, cached forever by location; a pack never changes),
+  else a hole.
 
 ## What it replaced
 
-| tail+checkpoints (v18)                                         | frame packs (v19)                         |
-| -------------------------------------------------------------- | ----------------------------------------- |
-| Tail entries of copy-on-write blobs (chunk deltas, map nodes)  | Tail entries that are the mutation itself |
-| A radix map of chunks per file, each a base and a delta        | A flat row of frames per file             |
-| A manifest of blob → location, plus a root and its map nodes   | One flat manifest                         |
-| Blob numbers, next-blob rules, rebase ratios, fanouts          | Locations only                            |
+| tail+checkpoints (v18)                                        | frame packs (v19)                         |
+| ------------------------------------------------------------- | ----------------------------------------- |
+| Tail entries of copy-on-write blobs (chunk deltas, map nodes) | Tail entries that are the mutation itself |
+| A radix map of chunks per file, each a base and a delta       | A flat row of frames per file             |
+| A manifest of blob → location, plus a root and its map nodes  | One flat manifest                         |
+| Blob numbers, next-blob rules, rebase ratios, fanouts         | Locations only                            |
 
 ## Results
 
-`flush_costs`, `S3=1`, the same workloads and defaults as tail+checkpoints
-(`claude/log-checkpoints`), per flush; dollars per million flushes at S3
-Standard's and Express One Zone's prices. Each cell reads tail+checkpoints →
-frame packs.
+`flush_costs`, the same workloads and defaults as tail+checkpoints
+(`claude/log-checkpoints`), per flush, with a cache unless noted. Each
+cell reads tail+checkpoints → the first frame packs (whole frames, 4
+pages) → frame packs as they are now.
 
-| Workload        | Cache | Restate B   | S3 GETs       | S3 upload B   | S3 stored MiB | Cold S3 GETs | Standard $/M  | Express $/M  |
-| --------------- | ----- | ----------- | ------------- | ------------- | ------------- | ------------ | ------------- | ------------ |
-| chat+effects    | no    | 1724 → 2147 | 1.20 → 1.04   | 185 → 291     | 0.07 → 0.09   | 4 → 2        | 0.54 → 0.48   | 0.05 → 0.05  |
-| 10k: update 1   | no    | 756 → 3928  | 7.64 → 4.40   | 300 → 8099    | 1.17 → 1.98   | 10 → 4       | 3.13 → 1.84   | 0.25 → 0.17  |
-| 10k: update 10  | no    | 3854 → 37090| 26.5 → 13.4   | 164 → 35093   | 1.13 → 1.98   | 7 → 4        | 10.68 → 5.68  | 0.81 → 0.58  |
-| 100k: update 1  | no    | 522 → 3858  | 13.8 → 7.0    | 331 → 46203   | 10.93 → 21.20 | 58 → 4       | 5.61 → 2.87   | 0.43 → 0.37  |
-| 200k: update 10 | no    | 2251 → 36553| 44.5 → 40.6   | 892 → 346041  | 21.96 → 42.02 | 52 → 4       | 17.89 → 16.57 | 1.36 → 2.32  |
-| 1M: update 1    | no    | 632 → 3829  | 234.1 → 6.5   | 1352 → 30045  | 109.7 → 108.9 | 286 → 4      | 93.70 → 2.67  | 7.04 → 0.30  |
-| 1M: update 10   | no    | 2258 → 36316| 128.7 → 54.7  | 2102 → 488690 | 109.9 → 119.3 | 534 → 4      | 51.57 → 22.19 | 3.89 → 3.17  |
-| 1M: update 1    | yes   | 633 → 3830  | 1.13 → 0.03   | 1352 → 30047  | 109.7 → 108.9 | 286 → 4      | 0.53 → 0.09   | 0.06 → 0.11  |
-| 1M: update 10   | yes   | 2259 → 36324| 2.09 → 0.08   | 2102 → 488704 | 109.9 → 119.3 | 534 → 4      | 0.92 → 0.34   | 0.09 → 1.53  |
+**Packs in Restate** (the default): bytes put to Restate per flush, tail
+entries, packs and heads together, and the gets a cold open makes.
 
-Both make one Restate round trip a cached flush, and one PUT a checkpoint.
+| Workload        | Put B/flush          | Cold gets    |
+| --------------- | -------------------- | ------------ |
+| chat+effects    | 1907 → 2201 → 1942   | 7 → 5 → 35   |
+| small: update 1 | 1112 → 1786 → 557    | 7 → 6 → 19   |
+| 10k: update 1   | 1055 → 9322 → 644    | 12 → 6 → 6   |
+| 10k: update 10  | 4017 → 10693 → 2037  | 9 → 6 → 7    |
+| 10k: insert 1   | 2324 → 3449 → 1879   | 11 → 6 → 8   |
+| 100k: update 1  | 853 → 12965 → 633    | 60 → 6 → 6   |
+| 200k: update 1  | 1009 → 12444 → 667   | 62 → 6 → 8   |
+| 200k: update 10 | 3141 → 108279 → 1357 | 55 → 7 → 9   |
+| 1M: update 1    | 1983 → 13718 → 880   | 296 → 6 → 6  |
+| 1M: update 10   | 4360 → 127000 → 1664 | 1331 → 7 → 6 |
 
-- **Requests:** fewer. A cold read is the manifest and a frame, not a
-  walk of map nodes, so cold GETs drop from up to 534 to 4, and uncached
-  flushes cost a third to a thirtieth on S3 Standard.
-- **Bytes:** more.
-  - A tail entry is 5–16× larger, since a page is compressed alone, not
-    against its previous image.
-  - A checkpoint rewrites whole frames, so it uploads 25–230× more bytes.
-  - Compaction at ½ live stores up to 2× what is live.
+A cached flush is two round trips in all three: the head's read and the
+sync.
 
-  On Standard, upload bytes are free and storage is a rounding error; on
-  Express they make a cached ten-row update cost $1.53 rather than $0.09.
-- **Frame size:** `FRAME_PAGES=4` (16 KiB) uploads 3–4× fewer bytes and
-  stores less, for slightly more GETs uncached:
-  - 1M update 10, cached: $0.43 rather than $1.53 on Express.
-  - 100k update 1: 13.9 MiB stored rather than 21.2.
-- **Code:** 2,800 lines in the state crate, without comments and blanks,
-  against 3,492 for tail+checkpoints and 3,051 for blob-claims; the monitor
-  is 392 lines against 481.
+What brought the bytes down from the first frame packs:
+
+- **Tail pages against the checkpoint's page.** A small change to a page
+  costs what changed since the checkpoint, not a whole compressed page.
+- **Patches.** A checkpoint puts the pages that changed in a frame as
+  patches against the frame's page, while they stay within half the frame,
+  instead of rewriting the frame: the large databases' checkpoints are
+  30–200× smaller.
+- **A relative trigger.** With packs in Restate, a checkpoint costs only its
+  bytes, so the tail is cut once it holds more than the checkpoint's packs:
+  a small database checkpoints often and keeps a short tail.
+- **No sync for a pack.** Restate keeps writes in order and a crash keeps a
+  prefix, so a pack's parts, put before the head that names them, are
+  durable with its sync. Garbage collection lists once and syncs once.
+- **Tidy pages.** The engine reuses page buffers without zeroing them, so a
+  new page's free space held an old page's bytes, which compress badly.
+  The SQL crate zeroes the bytes a b-tree page does not read before it
+  writes it, as SQLite's `secure_delete` does: a cached insert puts 1879
+  bytes rather than 3136.
+
+**Packs in S3** (`S3=1`): dollars per million flushes at S3 Standard's
+price uncached and Express One Zone's cached; tail+checkpoints → frame packs.
+
+| Workload        | Restate B   | S3 GETs, uncached | S3 upload B | Cold S3 GETs | Standard $/M, uncached | Express $/M, cached |
+| --------------- | ----------- | ----------------- | ----------- | ------------ | ---------------------- | ------------------- |
+| chat+effects    | 1724 → 1937 | 1.20 → 3.07       | 185 → 176   | 4 → 4        | 0.54 → 1.29            | 0.02 → 0.02         |
+| small: update 1 | 1059 → 1737 | 0.46 → 2.02       | 54 → 35     | 4 → 3        | 0.25 → 0.87            | 0.02 → 0.02         |
+| 10k: update 1   | 756 → 429   | 7.64 → 7.64       | 300 → 214   | 10 → 4       | 3.13 → 3.13            | 0.02 → 0.02         |
+| 10k: update 10  | 3854 → 1808 | 26.5 → 39.4       | 164 → 229   | 7 → 5        | 10.68 → 15.83          | 0.02 → 0.02         |
+| 10k: insert 1   | 1603 → 1750 | 5.18 → 6.44       | 141 → 130   | 9 → 6        | 2.15 → 2.66            | 0.02 → 0.02         |
+| 100k: update 1  | 522 → 400   | 13.8 → 8.2        | 331 → 234   | 58 → 4       | 5.61 → 3.34            | 0.03 → 0.02         |
+| 200k: update 1  | 564 → 409   | 22.5 → 11.7       | 444 → 259   | 60 → 6       | 9.08 → 4.76            | 0.03 → 0.02         |
+| 200k: update 10 | 2251 → 812  | 44.5 → 59.3       | 892 → 546   | 52 → 6       | 17.89 → 23.78          | 0.03 → 0.02         |
+| 1M: update 1    | 632 → 411   | 234.1 → 10.5      | 1352 → 470  | 286 → 4      | 93.70 → 4.27           | 0.06 → 0.02         |
+| 1M: update 10   | 2258 → 789  | 128.7 → 72.6      | 2102 → 876  | 534 → 4      | 51.57 → 29.11          | 0.09 → 0.02         |
+
+A cached flush is two round trips here too, and a checkpoint one PUT.
+
+- **Restate bytes:** about half on the larger databases, in both modes:
+  a tail page costs what changed since the checkpoint. With packs in S3 a
+  small database's tail is cut only every 128 flushes or 1 MiB, so its
+  pages drift further from the checkpoint and cost more (small update 1:
+  1737 bytes, against 557 with packs in Restate).
+- **Cold opens:** the manifest and a frame, not a walk of map nodes: cold
+  S3 GETs drop from up to 534 to 6. With packs in Restate a small
+  database's open reads its tail, as long as its packs (chat: 35 gets, in
+  4 round trips).
+- **Uncached flushes** read the checkpoint's frames their pages are in,
+  not chunk deltas: more GETs on small databases and ten-row updates (up
+  to 4× for a small one, $0.87 rather than $0.25 a million on Standard),
+  far fewer on large ones (1M update 1: $4.27 rather than $93.70). With a
+  cache every workload costs $0.02 a million on Express.
+- **Code:** 3,017 lines in the state crate, without comments and blanks,
+  against 3,492 for tail+checkpoints and 3,051 for blob-claims; the SQL
+  crate's page tidying is 50 more.
