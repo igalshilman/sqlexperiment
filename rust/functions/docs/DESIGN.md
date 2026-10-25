@@ -9,7 +9,7 @@ substitutes for protocol steps. Last consolidated: 18 October 2026.
 The implementation in this crate uses QuickJS compiled to WebAssembly, Wasmtime,
 4 KiB page write tracking (by the kernel where it can, else by instrumented
 stores), and Zstd batches of the changed 64-byte blocks, each compressed
-against the blocks it replaces, over a shared golden image. A turn ends in one root per scope (§7), in a Restate object's
+against the blocks it replaces, over a shared golden image. A turn ends in one flush per scope (§7): a tail entry and the head that names it, in a Restate object's
 state, which the `restate` module drives from each program's `run` handler
 (§9.1). The VM stays live from turn to turn of one attempt.
 
@@ -49,8 +49,8 @@ Assumptions and invariants:
 3. Writes are kept in issue order: a sync makes every write before it
    durable, and a crash keeps a prefix of those not yet synced. Reads within
    an attempt see its own writes.
-4. A turn happened once its commit, the scope's root, is stored, after the
-   blobs of its pages and its KV writes (§7). Effects are dispatched
+4. A turn happened once its commit, the scope's head, is stored, after the
+   tail entry of its pages and its KV writes (§7). Effects are dispatched
    only after the commit that issued them, in issue order, so a crash that
    loses the commit loses them too.
 5. Snapshot only after returning completely from Wasm. The image contains
@@ -520,10 +520,10 @@ after each commit is stored. A failed commit ends the attempt with its VM.
 
 Since 24 October 2026 a turn appends its changed pages to the log
 `memory/turns` (§5.1), as one Zstd frame with their previous images as its
-prefix, and every 16 turns folds them into the memory file, whose chunks
-the state compresses against what they replace. From 21 October, a turn
-wrote its pages into the file itself: a delta per changed chunk, against
-everything since the chunk's base (§10.1). The block encoding below, and its
+prefix, and every 16 turns folds them into the memory file, whose pages
+the state compresses against the page as its checkpoint holds it. From 21
+October, a turn wrote its pages into the file itself: a delta per changed
+chunk of pages, against everything since the chunk's base (§10.1). The block encoding below, and its
 measurements, are the history both came from.
 
 Selected encoding: **the changed 64-byte blocks of the changed pages,
@@ -656,15 +656,15 @@ read from `file`, then each entry of `memory/turns` replayed over it, in
 order. An entry is the count of pages a turn changed, their indexes (each a
 little-endian `u32`), and one Zstd frame of their new images with their
 previous images as its prefix: a page costs about what changed in it,
-wherever it moved. A turn appends its entry, a blob of its own, and the
-root holds only its number; every 16th turn, or one that would take the
+wherever it moved. A turn appends its entry, which rides in the flush's tail
+entry; every 16th turn, or one that would take the
 log past 4 MiB of pages, instead writes every page the log's turns and its
 own changed into the file and truncates the log, in the same flush. A
-turn thus writes about what it changed, and the file's chunks change only
-at a fold. The file is over golden (a `state` base): a chunk the run
-never changed reads as golden's, a chunk's base is compressed against
-golden's pages, and each later change as a delta against that base, so a
-page costs about what changed in it.
+turn thus writes about what it changed, and the file's pages change only
+at a fold. The file is over golden (a `state` base): a page the run
+never changed reads as golden's, a checkpoint's frames are compressed
+against golden's pages, and a page in the tail against the page as the
+checkpoint holds it, so a page costs about what changed in it.
 `folded` lists the file's pages that differ from golden, run-length
 encoded, because the store cannot list a file's pages: a restore reads
 exactly those. `pages` lists the image's, its size in memory. A settled
@@ -677,13 +677,13 @@ migration.
 
 The returned View holds the run, program, turns, Progress, memory length, live
 pages, and what the last turn wrote: changed and examined pages, the bytes
-its seal wrote (memory and tables) and the root's.
+its seal's tail entry held (memory and tables) and the head's.
 
 ### 5.2. One file per golden image
 
 The memory file is named after its golden image, and opens only with it
-(the state refuses another base): its chunks decode only against that
-image. A new run in the scope empties the previous run's file in its first
+(the state refuses another base): its frames and pages decode only
+against that image. A new run in the scope empties the previous run's file in its first
 seal (without its golden image: emptying needs none), then writes its own
 pages in its own file. A scope that runs one program reuses one file; a
 new program version adds a file, which the previous one's emptied file stays
@@ -745,10 +745,10 @@ reconstruct(run, memory):
     require golden_length <= memoryLen <= limit, 64-KiB aligned
     memory = golden bytes, extended with zeros to memoryLen
     read the pages memory.folded lists from memory.file, together
-        (each from the state's decoded chunks, the process's page cache,
+        (each from the state's decoded frames, the process's page cache,
         or the store)
     write them into memory
-    for each entry of memory/turns, in order:     // read with the root
+    for each entry of memory/turns, in order:     // read with the head's tail
         decompress its frame with the pages it names, as they are, as prefix
         write the pages it names
     return Image(memory, memory.meta)
@@ -888,8 +888,8 @@ Resume can coexist. Once the root settles, the run is final.
 
 ## 7. Storage: one commit per turn
 
-A turn is one flush of the scope's state (`Mutation::flush`): its blobs, then its
-root, and one sync. Every participant writes into one mutation:
+A turn is one flush of the scope's state (`Mutation::flush`): its tail entry, then its
+head, and one sync. Every participant writes into one mutation:
 
 1. its KV writes, the SQL transaction its first KV request began;
 2. its memory's pages that changed, as an entry of the log `memory/turns`,
@@ -898,10 +898,13 @@ root, and one sync. Every participant writes into one mutation:
    memory's, as the record `memory`; and what each extension changed in
    its part of the state (its records and files under `<name>/`).
 
-The flush puts each changed chunk (SQL's pages, the memory's at a fold) and
-the turn's log entry as new blobs, then the root that names them, and syncs once: writes are kept in
-issue order (§1), so a stored root names only stored blobs. A crash before
-the root is stored loses the whole turn, which the next
+The flush puts one tail entry (SQL's pages, the memory's at a fold, the
+turn's log entry and the records), then the head that names it, and syncs
+once: writes are kept in issue order (§1), so a stored head names only a
+stored tail. Now and then the flush first writes a checkpoint, which folds
+the tail into packs (see the
+[state's architecture](../../../core/state/docs/ARCHITECTURE.md)). A crash
+before the head is stored loses the whole turn, which the next
 attempt runs again from the previous flush: the requests it issued were
 never dispatched (§1). Nothing is applied after a flush; a mutation that is not
 flushed is dropped, and its writes with it.

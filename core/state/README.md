@@ -7,7 +7,7 @@ paged **files** (4 KiB pages, read and written at random) and **logs**
 (entries appended, and truncated from the start). The state is read; it
 changes only through a **mutation**, an owned value that collects the records
 set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
-once, in one round trip. It needs only `get`, `put` and `delete` from the backend,
+once, in one round trip. It needs only `get`, `put`, `delete` and `sync` from the backend,
 and a listing of its keys to collect the garbage.
 
 The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its

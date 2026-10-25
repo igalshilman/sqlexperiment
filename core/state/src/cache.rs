@@ -12,8 +12,8 @@
 //! (see [`crate::format`]), so a range of it (a frame, a value, a manifest)
 //! is cached under its location, for as long as the cache keeps it: there
 //! is nothing to invalidate. Keys are the namespace's identity, the pack's
-//! name and the offset; a namespace's identity comes from a process-wide
-//! counter, and the disk tier starts empty in every process.
+//! name and the offset; a namespace's identity comes from a per-cache
+//! counter, randomly seeded, and the disk tier starts empty in every process.
 //!
 //! # Durability knowledge
 //!

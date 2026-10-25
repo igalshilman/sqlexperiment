@@ -1,10 +1,10 @@
 //! Where a scope's runs and KV live: a state (the `state` crate) in a key/value
 //! store (in Restate, the object's state; in tests, a `MemoryKv`). A turn is
 //! one flush of it: the run's progress and each participant's in records, the
-//! pages the turn changed in the memory file, and the KV writes as SQL: their
-//! blobs, then the root that names them, then one sync.
+//! pages the turn changed in the memory file, and the KV writes as SQL: one
+//! tail entry, then the head that names it, then one sync.
 //! The store keeps writes in issue order, so a crash keeps a prefix of them:
-//! a root is never stored without the blobs it names.
+//! a head is never stored without the tail entry it names.
 use crate::extension::Extensions;
 use anyhow::Result;
 use state::{PageCache, State, kv::KvStore};

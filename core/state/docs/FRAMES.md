@@ -90,7 +90,7 @@ write unless it is opened with that base.
 
 ## What it replaced
 
-| tail+checkpoints (v18)                                        | frame packs (v19)                         |
+| tail+checkpoints (v18)                                        | frame packs (v19, now v20)                |
 | ------------------------------------------------------------- | ----------------------------------------- |
 | Tail entries of copy-on-write blobs (chunk deltas, map nodes) | Tail entries that are the mutation itself |
 | A radix map of chunks per file, each a base and a delta       | A flat row of frames per file             |

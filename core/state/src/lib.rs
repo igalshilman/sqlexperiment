@@ -154,15 +154,17 @@ pub struct StateOptions {
     /// Bytes of a record or log entry a checkpoint's manifest holds; a
     /// larger one is a value of its own in the pack.
     pub inline_record_bytes: usize,
-    /// Every frame of a file of at most this many pages is fetched at open,
-    /// alongside the manifest's values.
+    /// Every frame and patch of a file without a base, of at most this many
+    /// pages, is fetched at open, alongside the manifest's values.
     pub prefetch_pages: u64,
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
     /// ... or this many bytes; 0 never does by size. With packs kept in
-    /// Restate too, at most the bytes the checkpoint's packs hold: there a
-    /// checkpoint costs only its bytes, and spares the tail's.
+    /// Restate too, at most the bytes the checkpoint holds (its packs and its
+    /// manifest): there a checkpoint costs only its bytes, and spares the
+    /// tail's. Before the first checkpoint that is 0: the second flush
+    /// checkpoints.
     pub checkpoint_bytes: u64,
 }
 
@@ -217,7 +219,8 @@ impl Shared {
         self.snapshot.lock().unwrap().clone()
     }
 
-    /// Delete the packs no checkpoint the head names needs. A failure, or
+    /// Delete the packs no checkpoint the head names needs, and the
+    /// manifests of checkpoints older than the previous one. A failure, or
     /// dropping the future midway, ends the state: in Restate, what it
     /// deleted has an unknown outcome, which the next open syncs.
     async fn collect_garbage(&self) -> Result<usize> {
@@ -497,8 +500,9 @@ impl State {
         !self.shared.poisoned.load(Ordering::SeqCst)
     }
 
-    /// Delete the packs no checkpoint the head names needs: those older
-    /// than the checkpoint before the head's, which neither names. How
+    /// Delete the packs no checkpoint the head names needs (those older
+    /// than the checkpoint before the head's, which neither names), and the
+    /// manifests of checkpoints older than that one. How
     /// many. A flush that makes a checkpoint collects too.
     ///
     /// Any state may collect, an owner's or a reader's, beside the owner's

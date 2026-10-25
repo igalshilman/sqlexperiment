@@ -1,12 +1,13 @@
 //! What is stored, and how it is encoded: the head, the tail entries and
 //! the checkpoints' manifests in Restate, and the checkpoints' packs.
 //!
-//! | Store   | Key                                     | Holds                                                                               |
-//! | ------- | --------------------------------------- | ----------------------------------------------------------------------------------- |
-//! | Restate | `v20/head`                              | The commit point: the version, the checkpoint and the one before, the tail's extent |
-//! | Restate | `v20/tail/<version>/<part>`             | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
-//! | Restate | `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
-//! | Packs   | `checkpoint/<version>-<nonce>`          | A checkpoint's pack: the frames of pages and the values it wrote                    |
+//! | Store   | Key                                            | Holds                                                                               |
+//! | ------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+//! | Restate | `v20/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
+//! | Restate | `v20/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
+//! | Restate | `v20/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
+//! | Packs   | `checkpoint/<version>-<nonce>`                 | A checkpoint's pack: the frames of pages and the values it wrote                    |
+//! | Restate | `v20/pack/checkpoint/<version>-<nonce>/<part>` | A pack, where packs are kept in Restate (the default), in parts of 64 KiB           |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
 //! pages, each a zstd frame of its own (against its file's [`crate::Base`]

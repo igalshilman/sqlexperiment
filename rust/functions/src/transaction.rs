@@ -7,7 +7,7 @@
 //! its memory, its tables, each extension) keeps its part in one of three
 //! places around it:
 //!
-//! - **In the seal**: a [`Record`], a named whole value the state's root
+//! - **In the seal**: a [`Record`], a named whole value the state
 //!   keeps, which the next transaction starts from (or a file of the scope's
 //!   [`State`]).
 //! - **Before it, named by it**: bytes too large for a record go to the
