@@ -362,3 +362,27 @@ fn a_parked_value_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Re
         Ok(())
     })
 }
+
+/// What a host spawns on a multi-threaded runtime is `Send`: opening,
+/// flushing (checkpoints included), and collecting garbage.
+#[test]
+fn opening_flushing_and_collecting_are_send() -> Result<()> {
+    fn send<T: Send>(value: T) -> T {
+        value
+    }
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        for n in 0..3 {
+            let state = send(State::open(store.clone()).options(options.clone())).await?;
+            let mut mutation = state.mutation();
+            mutation.write(&state.file("db")?, n, Some(page(1)))?;
+            send(mutation.flush()).await?;
+            send(state.collect_garbage()).await?;
+        }
+        Ok(())
+    })
+}

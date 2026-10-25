@@ -503,7 +503,7 @@ impl Snapshot {
             .flat_map(|file| file.frames.iter().flatten().copied())
             .collect();
         let wanted: Vec<Location> = values.iter().chain(&small).copied().collect();
-        let fetched = try_join_all(wanted.iter().map(|&at| self.raw(at))).await?;
+        let fetched = try_join_all(wanted.iter().copied().map(|at| self.raw(at))).await?;
         let fetched: HashMap<Location, Bytes> = wanted.into_iter().zip(fetched).collect();
         for at in small {
             self.decode_frame(&fetched[&at], None, head.frame_pages, 0, at)?;
@@ -837,12 +837,13 @@ impl Snapshot {
             let written: Vec<(u64, Option<Page>)> = (written.pages.into_iter())
                 .map(|(page, image)| (page, image.filter(|_| page * PAGE < size)))
                 .collect();
-            let references = try_join_all(
-                (written.iter())
-                    .filter(|(_, image)| image.is_some())
-                    .map(|&(page, _)| self.reference(manifest, images, &name, page)),
-            )
-            .await?;
+            let mut references = Vec::new();
+            for (page, image) in &written {
+                if image.is_some() {
+                    references.push(self.reference(manifest, images, &name, *page));
+                }
+            }
+            let references = try_join_all(references).await?;
             let mut references = references.into_iter();
             let mut pages = Vec::with_capacity(written.len());
             for (page, image) in written {
@@ -983,12 +984,14 @@ impl Snapshot {
                 rebuilt.push((name, file, index, stored));
             }
         }
-        let olds = try_join_all(rebuilt.iter().map(|&(name, _, index, stored)| async move {
-            match stored {
-                Some(at) => self.frame(name, index, at).await.map(Some),
-                None => Ok(None),
-            }
-        }))
+        let olds = try_join_all(rebuilt.iter().copied().map(
+            |(name, _, index, stored)| async move {
+                match stored {
+                    Some(at) => self.frame(name, index, at).await.map(Some),
+                    None => Ok(None),
+                }
+            },
+        ))
         .await?;
         for (name, file) in &durable.files {
             let index = manifest
@@ -1090,7 +1093,7 @@ impl Snapshot {
             .copied()
             .collect();
         let moving: Vec<Location> = moving.into_iter().collect();
-        let fetched = try_join_all(moving.iter().map(|&at| self.raw(at))).await?;
+        let fetched = try_join_all(moving.iter().copied().map(|at| self.raw(at))).await?;
         let mut moved = HashMap::new();
         for (at, raw) in moving.into_iter().zip(fetched) {
             moved.insert(at, put(&mut body, &raw));

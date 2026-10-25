@@ -48,8 +48,8 @@ impl Tiered {
         let first = first.max(head.tail_first);
         let gets = (first..=head.version).map(|version| async move {
             let keys = head.entry_keys(version);
-            let parts = try_join_all(keys.iter().map(|key| async move {
-                (self.restate.get(key).await?)
+            let parts = try_join_all(keys.into_iter().map(|key| async move {
+                (self.restate.get(&key).await?)
                     .ok_or_else(|| io::Error::other(format!("{key} is gone")))
             }))
             .await?;
@@ -100,7 +100,13 @@ impl Tiered {
             .into_iter()
             .flatten()
             .collect();
-        let manifests = try_join_all(checkpoints.iter().map(|c| self.manifest(c))).await?;
+        let manifests = try_join_all(
+            checkpoints
+                .iter()
+                .copied()
+                .map(|c| async move { self.manifest(&c).await }),
+        )
+        .await?;
         let mut needed: BTreeSet<PackId> = checkpoints.iter().map(|c| c.pack).collect();
         for manifest in manifests {
             needed.extend(manifest.packs());
@@ -123,10 +129,14 @@ impl Tiered {
             })
             .collect();
         let deleted = garbage.len();
-        stream::iter(garbage.iter().map(|key| self.packs.delete(key)))
-            .buffer_unordered(PARALLEL)
-            .try_collect::<()>()
-            .await?;
+        stream::iter(
+            garbage
+                .into_iter()
+                .map(|key| async move { self.packs.delete(&key).await }),
+        )
+        .buffer_unordered(PARALLEL)
+        .try_collect::<()>()
+        .await?;
         Ok(deleted)
     }
 }
