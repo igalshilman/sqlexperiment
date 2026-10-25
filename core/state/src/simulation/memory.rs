@@ -178,6 +178,15 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
+    /// The checkpoints' packs stored here (rather than in a blob store),
+    /// by name.
+    pub fn packs(&self) -> BTreeSet<String> {
+        let inner = self.inner.lock().unwrap();
+        (inner.values.keys())
+            .filter_map(|key| Some(key.strip_prefix(KV_PREFIX)?.rsplit_once('/')?.0.to_owned()))
+            .collect()
+    }
+
     /// The versions of the tail entries stored.
     pub fn tail_entries(&self) -> BTreeSet<u64> {
         let inner = self.inner.lock().unwrap();

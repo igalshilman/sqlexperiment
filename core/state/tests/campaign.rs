@@ -597,9 +597,7 @@ impl World {
         let needed = text(session.state.needed_packs().await)?;
         let stored: std::collections::BTreeSet<String> = match &self.packs {
             Some(packs) => packs.keys().into_iter().collect(),
-            None => (self.memory.keys().iter())
-                .filter_map(|key| Some(key.strip_prefix("v19/pack/")?.rsplit_once('/')?.0.into()))
-                .collect(),
+            None => self.memory.packs(),
         };
         if stored != needed {
             return Err(format!("garbage left: {stored:#?}, needed {needed:#?}"));
