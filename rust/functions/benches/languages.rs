@@ -116,7 +116,7 @@ fn main() -> Result<()> {
                         view.turns,
                         times[times.len() / 2],
                         view.changed_pages,
-                        view.blob_bytes as f64 / 1024.0,
+                        view.entry_bytes as f64 / 1024.0,
                     );
                 }
             }

@@ -112,8 +112,8 @@ fn main() -> Result<()> {
             json!({"step": step, "request_bytes": request, "request_read_ms": read_ms, "model_turn_ms": turns[0],
             "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
             "memory_bytes": view.memory_bytes,
-            "live_pages": view.live_pages, "blob_bytes": view.blob_bytes,
-            "root_bytes": view.root_bytes}),
+            "live_pages": view.live_pages, "entry_bytes": view.entry_bytes,
+            "head_bytes": view.head_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
             println!(
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
                 turns[0],
                 turns[1],
                 written,
-                view.root_bytes,
+                view.head_bytes,
                 stored as f64 / (1 << 20) as f64,
             );
         }

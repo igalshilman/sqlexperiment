@@ -7,7 +7,8 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one flush that makes a turn's SQL, pages and records durable together:
-  the state's (v17) root, the memory's pages a file beside the SQL's;
+  the state's (v19) tail entry and head, the memory's pages a file beside
+  the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -181,39 +182,38 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v17/root = SR17
-  id, version, next_blob, chunk_pages, fanout
-  directory: files by id and name
+v19/head = the commit point
+  id, frame size, version, the checkpoint and the one before, the tail
+v19/tail/<version>/<part>: one turn's mutation
     run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
     memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
     db:                paged file                        // SQL
     <name>/…:          each extension's records and files
-  each paged file: per chunk of 4 pages, its base blob and delta blob
-v17/blob/<n>:  one zstd frame, written once
-v17/sweep:     the blobs the last sweep found dead (once one has)
+v19/pack/<checkpoint>/<part>: a checkpoint: frames of 4 pages, values,
+  and its manifest (each file's frames, every record)
 ```
 
-- **A turn is one root.** Its SQL pages and its memory's changed pages, from
-  its mutation, become a delta per changed chunk, compressed against the chunk's
-  base (a memory chunk's base against golden's pages), and the records it
-  set replace theirs (a record past 1 KiB is a blob of its own). The blobs
-  are put first, then the root, in the same round trip.
+- **A turn is one tail entry.** Its SQL pages and its memory's changed
+  pages, from its mutation, each compressed against the page as the
+  checkpoint holds it (a memory page against golden's), and the records it
+  set. The entry is put first, then the head, in the same round trip.
 - **`ctx.kv` is a table** in the database, so its writes commit with the
   turn.
 
 ### Flush, recover
 
-- **Flush.** The blobs, the root: queued in that order, then one sync
-  (and every 16 versions, a sweep of what no root names, over the
-  object's state keys). Then the
-  outbox: its Waits are made after the flush, and the next flush drops
-  the ones already made.
-- **Recover.** Open reads the root and the large records' blobs, and the VM
-  is the golden image with the pages the memory record lists, read together
-  by chunk. The record's
-  pending Waits are made again, under their IDs.
+- **Flush.** The tail entry, the head: queued in that order, then one sync.
+  Once the tail is long enough, the flush first checkpoints: a pack of the
+  frames the tail changed (patches of the pages, when few changed), and
+  deletes the packs no checkpoint needs, over the object's state keys.
+  Then the outbox: its Waits are made after the flush, and the next flush
+  drops the ones already made.
+- **Recover.** Open reads the head, then the manifest and the tail, and
+  the VM is the golden image with the pages the memory record lists, read
+  together by frame. The record's pending Waits are made again, under
+  their IDs.
 
 The API is `State::open`, whose `record(name)`, `file(name)` and
 `file_with_base(name, base)` are handles each participant writes through

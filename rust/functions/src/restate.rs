@@ -622,7 +622,7 @@ pub fn bind(
         };
         let mut options = ServiceOptions::new()
             .journal_replay(false)
-            // TODO: preload the root eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
+            // TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
             .enable_lazy_state(true)
             .journal_retention(Duration::ZERO)
             .inactivity_timeout(programs.runtime().limits().turn);
