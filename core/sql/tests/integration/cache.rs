@@ -269,12 +269,12 @@ fn namespaces_share_one_cache_without_sharing_pages() -> Result<()> {
     })
 }
 
-/// Blobs evicted from memory are served from disk.
+/// Frames evicted from memory are served from disk.
 #[test]
-fn evicted_blobs_are_read_from_disk() -> Result<()> {
+fn evicted_frames_are_read_from_disk() -> Result<()> {
     use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
-        // Room for a few blobs (of a chunk each) per shard, not the table.
+        // Room for a few frames per shard, not the table.
         let cache = open_cache(cache_config(256 << 10, 64 << 20));
         let store = Arc::new(LatencyKv::new(MemoryKv::default()));
         let namespace = Namespace::new(&cache, "spilled");
@@ -414,7 +414,7 @@ fn an_evicted_namespace_keeps_one_state_while_in_use() -> Result<()> {
     use state::simulation::{cache_config, open_cache};
     futures::executor::block_on(async {
         let cache = open_cache(state::PageCacheConfig {
-            namespaces: 1,
+            namespace_bytes: 1,
             ..cache_config(1 << 20, 64 << 20)
         });
         let store = Arc::new(MemoryKv::default());

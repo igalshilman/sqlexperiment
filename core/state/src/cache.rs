@@ -64,8 +64,12 @@ pub struct PageCacheConfig {
     pub disk: usize,
     /// Bytes per disk block, the unit the disk tier writes and reclaims.
     pub disk_block: usize,
-    /// Namespaces whose durability knowledge is kept.
-    pub namespaces: usize,
+    /// Bytes of the namespaces' states kept, so that a session that finds
+    /// its head unchanged reads nothing more: each its head, its checkpoint's
+    /// manifest and its tail applied, as estimated. Least recently used go
+    /// first; the cache has 8 shards, so a state past an eighth of this is
+    /// not kept for long.
+    pub namespace_bytes: usize,
     /// Bytes of the values parked for the next session of their
     /// namespace (see [`crate::State::park`]), as they weigh it: SQL's
     /// engine, say. Least recently parked go first.
@@ -81,7 +85,7 @@ impl PageCacheConfig {
             memory,
             disk,
             disk_block: 4 << 20,
-            namespaces: 1 << 16,
+            namespace_bytes: 256 << 20,
             parked_bytes: 64 << 20,
         }
     }
@@ -157,7 +161,9 @@ impl PageCache {
         Ok(Self {
             shared: Arc::new(Shared {
                 ranges,
-                namespaces: CacheBuilder::new(config.namespaces).build(),
+                namespaces: CacheBuilder::new(config.namespace_bytes)
+                    .with_weighter(|_, owner: &Arc<Mutex<Owner>>| owner.lock().unwrap().weight())
+                    .build(),
                 live: Mutex::default(),
                 unsettled: Mutex::default(),
                 // Distinct per instance, so two caches sharing a disk file by
@@ -191,6 +197,7 @@ impl PageCache {
         NamespaceCache {
             shared: self.shared.clone(),
             parked: Arc::downgrade(&self.parked),
+            key: key.to_owned(),
             id,
             owner,
         }
@@ -207,6 +214,7 @@ impl PageCache {
 pub struct NamespaceCache {
     shared: Arc<Shared>,
     parked: Weak<Mutex<Parked>>,
+    key: String,
     /// The owner's identity, which keys its ranges and parked values.
     id: u64,
     owner: Arc<Mutex<Owner>>,
@@ -273,6 +281,8 @@ impl NamespaceCache {
         if committed.is_some() && !owner.flushing {
             owner.committed = committed;
         }
+        drop(owner);
+        self.reweigh();
     }
 
     /// The claimed flush (see [`Self::claim`]) made `bytes`, at `version`,
@@ -283,6 +293,14 @@ impl NamespaceCache {
         owner.durable = Some(durable);
         owner.committed = Some(version);
         owner.flushing = false;
+        drop(owner);
+        self.reweigh();
+    }
+
+    /// Insert the owner again, so that the cache weighs the state it now
+    /// keeps (the weigher locks it: the caller must not hold the lock).
+    fn reweigh(&self) {
+        (self.shared.namespaces).insert(self.key.clone(), self.owner.clone());
     }
 
     /// Forget the head after a flush whose outcome is unknown.
@@ -413,6 +431,14 @@ impl NamespaceCache {
 }
 
 impl Owner {
+    /// Its weight in the namespace cache: about the bytes it keeps.
+    fn weight(&self) -> usize {
+        256 + self
+            .durable
+            .as_ref()
+            .map_or(0, |durable| durable.estimated_bytes())
+    }
+
     fn new(ids: &AtomicU64) -> Self {
         Self {
             id: ids.fetch_add(1, Relaxed),
