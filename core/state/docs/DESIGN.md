@@ -147,8 +147,8 @@ nothing writes nothing.
 A flush that writes anything checkpoints first once the tail holds
 `checkpoint_entries` (128) entries since the head's checkpoint, or
 `checkpoint_bytes` (1 MiB); with packs in Restate, where a checkpoint costs
-only its bytes, once it holds the bytes the checkpoint's packs hold, if
-fewer, so a small database's tail stays short. A mutation marked with
+only its bytes, once it holds the bytes the checkpoint holds (its packs
+and its manifest), if fewer, so a small database's tail stays short. A mutation marked with
 `Mutation::checkpoint` checkpoints however short the tail is. A checkpoint
 writes the state as of the head, into one new pack:
 
@@ -169,7 +169,8 @@ writes the state as of the head, into one new pack:
 
 The flush's head then names it, and the head's checkpoint becomes the
 previous one. A checkpoint that fails fails nothing: the flush goes on
-without it, the tail grows, and the next flush tries again. A file made
+without it and says why (`FlushReport::checkpoint_failed`), the tail grows,
+and the next flush tries again. A file made
 with a base needs it to rebuild its frames, so it takes no write unless it
 is opened with that base.
 
@@ -244,13 +245,15 @@ then stay for readers that opened on that one.
 Packs and manifests are collected (`State::collect_garbage`, and after
 every flush that checkpoints):
 
-1. **List** the packs and the manifests, together: S3's list, or, in
-   Restate, the store's keys (`KvStore::keys`: Restate's `getKeys()`). A
-   store that cannot list keeps its garbage.
+1. **List**, together, Restate's keys once (`KvStore::keys`: Restate's
+   `getKeys()`), for the manifests and the packs kept there, and S3's
+   packs, where they are there. A store that cannot list keeps its
+   garbage: Restate's, the manifests (and its packs); S3's, its packs.
 2. **Keep** what the head's checkpoints need: the packs its checkpoint's and
    previous checkpoint's manifests name.
 3. **Delete** every listed pack older than the head's previous checkpoint
-   that neither names, and every manifest older than it.
+   that neither names, and every manifest older than it: in Restate,
+   queued and stored by one sync; in S3, one request.
 
 A later head names only packs its head's checkpoints name, or newer than
 its previous checkpoint, so whatever head a collection read (a reader's, a
@@ -368,7 +371,9 @@ and it loads that head's state, from the cache where it can, and drops the
 parked values. A head holds the database's random identity, drawn when it
 was made, so a namespace emptied (its object's state cleared) and made
 again never matches the old one. A flush whose outcome is unknown forgets
-the head, and the next open syncs first.
+the head, and the next open syncs first. Namespaces are kept by the bytes
+of their states (`PageCacheConfig::namespace_bytes`, 256 MiB, least
+recently used first): a namespace evicted only loads its state again.
 
 **States of one owner.** States may overlap, such as a writer and readers
 for a virtual object's shared handlers. A flush is refused when another
@@ -434,6 +439,14 @@ Measurements: [frame packs](FRAMES.md),
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
 - **Format.** Only v20, with no migration.
+- **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
+  differences from the location before, and zstd over the manifest's body;
+  the pages are zstd frames of their own. A zero-copy format (FlatBuffers,
+  Cap'n Proto, rkyv) would save the decode, but nothing here is read
+  uncompressed: a manifest of 70,000 frames (1M rows) is 16–30 KB encoded
+  and decodes in 2 ms, once per cold open (the cache keeps it decoded),
+  where laid out flat it would be about 1 MB, rewritten in Restate at
+  every checkpoint; a frame decompresses in 25 µs.
 - **Validation.** A monitor checks every request of the simulator's
   campaigns against the one rule, decoding every head, tail entry and
   manifest it sees, and every page, frame and value they name: a head that

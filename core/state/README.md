@@ -88,8 +88,8 @@ durable; before, it doesn't exist.
 
 **Checkpoint.** Once the tail holds `checkpoint_entries` (128) entries or
 `checkpoint_bytes` (1 MiB) since the last checkpoint (with packs in Restate,
-at most the bytes the checkpoint's packs hold, so a small database's tail
-stays short), a flush first writes a checkpoint, as does any flush of a
+at most the bytes the checkpoint holds, its packs and its manifest, so a
+small database's tail stays short), a flush first writes a checkpoint, as does any flush of a
 mutation marked `mutation.checkpoint()`. It rewrites each frame the tail
 changed, from the old frame and the tail's pages; or, where the tail changed
 only a few of a frame's pages (their patches stay within half the frame's
@@ -99,16 +99,18 @@ since, inline in the manifest if small, and copies the live ranges of packs
 it needs less than half of (compaction): one pack, one put, and its
 manifest, queued before the head. The flush's head names it,
 the one before becomes the previous checkpoint, and the tail that one
-covered is deleted. A checkpoint that fails fails nothing: the tail grows,
-and the next flush tries again.
+covered is deleted. A checkpoint that fails fails nothing: the flush's
+report says why (`FlushReport::checkpoint_failed`), the tail grows, and the
+next flush tries again.
 
 **Garbage.** A pack older than the head's previous checkpoint that neither
 of its checkpoints' manifests names is garbage: no later head names it; so
 is a manifest older than the previous checkpoint. A flush that checkpoints
 then collects them, and anyone may, beside the owner
-(`State::collect_garbage`). Collecting lists the packs and the manifests: in
-Restate, the store's keys (`KvStore::keys`, Restate's `getKeys()`); a store
-that cannot list keeps its garbage.
+(`State::collect_garbage`). Collecting lists Restate's keys once
+(`KvStore::keys`, Restate's `getKeys()`), for the manifests and the packs
+kept there, and S3's for the packs kept there; it stores its deletes in
+Restate with one sync. A store that cannot list keeps its garbage.
 
 **Readers.** A reader (a shared handler beside the exclusive one) reads the
 state it opened, a consistent snapshot, while the owner flushes: packs never

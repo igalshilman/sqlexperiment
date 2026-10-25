@@ -619,9 +619,11 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 ### 5.1. Record identities and layouts
 
 A scope's store holds one state, a `state` namespace
-([its format](../../../core/state/docs/FORMAT.md)): the root at `v17/root`,
-which names the blobs at `v17/blob/<n>`, written once each: chunks of a
-file's pages, large records and log entries. Its files:
+([its format](../../../core/state/docs/FORMAT.md)): the head at `v20/head`,
+the commit point, which names the tail entries (`v20/tail/<version>/<part>`,
+one turn's changes each) and the checkpoint: its manifest
+(`v20/manifest/…`) and its pack of frames of 4 pages, large records and log
+entries (`v20/pack/…`, or in S3). Its files:
 
 | File              | Kind                    | Holds                                                                   |
 | ----------------- | ----------------------- | ----------------------------------------------------------------------- |

@@ -77,7 +77,7 @@ checkpoint and applies the tail past it, in memory; there is nothing to
 repair.
 
 **Checkpoints.** Once the tail holds 128 entries or 1 MiB (with packs in
-Restate, at most the bytes the checkpoint holds), a flush first writes a
+Restate, at most the bytes the checkpoint holds, packs and manifest), a flush first writes a
 checkpoint: the frames the tail changed, rewritten (or, for a few pages,
 patched), and the records set and log entries appended since, in one new pack, with
 a manifest in Restate. Its head names it, and drops the tail the checkpoint before

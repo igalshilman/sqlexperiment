@@ -50,8 +50,8 @@ KiB, are split into parts.
 When the tail is long enough, a flush first writes the durable state as a
 checkpoint, then names it in its head. Long enough is `checkpoint_entries`
 (128) entries, or `checkpoint_bytes` (1 MiB); with packs in Restate, where a
-checkpoint costs only its bytes, at most the bytes the checkpoint's packs
-hold, so the tail of a small database stays short.
+checkpoint costs only its bytes, at most the bytes the checkpoint holds
+(its packs and its manifest), so the tail of a small database stays short.
 
 1. **Frames.** A frame the overlay changed only a few pages of is
    _patched_: each page it changed is put as a patch, compressed against
