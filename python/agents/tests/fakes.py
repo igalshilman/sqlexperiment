@@ -785,6 +785,11 @@ class Context:
         if not self._alive():
             raise ConnectionError("the process died")
 
+    async def sql_keys(self) -> list[str]:
+        if not self._alive():
+            raise ConnectionError("the process died")
+        return list(self.obj.state)
+
     def sql_send(self, *args: Any) -> None:
         raise AssertionError("the agents make no sends here")
 

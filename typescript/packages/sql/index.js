@@ -7,6 +7,7 @@ const GET = 0;
 const SET = 1;
 const CLEAR = 2;
 const SYNC = 3;
+const KEYS = 4;
 
 /**
  * Open the database of `namespace` over `store`. A `reader` reads beside the
@@ -33,6 +34,11 @@ async function open(namespace, store, { reader = false } = {}) {
       case SYNC:
         if (failure) return Promise.reject(failure);
         return Promise.resolve(store.sync()).then(() => null);
+      case KEYS:
+        // Every key, one per line: a sweep's (none where the store cannot
+        // list its keys, and it is never swept).
+        if (!store.keys) return Promise.resolve(null);
+        return Promise.resolve(store.keys()).then((keys) => Buffer.from(keys.join('\n')));
       default:
         return Promise.reject(new Error(`unknown store operation ${op}`));
     }

@@ -361,6 +361,27 @@ test('a statement that commits resolves once its writes are stored, however many
   await db.save();
 });
 
+/** How many blobs `backend` stores. */
+const blobs = (backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v17/blob/')).length;
+
+/** The blobs left after 100 commits that each replace a row, with a store that lists its keys or not. */
+const blobsAfterCommits = async (listing) => {
+  const backend = new Backend();
+  const store = backend.request();
+  // As the object's ctx.stateKeys().
+  if (listing) store.keys = async () => [...backend.stored.keys(), ...backend.unconfirmed.map(([key]) => key)];
+  const db = await open(fresh(), store);
+  await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)');
+  for (let i = 0; i < 100; i++) await db.execute('INSERT OR REPLACE INTO t VALUES(1, randomblob(3000))');
+  await db.save();
+  return blobs(backend);
+};
+
+test('a store that lists its keys is swept now and then; one that cannot keeps its garbage', async () => {
+  const [swept, kept] = [await blobsAfterCommits(true), await blobsAfterCommits(false)];
+  assert.ok(swept < 60 && kept > 100, `${swept} blobs swept, ${kept} kept`);
+});
+
 /** A reader's view of `backend`: what is stored and written so far, and no writes. */
 const readerOf = (backend) => ({
   async get(key) {

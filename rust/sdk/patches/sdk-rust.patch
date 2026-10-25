@@ -22,10 +22,10 @@ index 5dcf242..0000000
 -profile = "minimal"
 -components = ["rustfmt", "clippy"]
 diff --git a/src/context/mod.rs b/src/context/mod.rs
-index dd43c1c..5986780 100644
+index dd43c1c..7aabee8 100644
 --- a/src/context/mod.rs
 +++ b/src/context/mod.rs
-@@ -199,6 +199,54 @@ impl ObjectContext<'_> {
+@@ -199,6 +199,60 @@ impl ObjectContext<'_> {
      pub fn idempotency_key(&self) -> Option<&str> {
          self.idempotency_key.as_deref()
      }
@@ -69,6 +69,12 @@ index dd43c1c..5986780 100644
 +    /// Clear `key`.
 +    pub fn clear(&self, key: &str) {
 +        self.0.clear(key)
++    }
++
++    /// Every key set, this invocation's writes included: a journaled read
++    /// of the object's keys.
++    pub fn keys(&self) -> impl Future<Output = Result<Vec<String>, TerminalError>> + Send + '_ {
++        self.0.get_keys()
 +    }
 +
 +    /// Wait until the writes made so far are stored: an empty `ctx.run`,

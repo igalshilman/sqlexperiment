@@ -10,7 +10,7 @@ import { memoryStore, sqlAttempt } from '../testing.ts';
 type Send = restate.GenericSend<Uint8Array>;
 
 /** The database's root, whose effects hold the outbox. */
-const ROOT = 'v16/root';
+const ROOT = 'v17/root';
 let namespaces = 0;
 
 const store = restate.object({

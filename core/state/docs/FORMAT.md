@@ -5,9 +5,9 @@ and keys live in `src/store.rs`; there is no migration or format discovery.
 Storage is assumed reliable (a value reads back as written); every zstd frame
 carries a checksum, and decoding checks structure and the bounds below.
 
-| Key                          | Value                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------- |
-| `v16/root`                   | The root; absent until the first flush                                                            |
+| Key                          | Value                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `v16/root`                   | The root; absent until the first flush                                                               |
 | `v16/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record, or a log entry; written once |
 
 The root is the only key whose write commits. Integers are LEB128 varints

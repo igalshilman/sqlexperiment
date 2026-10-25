@@ -233,6 +233,9 @@ class _ContextHost:
     def sql_sync(self) -> Awaitable[Any]:
         return self.context.run_typed("sync", _nothing)
 
+    def sql_keys(self) -> Awaitable[list[str]]:
+        return self.context.state_keys(entry_name="keys")
+
     def sql_send(
         self,
         service: str,

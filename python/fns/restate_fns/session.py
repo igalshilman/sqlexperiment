@@ -201,6 +201,10 @@ class SqlHost(Protocol):
         """An empty run: done once every command before it is stored."""
         ...
 
+    def sql_keys(self) -> Awaitable[list[str]]:
+        """The object's state keys, issued now: a sweep's."""
+        ...
+
     def sql_send(
         self,
         service: str,
@@ -255,6 +259,9 @@ class _ObjectStore:
 
     def sync(self) -> Awaitable[Any]:
         return self._host.sql_sync()
+
+    def keys(self) -> Awaitable[list[str]]:
+        return self._host.sql_keys()
 
 
 class _ReaderStore:

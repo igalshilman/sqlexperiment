@@ -16,6 +16,11 @@ export interface Store {
   set(key: string, value: Uint8Array): void;
   clear(key: string): void;
   sync(): Promise<void> | void;
+  /**
+   * Every key, as the object's `ctx.stateKeys()`: for a sweep that deletes
+   * the database's garbage now and then. A store without it is never swept.
+   */
+  keys?(): Promise<string[]> | string[];
 }
 
 /** SQL in one transaction: invalid once the transaction's body settles. */

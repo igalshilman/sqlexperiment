@@ -107,12 +107,12 @@ export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfi
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its root and blobs in the object's state, `v16/...`; and
+ * journal view (its root and blobs in the object's state, `v17/...`; and
  * the `sync` runs after its writes).
  */
 export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v16/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v17/',
 };
 
 // Marks the handlers made here.
@@ -135,6 +135,7 @@ function host(ctx: restate.ObjectContext | restate.ObjectSharedContext, shared: 
     get: (name, serde, entry) => ctx.get(name, serde, entry),
     set: (name, value, serde, entry) => exclusive.set(name, value, serde, entry),
     clear: (name, entry) => exclusive.clear(name, entry),
+    stateKeys: () => ctx.stateKeys(),
     run: (name, action) => exclusive.run(name, action),
     genericSend: (send) => ctx.genericSend(send),
   };

@@ -1,6 +1,6 @@
 //! The object's state as the scope's store (a [`KvStore`]): writes return at
 //! once, Restate keeps them in issue order, and a `sync` waits until it stored
-//! them. It remembers
+//! them; a sweep lists the object's keys. It remembers
 //! every key it read or wrote, for the attempt: the handler is the object's
 //! only writer meanwhile, so a key is read from Restate at most once: a round
 //! trip unless the invocation started with it (eager state). On protocol v8
@@ -79,5 +79,10 @@ impl KvStore for StateQueue {
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move { self.state.sync().await.map_err(|e| self.fail(e)) })
+    }
+
+    /// The object's keys, for a sweep: a journaled read.
+    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
+        Box::pin(async move { self.state.keys().await.map_err(|e| self.fail(e)) })
     }
 }

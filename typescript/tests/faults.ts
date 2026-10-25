@@ -37,6 +37,10 @@ if (perMille > 0) {
       maybeAbort();
       return store.sync();
     },
+    keys: async () => {
+      maybeAbort();
+      return (await store.keys?.()) ?? [];
+    },
   }));
 }
 
