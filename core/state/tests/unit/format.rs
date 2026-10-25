@@ -67,6 +67,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
                 None,
                 Some(location(old, 1 << 30, 70)),
             ],
+            patches: BTreeMap::from([(5, location(new, 900, 40)), (40, location(old, 3, 9))]),
         },
     );
     manifest.files.insert(
@@ -74,7 +75,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
         FileIndex {
             size: 0,
             base: Some(7),
-            frames: Vec::new(),
+            ..FileIndex::default()
         },
     );
     manifest
@@ -97,7 +98,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
     let bytes = manifest.encode();
     assert_eq!(Manifest::decode(&bytes).unwrap(), manifest);
     assert_eq!(manifest.packs(), BTreeSet::from([old, new]));
-    assert_eq!(manifest.locations().count(), 4);
+    assert_eq!(manifest.locations().count(), 6);
     for len in 0..bytes.len() {
         assert!(
             Manifest::decode(&bytes[..len]).is_err(),

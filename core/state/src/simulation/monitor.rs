@@ -292,8 +292,9 @@ impl Known {
     }
 
     /// What a tail entry of `head` compresses page `page` of the file
-    /// `name` against: the page in its checkpoint's frame, else its base's
-    /// page; `None` where the monitor does not see the checkpoint.
+    /// `name` against: the page as its checkpoint holds it (its patch, else
+    /// its frame), else its base's page; `None` where the monitor does not
+    /// see the checkpoint.
     fn reference(
         &mut self,
         head: &Head,
@@ -306,14 +307,21 @@ impl Known {
             return Some(based());
         };
         let index = page / head.frame_pages;
-        let stored = (self.manifest(&checkpoint)?.files.get(name))
-            .and_then(|file| file.frames.get(index as usize).copied().flatten());
-        let Some(at) = stored else {
-            return Some(based());
+        let file = self.manifest(&checkpoint)?.files.get(name);
+        let patch = file.and_then(|file| file.patches.get(&page)).copied();
+        let stored = file.and_then(|file| file.frames.get(index as usize).copied().flatten());
+        let stored = match stored {
+            Some(at) => {
+                let frame = self.frame(head.frame_pages, at, base, index)?;
+                let at = ((page % head.frame_pages) * PAGE) as usize;
+                frame.slice(at..at + PAGE as usize)
+            }
+            None => based(),
         };
-        let frame = self.frame(head.frame_pages, at, base, index)?;
-        let at = ((page % head.frame_pages) * PAGE) as usize;
-        Some(frame.slice(at..at + PAGE as usize))
+        match patch {
+            Some(at) => decode_page(&self.pack_range(at.pack, at.range())?, &stored).ok(),
+            None => Some(stored),
+        }
     }
 
     /// Frame `index` of a file with `base`, stored at `at`, decoded; `None`
@@ -377,6 +385,29 @@ impl Known {
                     .frame(frame_pages, *at, base.as_ref(), index as u64)
                     .is_none()
                 {
+                    self.violation(format!("head {v}: {what} does not decode"));
+                }
+            }
+            for (&page, &at) in &file.patches {
+                let what = format!("patch of page {page} of {name}");
+                let Some(base) = &base else {
+                    continue;
+                };
+                let Some(raw) = self.stored(v, at, &what) else {
+                    continue;
+                };
+                let index = page / frame_pages;
+                let frame = (file.frames.get(index as usize).copied().flatten())
+                    .map(|frame| self.frame(frame_pages, frame, base.as_ref(), index));
+                let reference = match frame {
+                    Some(Some(frame)) => {
+                        let at = ((page % frame_pages) * PAGE) as usize;
+                        frame.slice(at..at + PAGE as usize)
+                    }
+                    Some(None) => continue,
+                    None => Bytes::copy_from_slice(base_page(base.as_ref(), page)),
+                };
+                if decode_page(&raw, &reference).is_err() {
                     self.violation(format!("head {v}: {what} does not decode"));
                 }
             }

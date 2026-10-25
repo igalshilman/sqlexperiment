@@ -486,13 +486,16 @@ pub(crate) enum Value {
     Stored(Location),
 }
 
-/// A paged file in a checkpoint: its size, its base's id, and where each of
-/// its frames is (`None`: its base's pages, or zeros).
+/// A paged file in a checkpoint: its size, its base's id, where each of its
+/// frames is (`None`: its base's pages, or zeros), and its patches: pages
+/// changed since their frame was written, each a zstd frame against the
+/// page as its frame holds it (as the tail keeps them), by page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileIndex {
     pub size: u64,
     pub base: Option<u64>,
     pub frames: Vec<Option<Location>>,
+    pub patches: BTreeMap<u64, Location>,
 }
 
 /// A log in a checkpoint: the index of its first entry, and its entries.
@@ -515,7 +518,8 @@ pub(crate) struct Manifest {
 impl Manifest {
     /// Every location it names.
     pub fn locations(&self) -> impl Iterator<Item = &Location> {
-        let frames = (self.files.values()).flat_map(|file| file.frames.iter().flatten());
+        let frames = (self.files.values())
+            .flat_map(|file| file.frames.iter().flatten().chain(file.patches.values()));
         let values = (self.records.values())
             .chain(self.logs.values().flat_map(|log| &log.values))
             .filter_map(|value| match value {
@@ -534,6 +538,7 @@ impl Manifest {
         };
         for file in self.files.values_mut() {
             file.frames.iter_mut().flatten().for_each(&mut relocate);
+            file.patches.values_mut().for_each(&mut relocate);
         }
         let values = (self.records.values_mut())
             .chain(self.logs.values_mut().flat_map(|log| &mut log.values));
@@ -598,7 +603,6 @@ impl Manifest {
                 value(&mut body, entry);
             }
         }
-        drop(value);
         put_varint(&mut body, self.files.len() as u64);
         for (name, file) in &self.files {
             put_bytes(&mut body, name.as_bytes());
@@ -607,6 +611,13 @@ impl Manifest {
             put_varint(&mut body, file.frames.len() as u64);
             for frame in &file.frames {
                 location(&mut body, frame.as_ref());
+            }
+            put_varint(&mut body, file.patches.len() as u64);
+            let mut next = 0;
+            for (&page, at) in &file.patches {
+                put_varint(&mut body, page - next);
+                next = page + 1;
+                location(&mut body, Some(at));
             }
         }
         let mut out = MANIFEST_MAGIC.to_vec();
@@ -662,7 +673,6 @@ impl Manifest {
                 .collect::<io::Result<_>>()?;
             manifest.logs.insert(name, LogIndex { first, values });
         }
-        drop(value);
         for _ in 0..r.count()? {
             let name = r.name()?;
             let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
@@ -670,9 +680,23 @@ impl Manifest {
             let frames = (0..r.count()?)
                 .map(|_| location(&mut r))
                 .collect::<io::Result<_>>()?;
-            manifest
-                .files
-                .insert(name, FileIndex { size, base, frames });
+            let mut patches = BTreeMap::new();
+            let mut next = 0u64;
+            for _ in 0..r.count()? {
+                let page = next
+                    .checked_add(r.varint()?)
+                    .filter(|&page| page < size.div_ceil(PAGE))
+                    .ok_or_else(|| r.invalid())?;
+                next = page + 1;
+                patches.insert(page, location(&mut r)?.ok_or_else(|| r.invalid())?);
+            }
+            let file = FileIndex {
+                size,
+                base,
+                frames,
+                patches,
+            };
+            manifest.files.insert(name, file);
         }
         r.end()?;
         let names = manifest.files.len() + manifest.records.len() + manifest.logs.len();

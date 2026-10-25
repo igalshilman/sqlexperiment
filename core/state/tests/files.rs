@@ -177,3 +177,83 @@ fn a_cold_flush_gets_nothing_the_open_fetched_the_tail() -> Result<()> {
         Ok(())
     })
 }
+
+/// Pages that do not compress, made from `seed`.
+fn noise(seed: u64, pages: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    (0..pages * 4096)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// Small changes to a page, a checkpoint each flush, patch its frame rather
+/// than rewrite it, and the tail compresses the next change against the
+/// patched page; a frame rewritten whole is rebuilt, dropping its patches.
+/// The file reads the same in the session and reopened, small enough to be
+/// fetched whole on open or not.
+#[test]
+fn checkpoints_patch_frames_a_few_pages_change() -> Result<()> {
+    futures::executor::block_on(async {
+        for pages in [8, 64] {
+            let store = Arc::new(MemoryKv::default());
+            let options = state::StateOptions {
+                checkpoint_entries: 1,
+                ..Default::default()
+            };
+            let state = State::open(store.clone()).options(options.clone()).await?;
+            let file = state.file("db")?;
+            let mut image = noise(1, pages);
+            let mut reports = Vec::new();
+            for round in 0..12 {
+                let at = 5 * 4096 + round * 8;
+                image[at..at + 8].copy_from_slice(&[round as u8; 8]);
+                if round == 6 {
+                    image[4 * 4096..8 * 4096].copy_from_slice(&noise(2, 4));
+                }
+                let mut mutation = state.mutation();
+                for page in 0..pages as u64 {
+                    let range = page as usize * 4096..(page as usize + 1) * 4096;
+                    if round == 0 || (4..8).contains(&page) && (round == 6 || page == 5) {
+                        mutation.write(&file, page, Some(image[range].to_vec().into()))?;
+                    }
+                }
+                reports.push(mutation.flush().await?);
+                let reopened = State::open(store.clone()).options(options.clone()).await?;
+                for file in [&file, &reopened.file("db")?] {
+                    for page in 0..pages as u64 {
+                        let range = page as usize * 4096..(page as usize + 1) * 4096;
+                        let read = file.read(page).await?.expect("a page");
+                        assert!(
+                            read[..] == image[range],
+                            "{pages} pages, round {round}, page {page}"
+                        );
+                    }
+                }
+            }
+            let shape: Vec<Option<(usize, usize)>> = (reports.iter())
+                .map(|report| (report.checkpoint.as_ref()).map(|c| (c.frames, c.patched)))
+                .collect();
+            // A checkpoint holds the flushes before its own: the one at
+            // round 1 the file, the one at round 7 the frame round 6 rewrote.
+            let mut expected = vec![None, Some((pages / 4, 0))];
+            expected.extend([Some((0, 1)); 5]);
+            expected.push(Some((1, 0)));
+            expected.extend([Some((0, 1)); 4]);
+            assert_eq!(shape, expected, "{pages} pages");
+            for (round, report) in reports.iter().enumerate().skip(2) {
+                if round != 6 {
+                    assert!(
+                        report.entry_bytes < 200,
+                        "{pages} pages, round {round}: {report:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+}
