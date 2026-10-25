@@ -254,30 +254,79 @@ pack of what changed since the checkpoint before.
   else, the manifest points into the older packs that already hold it.
 
 The state as of a checkpoint is its manifest and the packs it points
-into. Say `db` has 6 frames (0–5, 4 pages each), with a checkpoint every
+into. Say `db` has 6 frames (f0–f5, 4 pages each), with a checkpoint every
 4 flushes:
 
-| Checkpoint | What the tail since the one before changed | Its pack holds                                                   | Its manifest points                                                         |
-| ---------- | ------------------------------------------ | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| C4         | Every frame (the database was made)        | P4: frames 0–5                                                   | Frames 0–5 → P4                                                             |
-| C8         | Page 9 (in frame 2); all of frame 5        | P8: a patch for page 9; frame 5, rebuilt                         | Frames 0–4 → P4, page 9 → P8, frame 5 → P8                                  |
-| C12        | Most of frame 0; frame 5 again             | P12: frame 0 and frame 5, rebuilt; page 9's patch, moved from P8 | Frames 1–4 → P4, page 9 → P12, frames 0 and 5 → P12; P8 is no longer needed |
+| Checkpoint | What the tail since the one before changed | Its pack holds                                        | Compaction                                       |
+| ---------- | ------------------------------------------ | ----------------------------------------------------- | ------------------------------------------------ |
+| C4         | Every frame (the database was made)        | P4: f0–f5                                             | –                                                |
+| C8         | Page 9 (in f2); all of f5                  | P8: f5, rebuilt; a patch for page 9 (p9)              | –                                                |
+| C12        | Most of f0; f5 again                       | P12: f0 and f5, rebuilt; p9, moved from P8            | P8 is only p9 now, under half live: p9 moves     |
+| C16        | Most of f1 and f2                          | P16: f1 and f2, rebuilt (f2 absorbs p9); f3, f4 moved | P4 is only f3 and f4, under half live: they move |
 
-- **C8** writes one rebuilt frame and one patch. Frame 2 stays in P4 as
-  C4 wrote it; a read of page 9 takes P8's patch and decodes it against
-  frame 2's page 9.
-- **C12** rebuilds frame 5 again, so of P8 only the patch is still
-  needed, less than half its bytes: compaction copies the patch, as it
-  is, into P12. P4 is still mostly live (frames 1–4), so it stays.
-- **A rebuilt frame** absorbs its patches, so a page reads from at most a
-  frame and one patch.
-- **Garbage collection** deletes P8 at the next checkpoint, C16, when M8
-  is no longer kept.
+**Where each manifest points.** Every manifest names every frame, and
+shares what did not change with the manifests before it:
 
-A checkpoint's size follows what the tail changed; only the manifest grows
-with the database, at about 1.7 bytes per frame. Compaction keeps every
-pack a manifest names at least half live, which bounds what is stored in
-all.
+```
+          f0     f1     f2     f3     f4     f5     p9
+M4        P4     P4     P4     P4     P4     P4     ·
+M8        P4     P4     P4     P4     P4     P8     P8
+M12       P12    P4     P4     P4     P4     P12    P12*
+M16       P12    P16    P16    P16*   P16*   P12    ·
+
+* moved there by compaction    · no patch
+```
+
+M8 shares five frames with M4; M16 still reads f0 and f5 from P12. A read
+of page 9 under M8 or M12 takes the frame from P4 and the patch from P8
+or P12; under M16, f2 is rebuilt with page 9 in it, and the patch is gone.
+
+**What each pack still holds for the latest manifest.** A pack never
+changes; what the latest manifest stops pointing into is dead in place:
+
+```
+after C8    P4   [ f0  f1  f2  f3  f4  ░░ ]    5 of 6 live: kept
+            P8   [ f5  p9 ]
+
+after C12   P4   [ ░░  f1  f2  f3  f4  ░░ ]    4 of 6 live: kept
+            P8   [ ░░  p9 ]                    p9 alone, under half: p9 moves to P12
+            P12  [ f0  f5  p9 ]
+
+after C16   P4   [ ░░  ░░  ░░  f3  f4  ░░ ]    under half: f3 and f4 move to P16
+            P12  [ f0  f5  ░░ ]                p9 dead, but small: kept
+            P16  [ f1  f2  f3  f4 ]
+
+░░ dead: the latest manifest no longer points into it
+```
+
+**How long each pack lives.** Garbage collection keeps what the head's two
+manifests, its checkpoint's and the previous one's, point into, and
+deletes older packs that neither names:
+
+```
+         C4     C8     C12    C16    C20
+P4       ●━━━━━━━━━━━━━━━━━━━━━━━━━━━×      M12 points into it; M16 and M20 do not
+P8              ●━━━━━━━━━━━━━×             M8 points into it; M12 and M16 do not
+P12                    ●━━━━━━━━━━━━━━━━▶   M16 still reads f0 and f5 from it
+P16                           ●━━━━━━━━━▶
+
+● written    × deleted, two checkpoints after the last manifest that named it
+```
+
+- **Sharing:** a checkpoint writes what the tail changed; every frame it
+  did not touch stays where an older checkpoint wrote it, however long
+  ago.
+- **Patches:** a page or two changed in a frame is a patch beside the
+  frame (p9 in C8); a rebuilt frame absorbs its patches (f2 in C16), so a
+  page reads from at most a frame and one patch.
+- **Compaction:** once the latest manifest needs less than half of a
+  pack's bytes, the checkpoint copies the live ranges, as they are, into
+  its own pack (P8 at C12, P4 at C16). Every pack a manifest names stays
+  at least half live, so what is stored stays within about twice the
+  state.
+- **Size:** a checkpoint's pack follows what the tail changed, plus what
+  compaction moves; the manifest is the part that grows with the
+  database, at about 1.7 bytes per frame.
 
 ### A timeline
 
