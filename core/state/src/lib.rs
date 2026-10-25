@@ -20,7 +20,7 @@
 //! # A tail and checkpoints
 //!
 //! Where the state is stored is split by what each store is good at (see
-//! the private `format` and `store` modules, and `docs/FRAMES.md`). A flush
+//! the private `format` and `store` modules, and `docs/ARCHITECTURE.md`). A flush
 //! puts its mutation as one entry of a *tail* in Restate, then the *head*,
 //! and syncs once: one round trip, which Restate fences. Now and then
 //! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as

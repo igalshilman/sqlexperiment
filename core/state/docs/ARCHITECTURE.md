@@ -4,12 +4,11 @@ How the state works, from the top down: the data model a user of the crate
 sees, the state as a sequence of mutations, how that sequence is stored
 (the head, the tail, checkpoints, manifests and packs), and how each of
 those changes over time. It ends with what changes when the packs are in
-S3, and with measured sizes and costs.
+S3, with measured sizes and costs, and with the layouts this one replaced.
 
-The other docs go further on each part:
-[DESIGN.md](DESIGN.md) has the exact rules and failure cases,
-[FORMAT.md](FORMAT.md) the byte encodings, and [FRAMES.md](FRAMES.md) the
-experiment that led to this layout, with its measurements.
+Two docs go further: [DESIGN.md](DESIGN.md) has the rules this one leaves
+out (retries, readers, the owner cache, the SQL engine, limits), and
+[FORMAT.md](FORMAT.md) the byte encodings.
 
 ## 1. The data model
 
@@ -244,19 +243,17 @@ compaction moves it.
 
 ### What a checkpoint holds
 
-A checkpoint is **not a self-contained copy** of the state, and **not a
-delta** to apply to the one before. It is two things that differ in kind:
+A checkpoint has two parts: a manifest that indexes the whole state, and a
+pack of what changed since the checkpoint before.
 
-- **Its manifest is complete.** It names every file, record and log, and
-  a location (pack, offset, length) for every frame, patch and stored
-  value. Nothing in it refers to an earlier manifest, so an open reads one
-  manifest, never a chain of them.
-- **Its pack holds only what changed** since the checkpoint before: the
-  frames it rebuilt, the patches it added, the values set since, and what
-  compaction moved. Everything else, the manifest points to where it
-  already is, in older packs.
+- **The manifest** names every file, record and log, and gives a location
+  (pack, offset, length) for every frame, patch and stored value. It
+  stands on its own: an open reads this one manifest.
+- **The pack** holds the frames the checkpoint rebuilt, the patches it
+  added, the values set since, and what compaction moved. For everything
+  else, the manifest points into the older packs that already hold it.
 
-So the state of a checkpoint is its manifest plus every pack it points
+The state as of a checkpoint is its manifest and the packs it points
 into. Say `db` has 6 frames (0–5, 4 pages each), with a checkpoint every
 4 flushes:
 
@@ -266,22 +263,21 @@ into. Say `db` has 6 frames (0–5, 4 pages each), with a checkpoint every
 | C8         | Page 9 (in frame 2); all of frame 5        | P8: a patch for page 9; frame 5, rebuilt                         | Frames 0–4 → P4, page 9 → P8, frame 5 → P8                                  |
 | C12        | Most of frame 0; frame 5 again             | P12: frame 0 and frame 5, rebuilt; page 9's patch, moved from P8 | Frames 1–4 → P4, page 9 → P12, frames 0 and 5 → P12; P8 is no longer needed |
 
-- **C8** rewrites one frame and one page, not the database. Frame 2
-  stays in P4 as C4 wrote it; reading page 9 takes P8's patch, which
-  decodes against that frame's page 9.
-- **C12** leaves P8's frame 5 dead, so M12 would need only the small
-  patch of P8, less than half its bytes: compaction copies the patch,
-  as it is, into P12. P4 is still mostly live (frames 1–4), so it stays.
-- **Rebuilding a frame** folds its patches in and drops them, so a page
-  is at most a frame plus one patch, however many checkpoints changed it.
-- **Garbage collection** deletes P8 once neither kept manifest points
-  into it: after the next checkpoint, when M8 is no longer the previous
-  one.
+- **C8** writes one rebuilt frame and one patch. Frame 2 stays in P4 as
+  C4 wrote it; a read of page 9 takes P8's patch and decodes it against
+  frame 2's page 9.
+- **C12** rebuilds frame 5 again, so of P8 only the patch is still
+  needed, less than half its bytes: compaction copies the patch, as it
+  is, into P12. P4 is still mostly live (frames 1–4), so it stays.
+- **A rebuilt frame** absorbs its patches, so a page reads from at most a
+  frame and one patch.
+- **Garbage collection** deletes P8 at the next checkpoint, C16, when M8
+  is no longer kept.
 
-What a checkpoint costs is in proportion to what the tail changed, not to
-the database's size; the manifest is the one part that grows with the
-size, at about 1.7 bytes per frame. What it stores in all stays bounded,
-as compaction keeps every pack a manifest names at least half live.
+A checkpoint's size follows what the tail changed; only the manifest grows
+with the database, at about 1.7 bytes per frame. Compaction keeps every
+pack a manifest names at least half live, which bounds what is stored in
+all.
 
 ### A timeline
 
@@ -313,7 +309,9 @@ version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
 
 1. **Get the head.** If this process's cache holds the state as of exactly
    this head (it was the last to flush, say), reuse it, with its parked SQL
-   engine: done, in one round trip.
+   engine: done, in one round trip. An owner without a cache, or whose
+   last flush had an unknown outcome, syncs in the same round trip, so
+   that what it reads is durable.
 2. Otherwise, **get the checkpoint's manifest and the tail past it**,
    together, and apply the tail to the overlay in memory.
 3. **Get large records and log entries**, and every frame and patch of a
@@ -340,7 +338,7 @@ After every flush that checkpoints, and whenever anyone calls
 `State::collect_garbage` (a reader may too):
 
 1. **List** Restate's keys, once (Restate's `getKeys()`), and S3's packs if
-   they are there.
+   they are there. A store that cannot list keeps its garbage.
 2. **Keep** the packs the head's two manifests point into, and the two
    manifests.
 3. **Delete** listed packs and manifests older than the previous
@@ -376,12 +374,13 @@ head, and the flush's sync.
 A crash anywhere keeps a prefix of the writes since the last sync, and
 nothing needs repair:
 
-| Interrupted        | What is left                             | What happens next                         |
-| ------------------ | ---------------------------------------- | ----------------------------------------- |
-| A flush            | Its tail entry without the head, or both | The next flush overwrites the tail entry  |
-| A checkpoint       | A pack and manifest no head names        | Garbage, collected later                  |
-| A collection       | Some deletes                             | The next collection deletes the rest      |
-| An unknown outcome | The flush may or may not be stored       | The state ends; the next open syncs first |
+| Interrupted                             | What is left                             | What happens next                         |
+| --------------------------------------- | ---------------------------------------- | ----------------------------------------- |
+| A flush                                 | Its tail entry without the head, or both | The next flush overwrites the tail entry  |
+| A checkpoint                            | A pack and manifest no head names        | Garbage, collected later                  |
+| A collection                            | Some deletes                             | The next collection deletes the rest      |
+| A flush's tail deletes, before its head | The head before, with its tail           | The next checkpoint deletes the rest      |
+| An unknown outcome                      | The flush may or may not be stored       | The state ends; the next open syncs first |
 
 ## 5. With packs in S3
 
@@ -474,3 +473,20 @@ invocation, and no S3 request.
   grows, and S3 costs cents per million warm flushes. Each b-tree level a
   cold query reads costs an S3 GET, and small databases write about 3× the
   bytes to Restate, as their tail is cut less often.
+
+## 7. Earlier layouts
+
+Each layout below was built, measured and replaced by the next; their
+reports are in git history (`core/state/docs/` at commit `e015181`).
+
+| Layout                     | What it stored                                                                       | Why it went                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| A log                      | Every flush appended to a log, checkpointed now and then into page keys              | Each change was written twice, to the log and then in place                                 |
+| Copy-on-write blobs        | A root naming a radix map of chunks, each a base and a delta, all in Restate         | The whole database lived in Restate key by key: 33,000 keys for 100 MB of text              |
+| Blobs in S3                | The same blobs in an object store, the root in Restate, zombies kept apart by claims | Every flush was S3 PUTs: $15 per million one-row updates, over $100 for ten rows            |
+| Tail and checkpoints (v18) | A tail in Restate, and checkpoints of copy-on-write blobs, in S3 or Restate          | The chunk map, bases, deltas and rebase rules; a cold open of 1M rows took up to 1,331 gets |
+| Frame packs (v20, this)    | A tail of plain mutations; checkpoints of frames and patches, with a flat manifest   | –                                                                                           |
+
+Against v18, frame packs halved the bytes a flush puts on large databases
+(a tail page costs what changed since the checkpoint) and brought a cold
+open to a manifest and a frame, in about 14% less code.
