@@ -225,7 +225,7 @@ fn collecting(cache: Option<Namespace>) -> StateSetup {
 }
 
 #[test]
-fn an_emptied_file_frees_its_blobs_a_save_later() -> Result<()> {
+fn an_emptied_file_frees_its_blobs_a_sweep_later() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MonitorKv::new(MemoryKv::default()));
         let mut db = Db::open(store.clone(), collecting(None)).await?;
@@ -243,15 +243,22 @@ fn an_emptied_file_frees_its_blobs_a_save_later() -> Result<()> {
         assert_eq!(file.read(5).await?, Some(page(6)));
         db.mutation().set_len(&file, 0)?;
         assert_eq!(file.read(5).await?, Some(page(6)), "until the flush");
+        db.flush().await?;
+        let swept = db.state().collect_garbage().await?;
+        assert_eq!(
+            (swept.deleted, swept.candidates),
+            (0, 2),
+            "kept for readers"
+        );
         db.save().await?;
-        assert_eq!(store.inner.blob_count(), 2, "garbage, kept for readers");
 
         // Regrown, it reads zeros where it held pages.
         let mut db = Db::open(store.clone(), collecting(None)).await?;
         let file = db.state().file("m")?;
         assert!(file.is_empty());
         db.mutation().write(&file, 7, Some(page(9)))?;
-        db.save().await?;
+        db.flush().await?;
+        db.state().collect_garbage().await?;
         assert_eq!(store.inner.blob_count(), 1, "the garbage went");
         let db = Db::open(store.clone(), StateOptions::default()).await?;
         let file = db.state().file("m")?;
@@ -379,12 +386,14 @@ fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
         let file = db.state().file("m")?;
         db.mutation().write(&file, 1, None)?;
         db.mutation().set_len(&file, 0)?;
-        db.save().await?;
+        db.flush().await?;
+        db.state().collect_garbage().await?;
         let mut db = Db::open(store.clone(), collecting(None)).await?;
         let next = db.state().record("next");
         db.mutation().set(&next, Bytes::from_static(b"save"))?;
-        db.save().await?;
-        assert_eq!(store.blob_count(), 0, "its blobs went a save later");
+        db.flush().await?;
+        db.state().collect_garbage().await?;
+        assert_eq!(store.blob_count(), 0, "its blobs went a sweep later");
         Ok(())
     })
 }

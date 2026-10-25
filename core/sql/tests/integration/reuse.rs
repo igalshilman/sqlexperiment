@@ -227,7 +227,7 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
                 3 => {
                     session.begin().await?;
                     session.query(LONG_WRITE, None).await?;
-                    let plan = failpoint(Operation::Put, "v16/root", 1, Effect::After, false);
+                    let plan = failpoint(Operation::Put, "v17/root", 1, Effect::After, false);
                     let (hit, _) =
                         under(&store, plan, session.commit(Some(Bytes::from("e")))).await;
                     assert!(hit);

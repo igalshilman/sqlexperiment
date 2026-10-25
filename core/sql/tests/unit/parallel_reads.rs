@@ -1,7 +1,11 @@
 use super::*;
 use bytes::Bytes;
 use futures::{channel::oneshot, future::BoxFuture};
-use state::{kv::KvStore, simulation::MemoryKv};
+use state::{
+    kv::KvStore,
+    simulation::{MemoryKv, is_blob_key},
+};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct GatedReads {
@@ -9,7 +13,8 @@ struct GatedReads {
     gates: Mutex<BTreeMap<String, oneshot::Receiver<()>>>,
     active: AtomicUsize,
     maximum: AtomicUsize,
-    fail_first: bool,
+    /// The key whose read fails, if any.
+    failing: Option<String>,
 }
 struct Active<'a>(&'a AtomicUsize);
 impl Drop for Active<'_> {
@@ -26,7 +31,7 @@ impl KvStore for GatedReads {
                 let _active = Active(&self.active);
                 self.maximum.fetch_max(n, Ordering::SeqCst);
                 gate.await.map_err(io::Error::other)?;
-                if self.fail_first && key == state::simulation::blob_key(0) {
+                if self.failing.as_deref() == Some(key) {
                     return Err(io::Error::other("injected read error"));
                 }
                 return self.inner.get(key).await;
@@ -58,21 +63,34 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
                 ..Default::default()
             };
             let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
-            initial
-                .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
-                .await?;
-            initial.publish().await?;
+            // Each page's blob: the one its publish added.
+            let blobs = || -> BTreeSet<String> {
+                (base.keys().into_iter())
+                    .filter(|key| is_blob_key(key))
+                    .collect()
+            };
+            let mut keys = Vec::new();
+            for (page, byte) in [7, 8].into_iter().enumerate() {
+                let before = blobs();
+                let offset = (page * BLOCK_SIZE) as u64;
+                initial
+                    .write(0, offset, &buffers(&vec![byte; BLOCK_SIZE]))
+                    .await?;
+                initial.publish().await?;
+                keys.extend(blobs().difference(&before).cloned());
+            }
+            let [first_page, second_page] = <[String; 2]>::try_from(keys).unwrap();
             let (send_a, recv_a) = oneshot::channel();
             let (send_b, recv_b) = oneshot::channel();
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
                 gates: Mutex::new(BTreeMap::from([
-                    (state::simulation::blob_key(0), recv_a),
-                    (state::simulation::blob_key(1), recv_b),
+                    (first_page.clone(), recv_a),
+                    (second_page, recv_b),
                 ])),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
-                fail_first: mode == "error",
+                failing: (mode == "error").then_some(first_page),
             });
             let io = KvIo::mount_with_options(store.clone(), all).await?;
             let file = MountedIo(io.clone()).open_file(DB_PATH, OpenFlags::Create, false)?;
@@ -129,7 +147,7 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
                             .into_iter()
                             .all(Completion::succeeded)
                     );
-                    for (output, byte) in outputs.iter().zip([7, 7, 9, 0]) {
+                    for (output, byte) in outputs.iter().zip([7, 8, 9, 0]) {
                         assert!(output.as_slice().iter().all(|&b| b == byte));
                     }
                 }

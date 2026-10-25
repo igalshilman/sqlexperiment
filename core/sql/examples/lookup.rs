@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         let blobs_read = stats
             .read_keys
             .iter()
-            .filter(|k| k.starts_with("v16/blob/"))
+            .filter(|k| k.starts_with("v17/blob/"))
             .count();
         assert!(blobs > 100);
         assert!(

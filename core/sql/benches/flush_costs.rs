@@ -1,5 +1,6 @@
-//! Copy-on-write blobs on SQL workloads, one flush per session: the requests,
-//! bytes and round trips a flush costs, what is stored, and a cold read.
+//! Copy-on-write blobs on SQL workloads, one flush per session and a sweep
+//! every `garbage_after` flushes: the requests, bytes and round trips a flush
+//! costs (its share of the sweeps included), what is stored, and a cold read.
 //!
 //! ```sh
 //! cargo bench --locked --features simulation --bench flush_costs
@@ -296,7 +297,11 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     for i in 0..w.flushes {
         let mut db = open(&store, &cache).await?;
         let effects = step(&mut db, w, i, &mut words).await?;
+        let state = db.state();
         save(db, effects).await?;
+        if (i + 1) % options().garbage_after.max(1) == 0 {
+            state.collect_garbage().await?;
+        }
     }
     let s = memory.stats();
     let rts = store.round_trips();

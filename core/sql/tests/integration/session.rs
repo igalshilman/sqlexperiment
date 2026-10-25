@@ -351,7 +351,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             if round % 5 == 0 {
                 let plan = failpoint(
                     Operation::Get,
-                    "v16/blob/",
+                    "v17/blob/",
                     1 + round as usize % 3,
                     Effect::None,
                     round % 2 == 0,
@@ -381,7 +381,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 if k == 1 {
                     let plan = failpoint(
                         Operation::Put,
-                        "v16/root",
+                        "v17/root",
                         1,
                         [Effect::None, Effect::After][round as usize % 2],
                         false,
