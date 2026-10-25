@@ -6,7 +6,7 @@ Restate keeps a tail of small mutations, one entry per flush, and S3 (or
 Restate itself) keeps checkpoints, each one object. What changes is the
 checkpoint's format. Packs made copy-on-write unnecessary, so the radix chunk
 map, chunks, bases and deltas are gone. A file is a row of frames, each
-frame `frame_pages` pages (16: 64 KiB) compressed with zstd on its own, and
+frame `frame_pages` pages (4: 16 KiB) compressed with zstd on its own, and
 a checkpoint rewrites the frames the tail changed.
 
 ## Layout

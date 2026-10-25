@@ -137,7 +137,7 @@ pub trait Base: Send + Sync {
 }
 
 /// Default [`StateOptions::frame_pages`].
-pub const FRAME_PAGES: u64 = 16;
+pub const FRAME_PAGES: u64 = 4;
 
 /// How a state flushes and reads. Only [`Self::frame_pages`] is stored, when
 /// the namespace is made; the others never change the stored format.
