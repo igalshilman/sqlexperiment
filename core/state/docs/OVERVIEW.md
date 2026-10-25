@@ -87,6 +87,15 @@ that are there. There is nothing to replay, checkpoint or repair.
   state. The owner settles outstanding requests and reopens, then looks at
   what landed before retrying.
 
+**Blobs in S3.** Where the blobs live beside Restate, in an object store
+(`blobs::SplitStore`), Restate fences an earlier attempt from the root but
+not from the blobs, and an upload may land after its attempt failed. So
+before its first blob, an owner claims its blob numbers: it writes
+`v17/claim` in Restate, 4096 numbers ahead, and syncs; every later attempt
+numbers past the claim. No two attempts ever put the same key, so S3 needs
+no conditional puts, and what a failed attempt or a zombie uploaded is dead
+once the root moves past it, for a sweep to delete.
+
 ## Who writes the state
 
 The state never flushes on its own, nor knows what writes it. A host opens it,

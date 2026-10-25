@@ -41,7 +41,10 @@
 //! root's next blob that the root does not name is dead for good;
 //! [`State::collect_garbage`] lists the blobs and deletes those, in two
 //! phases, [`StateOptions::garbage_after`] versions apart, for the readers.
-//! It writes no root, so any state may sweep, beside the owner.
+//! It writes no root, so any state may sweep, beside the owner; a flush
+//! sweeps every [`StateOptions::sweep_every`] versions. It lists keys with
+//! [`kv::KvStore::keys`] (Restate's `getKeys()`): a store that cannot list
+//! is never swept.
 //!
 //! # Blobs beside Restate
 //!
@@ -49,7 +52,8 @@
 //! beside Restate), Restate fences an earlier attempt from the root but
 //! not from the blobs. So an owner claims its blob numbers in the root's
 //! store, and syncs, before it puts a blob: no later attempt uses them, and
-//! a sync that fails ends the state, and so the attempt.
+//! a sync that fails ends the state, and so the attempt. No conditional put
+//! is needed: no two attempts ever put the same key.
 //!
 //! # Ownership and concurrency
 //!
