@@ -5,11 +5,13 @@ mod fault;
 mod latency;
 mod memory;
 mod monitor;
-pub use blobs::MemoryBlobs;
+mod restate;
+pub use blobs::{BlobFaults, MemoryBlobs};
 pub use fault::{Effect, Event, Failpoint, FaultKv, Operation};
 pub use latency::LatencyKv;
 pub use memory::{MemoryKv, Stats, Traffic, object_kind};
 pub use monitor::MonitorKv;
+pub use restate::Restate;
 
 use crate::{Open, PageCache, PageCacheConfig, State, StateOptions, kv::KvStore};
 use std::sync::Arc;

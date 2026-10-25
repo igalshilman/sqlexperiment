@@ -11,20 +11,13 @@
 //! ```
 #![cfg(feature = "simulation")]
 use bytes::Bytes;
-use futures::future::BoxFuture;
 use state::{
     ROOT_KEY, Result, State, StateOptions,
     blobs::{BlobStore, SplitStore},
     kv::KvStore,
     simulation::*,
 };
-use std::{
-    io,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::sync::Arc;
 
 fn page(n: u8) -> Bytes {
     vec![n; 4096].into()
@@ -33,80 +26,6 @@ fn page(n: u8) -> Bytes {
 /// A record too large for the root: a blob of its own.
 fn large(n: u8) -> Bytes {
     vec![n; 3000].into()
-}
-
-/// Restate's state of one object, as the attempts of its handler see it:
-/// each new attempt fences those before it, whose writes Restate refuses.
-#[derive(Clone, Default)]
-struct Restate {
-    store: MemoryKv,
-    attempts: Arc<AtomicU64>,
-}
-
-impl Restate {
-    /// A new attempt, which fences every earlier one.
-    fn attempt(&self) -> Arc<dyn KvStore> {
-        let epoch = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        Arc::new(Attempt {
-            restate: self.clone(),
-            epoch,
-            queued: Mutex::default(),
-        })
-    }
-}
-
-/// An attempt's view of Restate: its writes wait for its sync, which fails
-/// once a later attempt fenced it.
-struct Attempt {
-    restate: Restate,
-    epoch: u64,
-    queued: Mutex<Vec<(String, Option<Bytes>)>>,
-}
-
-impl Attempt {
-    fn fenced(&self) -> io::Result<()> {
-        match self.restate.attempts.load(Ordering::SeqCst) == self.epoch {
-            true => Ok(()),
-            false => Err(io::Error::other("fenced: a later attempt runs")),
-        }
-    }
-}
-
-impl KvStore for Attempt {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        Box::pin(async move {
-            let queued = (self.queued.lock().unwrap().iter().rev())
-                .find(|(queued, _)| queued == key)
-                .map(|(_, value)| value.clone());
-            match queued {
-                Some(value) => Ok(value),
-                None => self.restate.store.get(key).await,
-            }
-        })
-    }
-    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
-        self.fenced()?;
-        self.queued.lock().unwrap().push((key.into(), Some(value)));
-        Ok(())
-    }
-    fn delete(&self, key: &str) -> io::Result<()> {
-        self.fenced()?;
-        self.queued.lock().unwrap().push((key.into(), None));
-        Ok(())
-    }
-    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            let queued = std::mem::take(&mut *self.queued.lock().unwrap());
-            self.fenced()?;
-            for (key, value) in queued {
-                match value {
-                    Some(value) => self.restate.store.put(&key, value)?,
-                    None => self.restate.store.delete(&key)?,
-                }
-            }
-            self.restate.store.sync().await
-        })
-    }
 }
 
 /// The blob stores the tests run on: in memory, and `object_store`'s.

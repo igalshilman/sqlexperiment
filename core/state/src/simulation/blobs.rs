@@ -1,5 +1,14 @@
-//! An in-memory [`BlobStore`]: S3, as tests need it.
+//! An in-memory [`BlobStore`]: S3, as tests need it, failures included.
+//!
+//! A request to S3 may fail before it does anything, do its work and lose
+//! the response, or be in flight when its caller gives up on it, and land
+//! later: after the attempt that sent it failed, while a retry, a zombie or
+//! a sweep runs. [`MemoryBlobs::faults`] makes requests fail in each of
+//! these ways; a write whose future is dropped once sent lands later too.
+//! What lands later waits for [`MemoryBlobs::land_late`].
+use super::yield_now;
 use crate::blobs::BlobStore;
+use crate::store::BLOB_PREFIX;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
@@ -15,14 +24,94 @@ pub struct MemoryBlobs {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Random faults ([`MemoryBlobs::faults`]): one request in `one_in` fails.
+/// A failed get or list just fails; a failed put or delete is lost, done
+/// before it fails, or left to land later, in turn at random.
+#[derive(Clone, Copy, Debug)]
+pub struct BlobFaults {
+    pub one_in: u64,
+    pub seed: u64,
+}
+
+/// How a faulty write ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// It fails, and stores nothing.
+    Lost,
+    /// It stores, and its response is lost.
+    Done,
+    /// It fails now, and lands later.
+    Late,
+}
+
+/// A write: a put, or a delete when the value is `None`.
+type Write = (String, Option<Bytes>);
+
 #[derive(Default)]
 struct Inner {
     values: BTreeMap<String, Bytes>,
     puts: u64,
-    /// Puts of a key that held a value.
+    /// Puts of a blob key that held a value.
     overwrites: u64,
     /// Puts left to accept before the store fails every put.
     puts_before_failing: Option<u64>,
+    faults: Option<BlobFaults>,
+    /// Requests failed, by the faults.
+    failed: u64,
+    /// Writes sent that have not landed yet.
+    late: Vec<Write>,
+    /// Writes that landed late.
+    landed_late: u64,
+}
+
+impl Inner {
+    /// The fault of the next request, if it fails.
+    fn fault(&mut self) -> Option<Fault> {
+        let faults = self.faults.as_mut()?;
+        faults.seed = faults
+            .seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let draw = faults.seed >> 33;
+        if draw % faults.one_in.max(1) != 0 {
+            return None;
+        }
+        self.failed += 1;
+        Some([Fault::Lost, Fault::Done, Fault::Late][(draw / faults.one_in.max(1) % 3) as usize])
+    }
+
+    fn apply(&mut self, (key, value): Write) {
+        match value {
+            Some(value) => {
+                self.puts += 1;
+                let blob = key.starts_with(BLOB_PREFIX);
+                if self.values.insert(key, value).is_some() && blob {
+                    self.overwrites += 1;
+                }
+            }
+            None => {
+                self.values.remove(&key);
+            }
+        }
+    }
+}
+
+/// A write sent and not yet done: dropped, it lands later.
+struct Sent {
+    inner: Arc<Mutex<Inner>>,
+    write: Option<Write>,
+}
+
+impl Drop for Sent {
+    fn drop(&mut self) {
+        if let Some(write) = self.write.take() {
+            self.inner.lock().unwrap().late.push(write);
+        }
+    }
+}
+
+fn injected(what: &str, key: &str) -> io::Error {
+    io::Error::other(format!("injected blob {what} failure at {key}"))
 }
 
 impl MemoryBlobs {
@@ -38,12 +127,13 @@ impl MemoryBlobs {
         self.len() == 0
     }
 
-    /// Puts accepted.
+    /// Puts that stored a value, late ones included.
     pub fn puts(&self) -> u64 {
         self.inner.lock().unwrap().puts
     }
 
-    /// Puts of a key that held a value: what no two attempts may do.
+    /// Puts of a blob key that held a value: what no two attempts may do.
+    /// (The sweep's key is put over at each sweep.)
     pub fn overwrites(&self) -> u64 {
         self.inner.lock().unwrap().overwrites
     }
@@ -52,40 +142,103 @@ impl MemoryBlobs {
     pub fn fail_after(&self, puts: Option<u64>) {
         self.inner.lock().unwrap().puts_before_failing = puts;
     }
-}
 
-impl BlobStore for MemoryBlobs {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        Box::pin(async move { Ok(self.inner.lock().unwrap().values.get(key).cloned()) })
+    /// Fail requests at random from now on; `None` stops.
+    pub fn faults(&self, faults: Option<BlobFaults>) {
+        self.inner.lock().unwrap().faults = faults;
     }
 
-    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+    /// Requests the faults failed.
+    pub fn failed(&self) -> u64 {
+        self.inner.lock().unwrap().failed
+    }
+
+    /// Writes waiting to land.
+    pub fn in_flight(&self) -> usize {
+        self.inner.lock().unwrap().late.len()
+    }
+
+    /// Writes that landed late.
+    pub fn landed_late(&self) -> u64 {
+        self.inner.lock().unwrap().landed_late
+    }
+
+    /// Land every write still in flight, in the order sent.
+    pub fn land_late(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        for write in std::mem::take(&mut inner.late) {
+            inner.landed_late += 1;
+            inner.apply(write);
+        }
+    }
+
+    /// A put or a delete: sent at its first poll, done at its second, unless
+    /// it fails; dropped in between, it lands later.
+    fn write(&self, write: Write) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
+            let key = write.0.clone();
+            let mut sent = Sent {
+                inner: self.inner.clone(),
+                write: Some(write),
+            };
+            yield_now().await;
+            let write = sent.write.take().unwrap();
             let mut inner = self.inner.lock().unwrap();
-            if let Some(left) = &mut inner.puts_before_failing {
+            let what = if write.1.is_some() { "put" } else { "delete" };
+            if write.1.is_some()
+                && let Some(left) = &mut inner.puts_before_failing
+            {
                 if *left == 0 {
                     return Err(io::Error::other("the blob store is down"));
                 }
                 *left -= 1;
             }
-            inner.puts += 1;
-            if inner.values.insert(key.to_owned(), value).is_some() {
-                inner.overwrites += 1;
+            match inner.fault() {
+                None => {
+                    inner.apply(write);
+                    Ok(())
+                }
+                Some(Fault::Lost) => Err(injected(what, &key)),
+                Some(Fault::Done) => {
+                    inner.apply(write);
+                    Err(injected(what, &key))
+                }
+                Some(Fault::Late) => {
+                    inner.late.push(write);
+                    Err(injected(what, &key))
+                }
             }
-            Ok(())
+        })
+    }
+}
+
+impl BlobStore for MemoryBlobs {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        Box::pin(async move {
+            yield_now().await;
+            let mut inner = self.inner.lock().unwrap();
+            match inner.fault() {
+                Some(_) => Err(injected("get", key)),
+                None => Ok(inner.values.get(key).cloned()),
+            }
         })
     }
 
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+        self.write((key.to_owned(), Some(value)))
+    }
+
     fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            self.inner.lock().unwrap().values.remove(key);
-            Ok(())
-        })
+        self.write((key.to_owned(), None))
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
         Box::pin(async move {
-            let inner = self.inner.lock().unwrap();
+            yield_now().await;
+            let mut inner = self.inner.lock().unwrap();
+            if inner.fault().is_some() {
+                return Err(injected("list", prefix));
+            }
             Ok((inner.values.keys())
                 .filter(|key| key.starts_with(prefix))
                 .cloned()

@@ -12,6 +12,8 @@ pub enum Operation {
     Put,
     Delete,
     Sync,
+    /// A listing of the keys ([`KvStore::keys`]); its key is "".
+    Keys,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -129,7 +131,8 @@ impl FaultKv {
         io::Error::other(format!("injected {operation:?} failure at {key}"))
     }
 
-    /// A get or a sync: may be delayed, fail, or stay pending until dropped.
+    /// A get, a sync or a listing: may be delayed, fail, or stay pending
+    /// until dropped.
     async fn run<T>(
         &self,
         operation: Operation,
@@ -192,7 +195,7 @@ impl KvStore for FaultKv {
         Box::pin(self.run(Operation::Sync, "", self.inner.sync()))
     }
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
-        KvStore::keys(&self.inner)
+        Box::pin(self.run(Operation::Keys, "", KvStore::keys(&self.inner)))
     }
     fn unfenced_blobs(&self) -> bool {
         self.inner.unfenced_blobs()
