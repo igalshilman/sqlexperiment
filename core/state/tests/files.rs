@@ -229,7 +229,7 @@ fn noise(seed: u64, pages: usize) -> Vec<u8> {
 
 /// Small changes to a page, a checkpoint each flush, patch its frame rather
 /// than rewrite it, and the tail compresses the next change against the
-/// patched page; a frame rewritten whole is rebuilt, dropping its patches.
+/// patched page; a frame rewritten whole is rebuilt, dropping its patch.
 /// The file reads the same in the session and reopened, small enough to be
 /// fetched whole on open or not.
 #[test]

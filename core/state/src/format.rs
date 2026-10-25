@@ -505,9 +505,9 @@ pub(crate) enum Value {
 }
 
 /// A paged file in a checkpoint: its size, its base's id, where each of its
-/// frames is (`None`: its base's pages, or zeros), and its patches: pages
-/// changed since their frame was written, each a zstd frame against the
-/// page as its frame holds it (as the tail keeps them), by page.
+/// frames is (`None`: its base's pages, or zeros), and its patches, by
+/// frame: a frame changed since it was written, whole, as a zstd frame
+/// against the frame as stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileIndex {
     pub size: u64,
@@ -651,9 +651,9 @@ impl Manifest {
             }
             put_varint(&mut body, file.patches.len() as u64);
             let mut next = 0;
-            for (&page, at) in &file.patches {
-                put_varint(&mut body, page - next);
-                next = page + 1;
+            for (&index, at) in &file.patches {
+                put_varint(&mut body, index - next);
+                next = index + 1;
                 location(&mut body, Some(at));
             }
         }
@@ -721,18 +721,19 @@ impl Manifest {
             let name = r.name()?;
             let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
             let base = r.varint()?.checked_sub(1);
-            let frames = (0..r.count()?)
+            let frames: Vec<Option<Location>> = (0..r.count()?)
                 .map(|_| location(&mut r))
                 .collect::<io::Result<_>>()?;
             let mut patches = BTreeMap::new();
             let mut next = 0u64;
             for _ in 0..r.count()? {
-                let page = next
+                // A patch is of a stored frame.
+                let index = next
                     .checked_add(r.varint()?)
-                    .filter(|&page| page < size.div_ceil(PAGE))
+                    .filter(|&index| frames.get(index as usize).is_some_and(Option::is_some))
                     .ok_or_else(|| r.invalid())?;
-                next = page + 1;
-                patches.insert(page, location(&mut r)?.ok_or_else(|| r.invalid())?);
+                next = index + 1;
+                patches.insert(index, location(&mut r)?.ok_or_else(|| r.invalid())?);
             }
             let file = FileIndex {
                 size,

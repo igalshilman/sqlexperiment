@@ -67,7 +67,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
                 None,
                 Some(location(old, 1 << 30, 70)),
             ],
-            patches: BTreeMap::from([(5, location(new, 900, 40)), (40, location(old, 3, 9))]),
+            patches: BTreeMap::from([(0, location(new, 900, 40)), (2, location(old, 3, 9))]),
         },
     );
     manifest.files.insert(
@@ -107,6 +107,26 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
     }
     let empty = Manifest::default();
     assert_eq!(Manifest::decode(&empty.encode().unwrap()).unwrap(), empty);
+}
+
+#[test]
+fn a_manifest_with_a_patch_of_a_frame_not_stored_is_refused() {
+    let pack = checkpoint(3).pack;
+    for patched in [1, 2] {
+        let mut manifest = Manifest::default();
+        manifest.files.insert(
+            "db".into(),
+            FileIndex {
+                size: 2 * 4 * PAGE,
+                base: None,
+                frames: vec![Some(location(pack, 0, 900)), None],
+                patches: BTreeMap::from([(patched, location(pack, 900, 40))]),
+            },
+        );
+        manifest.sizes = BTreeMap::from([(pack, 940)]);
+        let bytes = manifest.encode().unwrap();
+        assert!(Manifest::decode(&bytes).is_err(), "a patch of frame {patched}");
+    }
 }
 
 #[test]

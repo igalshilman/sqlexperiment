@@ -184,7 +184,8 @@ pub struct Checkpointed {
     pub version: u64,
     /// Frames it wrote, rebuilt from the overlay.
     pub frames: usize,
-    /// Frames it patched instead: their pages written, as the tail held them.
+    /// Frames it patched instead: each written whole, against the frame as
+    /// stored.
     pub patched: usize,
     /// Large records and log entries it wrote.
     pub values: usize,
@@ -567,16 +568,9 @@ impl Snapshot {
                 })
                 .map(Option::transpose)
                 .collect::<io::Result<_>>()?;
-            for (&page, &at) in &file.patches {
-                let frame = frames
-                    .get((page / head.frame_pages) as usize)
-                    .cloned()
-                    .flatten();
-                let offset = ((page % head.frame_pages) * PAGE) as usize;
-                let reference = frame.map_or(Bytes::new(), |frame| {
-                    frame.slice(offset..offset + PAGE as usize)
-                });
-                self.keep(at, Arc::new(decode_page(&fetched[&at], &reference)?));
+            for (&index, &at) in &file.patches {
+                let frame = frames[index as usize].as_ref().expect("a patch's frame is stored");
+                self.decode_patch(&fetched[&at], frame, at)?;
             }
         }
         let mut durable = Durable::checkpointed(head, Arc::new(manifest), &fetched)?;
@@ -644,15 +638,7 @@ impl Snapshot {
             }
             None if file.cut(page) => None,
             None => {
-                let manifest = &self.durable.manifest;
-                match manifest
-                    .files
-                    .get(name)
-                    .and_then(|file| file.patches.get(&page))
-                {
-                    Some(&at) => Some(self.patch(name, page, at).await?),
-                    None => self.stored_page(manifest, None, name, page).await?,
-                }
+                (self.stored_page(&self.durable.manifest, None, name, page)).await?
             }
         };
         let based = base.is_some_and(|base| base.page(page).is_some());
@@ -677,29 +663,41 @@ impl Snapshot {
         self.decode_frame(&raw, base, self.durable.head.frame_pages, index, at)
     }
 
-    /// Page `page` of the file `name`, as its patch at `at` holds it:
-    /// decoded, or fetched and decoded (and kept). A patch is compressed
-    /// against the page its frame holds, else its base's page.
-    async fn patch(&self, name: &str, page: u64, at: Location) -> io::Result<Page> {
+    /// Frame `index` of the file `name`, as its patch at `at` holds it,
+    /// over `frame`, the frame as stored: decoded, or fetched and decoded
+    /// (and kept).
+    async fn patch(
+        &self,
+        name: &str,
+        index: u64,
+        frame: Location,
+        at: Location,
+    ) -> io::Result<Arc<Bytes>> {
         if let Some(image) = self.frames.lock().unwrap().get(&at) {
-            return Ok((**image).clone());
+            return Ok(image.clone());
         }
-        let stored = self.stored_page(&self.durable.manifest, None, name, page);
-        let (raw, stored) = futures::try_join!(self.raw(at), stored)?;
-        let reference = match stored {
-            Some(stored) => stored,
-            None => Bytes::copy_from_slice(base_page(self.base_of(name)?, page)),
-        };
-        let image = decode_page(&raw, &reference)?;
-        self.keep(at, Arc::new(image.clone()));
+        let (raw, frame) = futures::try_join!(self.raw(at), self.frame(name, index, frame))?;
+        self.decode_patch(&raw, &frame, at)
+    }
+
+    /// Decode a patch stored at `at` over `frame`, the frame as stored, and
+    /// keep it.
+    fn decode_patch(&self, raw: &[u8], frame: &[u8], at: Location) -> io::Result<Arc<Bytes>> {
+        let mut image = Vec::with_capacity(frame.len());
+        zstd::decompress(&mut image, raw, frame)?;
+        if image.len() != frame.len() {
+            return Err(invalid("patch"));
+        }
+        let image = Arc::new(Bytes::from(image));
+        self.keep(at, image.clone());
         Ok(image)
     }
 
     /// What the tail compresses page `page` of the file `name` against,
-    /// under the checkpoint `manifest`: the page as the checkpoint holds it
-    /// (its patch, else its frame), else its base's page, else nothing. It
-    /// stays the same for every entry of the tail, so an entry decodes
-    /// alone. `images` are frames and patches the checkpoint just wrote.
+    /// under the checkpoint `manifest`: the page as the checkpoint holds it,
+    /// else its base's page, else nothing. It stays the same for every
+    /// entry of the tail, so an entry decodes alone. `images` are frames and
+    /// patches the checkpoint just wrote.
     async fn reference(
         &self,
         manifest: &Manifest,
@@ -707,21 +705,14 @@ impl Snapshot {
         name: &str,
         page: u64,
     ) -> io::Result<Bytes> {
-        let patched = (manifest.files.get(name)).and_then(|file| file.patches.get(&page));
-        if let Some(&at) = patched {
-            return match images.and_then(|images| images.get(&at)) {
-                Some(image) => Ok((**image).clone()),
-                None => self.patch(name, page, at).await,
-            };
-        }
         match self.stored_page(manifest, images, name, page).await? {
             Some(stored) => Ok(stored),
             None => Ok(Bytes::copy_from_slice(base_page(self.base_of(name)?, page))),
         }
     }
 
-    /// Page `page` of the file `name` as its frame in `manifest` holds it;
-    /// `None` if the frame is not stored.
+    /// Page `page` of the file `name` as `manifest` holds it;
+    /// `None` if its frame is not stored.
     async fn stored_page(
         &self,
         manifest: &Manifest,
@@ -730,18 +721,35 @@ impl Snapshot {
         page: u64,
     ) -> io::Result<Option<Bytes>> {
         let frame_pages = self.durable.head.frame_pages;
-        let index = page / frame_pages;
-        let stored = (manifest.files.get(name))
-            .and_then(|file| file.frames.get(index as usize).copied().flatten());
-        let Some(at) = stored else {
+        let frame = self.stored_frame(manifest, images, name, page / frame_pages);
+        let at = ((page % frame_pages) * PAGE) as usize;
+        Ok((frame.await?).map(|frame| frame.slice(at..at + PAGE as usize)))
+    }
+
+    /// Frame `index` of the file `name` as `manifest` holds it: its patch,
+    /// else the frame as stored; `None` if it is not stored. `images` are
+    /// frames and patches a checkpoint just wrote.
+    async fn stored_frame(
+        &self,
+        manifest: &Manifest,
+        images: Option<&HashMap<Location, Arc<Bytes>>>,
+        name: &str,
+        index: u64,
+    ) -> io::Result<Option<Arc<Bytes>>> {
+        let Some(file) = manifest.files.get(name) else {
             return Ok(None);
         };
-        let frame = match images.and_then(|images| images.get(&at)) {
-            Some(image) => image.clone(),
-            None => self.frame(name, index, at).await?,
+        let Some(frame) = file.frames.get(index as usize).copied().flatten() else {
+            return Ok(None);
         };
-        let at = ((page % frame_pages) * PAGE) as usize;
-        Ok(Some(frame.slice(at..at + PAGE as usize)))
+        let at = file.patches.get(&index).copied().unwrap_or(frame);
+        if let Some(image) = images.and_then(|images| images.get(&at)) {
+            return Ok(Some(image.clone()));
+        }
+        Ok(Some(match at == frame {
+            true => self.frame(name, index, frame).await?,
+            false => self.patch(name, index, frame, at).await?,
+        }))
     }
 
     /// Decode frame `index` of a file with `base`, as stored at `at`, and
@@ -1203,13 +1211,13 @@ impl Snapshot {
             body.extend_from_slice(bytes);
             at
         };
-        // The frames the overlay changed. One whose patches stay under half
-        // its size is patched: each page it changed is put compressed
-        // against the frame's page. The others are rebuilt, from their old
-        // frames and patches, fetched together, and the overlay.
+        // The frames the overlay changed, as the checkpoint held them
+        // (fetched together), with the overlay's pages over them. A stored
+        // one is patched while its patch stays within half its size: the
+        // frame as it is now, compressed against the frame as stored. The
+        // others are written whole, without a patch.
         let mut written = Vec::new();
-        let mut patching = Vec::new();
-        let mut rebuilt = Vec::new();
+        let mut changed = Vec::new();
         let (mut frames, mut patched) = (0, 0);
         for (name, file) in &durable.files {
             let count = file.size.div_ceil(frame_bytes);
@@ -1231,66 +1239,37 @@ impl Snapshot {
             });
             index.size = file.size;
             index.frames.resize(count as usize, None);
-            index.patches.retain(|&page, _| page < count * frame_pages);
-            for frame in dirty {
-                let stored = index.frames[frame as usize];
-                let range = frame * frame_pages..(frame + 1) * frame_pages;
-                let pages: Vec<(u64, &Bytes)> = (file.pages.range(range.clone()))
-                    .filter_map(|(&page, frame)| Some((page, frame.as_ref()?)))
-                    .collect();
-                let patch = stored.is_some_and(|at| {
-                    let holes = file.pages.range(range.clone()).count() > pages.len();
-                    let kept: u64 = (index.patches.range(range.clone()))
-                        .filter(|(page, _)| !file.pages.contains_key(page))
-                        .map(|(_, at)| at.len)
-                        .sum();
-                    let new: u64 = pages.iter().map(|(_, frame)| frame.len() as u64).sum();
-                    !holes && !file.cut(range.end - 1) && (kept + new) * 2 <= at.len
-                });
-                if patch {
-                    patching.extend(pages.into_iter().map(|(page, frame)| (name, page, frame)));
-                    patched += 1;
-                } else {
-                    let patches: Vec<(u64, Location)> = (index.patches.range(range.clone()))
-                        .map(|(&p, &at)| (p, at))
-                        .collect();
-                    index.patches.retain(|page, _| !range.contains(page));
-                    rebuilt.push((name, file, frame, stored, patches));
-                }
-            }
+            index.patches.retain(|&frame, _| frame < count);
+            changed.extend(dirty.into_iter().map(|frame| (name, file, frame, index.frames[frame as usize])));
         }
-        let olds = bounded(rebuilt.iter().cloned().map(
-            |(name, _, index, stored, patches)| async move {
-                let old = match stored {
-                    Some(at) => Some(self.frame(name, index, at).await?),
-                    None => None,
-                };
-                let patches = patches.into_iter().map(|(page, at)| async move {
-                    Ok::<_, io::Error>((page, self.patch(name, page, at).await?))
-                });
-                Ok::<_, io::Error>((old, try_join_all(patches).await?))
-            },
-        ))
+        let helds = bounded(changed.iter().map(|&(name, _, index, stored)| async move {
+            let Some(stored) = stored else {
+                return Ok(None);
+            };
+            let frame = self.frame(name, index, stored).await?;
+            let now = match old.files.get(name).and_then(|file| file.patches.get(&index)) {
+                Some(&patch) => self.patch(name, index, stored, patch).await?,
+                None => frame.clone(),
+            };
+            Ok::<_, io::Error>(Some((stored, frame, now)))
+        }))
         .await?;
-        for ((name, file, index, _, _), (old, patches)) in rebuilt.into_iter().zip(olds) {
+        for ((name, file, index, _), held) in changed.into_iter().zip(helds) {
             let base = self.base_of(name)?;
             let hole = implicit(base, frame_pages, index);
-            let mut image = old
+            let mut image = held
                 .as_ref()
-                .map_or_else(|| hole.clone(), |old| old.to_vec());
+                .map_or_else(|| hole.clone(), |(_, _, now)| now.to_vec());
             let first = index * frame_pages;
             let at =
                 |page: u64| ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
-            for (page, patched) in patches {
-                image[at(page)].copy_from_slice(&patched);
-            }
             let end = file.size.div_ceil(PAGE);
             for page in first..first + frame_pages {
                 let at = at(page);
                 match file.pages.get(&page) {
                     Some(Some(frame)) if page < end => {
                         // Its reference: the page as the checkpoint held it.
-                        let reference = match &old {
+                        let reference = match &held {
                             Some(_) => &image[at.clone()],
                             None => base_page(base, page),
                         };
@@ -1301,33 +1280,31 @@ impl Snapshot {
                     _ => image[at.clone()].copy_from_slice(&hole[at]),
                 }
             }
-            let stored = match image == hole {
-                true => None,
-                false => {
-                    let prefix = if base.is_some() { &hole[..] } else { &[] };
-                    let frame = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
-                    let at = put(&mut body, &frame);
-                    written.push((at, frame, Some(Arc::new(Bytes::from(image)))));
-                    frames += 1;
-                    Some(at)
+            let indexed = manifest.files.get_mut(name).expect("indexed");
+            indexed.patches.remove(&index);
+            if image == hole {
+                indexed.frames[index as usize] = None;
+                continue;
+            }
+            if let Some((stored, frame, _)) = &held {
+                if image[..] == frame[..] {
+                    continue;
                 }
-            };
-            manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
-        }
-        let images = bounded(patching.iter().map(|&(name, page, frame)| async move {
-            let reference = self.reference(old, None, name, page);
-            let stored = self.stored_page(old, None, name, page);
-            let (reference, stored) = futures::try_join!(reference, stored)?;
-            let image = decode_page(frame, &reference)?;
-            let stored = stored.expect("a patched frame is stored");
-            Ok::<_, io::Error>((encode_page(&image, &stored)?, image))
-        }))
-        .await?;
-        for ((name, page, _), (patch, image)) in patching.into_iter().zip(images) {
-            let at = put(&mut body, &patch);
-            written.push((at, patch, Some(Arc::new(image))));
-            let index = manifest.files.get_mut(name).expect("indexed");
-            index.patches.insert(page, at);
+                let patch = zstd::compress(&image, frame, Bytes::copy_from_slice)?;
+                if patch.len() as u64 * 2 <= stored.len {
+                    let at = put(&mut body, &patch);
+                    written.push((at, patch, Some(Arc::new(Bytes::from(image)))));
+                    indexed.patches.insert(index, at);
+                    patched += 1;
+                    continue;
+                }
+            }
+            let prefix = if base.is_some() { &hole[..] } else { &[] };
+            let whole = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
+            let at = put(&mut body, &whole);
+            written.push((at, whole, Some(Arc::new(Bytes::from(image)))));
+            indexed.frames[index as usize] = Some(at);
+            frames += 1;
         }
         let before = written.len();
         // Values: inline if small, else a frame of their own.
