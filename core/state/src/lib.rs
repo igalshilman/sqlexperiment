@@ -98,7 +98,7 @@ pub use format::{HEAD_KEY, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_
 use store::Is;
 pub use store::{Checkpointed, FlushReport};
 
-use crate::blobs::{BlobStore, KvBlobs};
+use crate::blobs::BlobStore;
 use crate::cache::{NamespaceCache, ParkedValue};
 use crate::kv::KvStore;
 use crate::store::Snapshot;
@@ -157,7 +157,9 @@ pub struct StateOptions {
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
-    /// ... or this many bytes; 0 never does by size.
+    /// ... or this many bytes; 0 never does by size. With packs kept in
+    /// Restate too, at most the bytes the checkpoint's packs hold: there a
+    /// checkpoint costs only its bytes, and spares the tail's.
     pub checkpoint_bytes: u64,
 }
 
@@ -327,7 +329,6 @@ impl State {
             cache,
             reader,
         } = open;
-        let packs = packs.unwrap_or_else(|| Arc::new(KvBlobs::new(store.clone())));
         let tail = Arc::new(Tiered::new(store, packs));
         let snapshot = Snapshot::open(tail.clone(), options.clone(), cache.clone(), reader);
         let snapshot = snapshot.await?;

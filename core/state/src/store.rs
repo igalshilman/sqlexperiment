@@ -864,6 +864,14 @@ impl Snapshot {
             self.options.checkpoint_entries,
             self.options.checkpoint_bytes,
         );
+        // With packs in Restate, a checkpoint costs only its bytes: one is
+        // due once the tail passes what the checkpoint holds, as it costs
+        // more to read, and to write against its pages, than a checkpoint.
+        let held: u64 = self.durable.manifest.sizes.values().sum();
+        let bytes = match self.tiered.packs_in_restate {
+            true => bytes.min(held),
+            false => bytes,
+        };
         head.version > 0
             && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= bytes))
     }

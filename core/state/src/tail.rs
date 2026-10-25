@@ -17,7 +17,7 @@
 //! whatever head it holds, every pack a later head names is either named by
 //! its head's checkpoints or newer than the previous one.
 use crate::{
-    blobs::BlobStore,
+    blobs::{BlobStore, KvBlobs},
     format::{Checkpoint, Entry, HEAD_KEY, Head, Manifest, PACK_PREFIX, PackId},
     kv::KvStore,
 };
@@ -32,11 +32,17 @@ const PARALLEL: usize = 32;
 pub(crate) struct Tiered {
     pub restate: Arc<dyn KvStore>,
     packs: Arc<dyn BlobStore>,
+    /// Whether the packs are kept in Restate too, without `packs`.
+    pub packs_in_restate: bool,
 }
 
 impl Tiered {
-    pub fn new(restate: Arc<dyn KvStore>, packs: Arc<dyn BlobStore>) -> Self {
-        Self { restate, packs }
+    pub fn new(restate: Arc<dyn KvStore>, packs: Option<Arc<dyn BlobStore>>) -> Self {
+        Self {
+            packs_in_restate: packs.is_none(),
+            packs: packs.unwrap_or_else(|| Arc::new(KvBlobs::new(restate.clone()))),
+            restate,
+        }
     }
 
     pub async fn head(&self) -> io::Result<Option<Bytes>> {
