@@ -135,12 +135,13 @@ Restate (the object's state)                           Restate, or S3
 
 ### A flush
 
-1. **Encode the mutation** as a tail entry. Each page written is a zstd
-   frame of its own, compressed against its **reference**: the page as the
-   checkpoint holds it. A row update usually changes a few bytes of a page,
-   so its page costs about 100–200 bytes, not 4 KiB.
-2. **If a checkpoint is due**, write it first (below), as of the version
+1. **If a checkpoint is due**, write it first (below), as of the version
    before this flush.
+2. **Encode the mutation** as a tail entry. Each page written is a zstd
+   frame of its own, compressed against its **reference**: the page as the
+   checkpoint holds it (the new one, if this flush wrote one). A row update
+   usually changes a few bytes of a page, so its page costs about 100–200
+   bytes, not 4 KiB.
 3. **Put** the tail entry, then the head; **sync**. Restate keeps writes in
    order, and a crash keeps a prefix of them, so the head is never stored
    without the tail entry (and, with packs in Restate, the pack and
@@ -186,12 +187,14 @@ checkpoint may need it.
 - 128 flushes have been made (`checkpoint_entries`), or
 - the tail holds 1 MiB (`checkpoint_bytes`); with packs in Restate, or
   as many bytes as the checkpoint itself holds (its packs and manifest),
-  whichever is smaller,
+  whichever is smaller, but at least a frame's (16 KiB),
 
 or when the mutation asks for one (`mutation.checkpoint()`). The
 relative rule is for packs in Restate, where a checkpoint costs only its
 bytes: a 20 KiB database checkpoints every few dozen flushes and keeps a
-short tail, and a 100 MiB one every 128.
+short tail, and a 100 MiB one every 128. The floor of a frame keeps a
+state of a few small records from checkpointing at every flush, as a
+checkpoint, and the collection after it, costs a round trip or two.
 
 **What it writes.** For each frame the overlay changed:
 
@@ -313,8 +316,9 @@ version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
    engine: done, in one round trip.
 2. Otherwise, **get the checkpoint's manifest and the tail past it**,
    together, and apply the tail to the overlay in memory.
-3. **Get large records and log entries**, and every frame of a file of at
-   most 16 pages, such as a small database whole, together.
+3. **Get large records and log entries**, and every frame and patch of a
+   file without a base of at most 16 pages, such as a small database
+   whole, together.
 
 That is at most 3 round trips, whatever the database's size.
 
@@ -341,7 +345,7 @@ After every flush that checkpoints, and whenever anyone calls
    manifests.
 3. **Delete** listed packs and manifests older than the previous
    checkpoint that neither manifest needs: in Restate, queued and stored by
-   one sync; in S3, one request.
+   one sync; in S3, one DELETE per pack, sent together.
 
 Collections may overlap, crash or race the owner: a later head only ever
 names packs its own manifests name, or packs newer than its previous
@@ -401,7 +405,7 @@ What changes:
   its own attempt uploaded before putting it: a zombie's packs are
   garbage, collected later.
 - **Garbage collection** lists Restate's keys and S3's packs together, and
-  deletes in one Restate sync and one S3 request.
+  deletes in one Restate sync and one S3 DELETE per pack, sent together.
 
 ## 6. Numbers
 
@@ -417,8 +421,8 @@ Per flush, with a warm cache:
 
 | Workload           | Database | Bytes put to Restate (tail + pack + manifest + head) | Stored in Restate | Keys  | Cold open and a point read |
 | ------------------ | -------- | ---------------------------------------------------- | ----------------- | ----- | -------------------------- |
-| Chat with effects  | 180 KiB  | 1937 (1529 + 291 + 40 + 77)                          | 179 KiB           | 80    | 4 round trips, 35 gets     |
-| Small, update 1    | 20 KiB   | 554 (339 + 134 + 4 + 77)                             | 23 KiB            | 41    | 3 round trips, 19 gets     |
+| Chat with effects  | 180 KiB  | 1949 (1593 + 248 + 29 + 79)                          | 170 KiB           | 77    | 4 round trips, 30 gets     |
+| Small, update 1    | 20 KiB   | 675 (489 + 90 + 3 + 93)                              | 34 KiB            | 61    | 3 round trips, 26 gets     |
 | 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
 | 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
 | 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |

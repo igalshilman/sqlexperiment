@@ -19,7 +19,7 @@
 //! its head's checkpoints or newer than the previous one.
 use crate::{
     blobs::{BlobStore, KvBlobs},
-    format::{Checkpoint, Entry, HEAD_KEY, Head, Manifest, PACK_PREFIX, PackId},
+    format::{Checkpoint, Entry, HEAD_KEY, Head, Manifest, PACK_PREFIX, PackId, parse_tail_key},
     kv::KvStore,
 };
 use bytes::Bytes;
@@ -181,6 +181,17 @@ impl Tiered {
         };
         // Restate's deletes are queued, and stored by one sync.
         let mut queued = (self.manifests).queue_delete(&keys, |name| manifests.contains(name))?;
+        // Parts of tail entries the checkpoint covers that the head does not
+        // name: a crashed flush's, past the parts its retry put.
+        for key in &keys {
+            if let Some((version, part)) = parse_tail_key(key)
+                && version <= head.checkpointed()
+                && part >= head.parts_of(version)
+            {
+                self.restate.delete(key)?;
+                queued = true;
+            }
+        }
         let delete_in_s3 = async {
             match self.packs_in_restate {
                 true => Ok(()),

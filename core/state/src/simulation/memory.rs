@@ -188,7 +188,7 @@ impl MemoryKv {
                     manifest.sizes = (sizes.into_iter())
                         .map(|(pack, size)| (canonical(pack), size))
                         .collect();
-                    bytes = manifest.encode().to_vec();
+                    bytes = manifest.encode().expect("a manifest decoded").to_vec();
                     manifests.insert(id, bytes.len() as u64);
                     canonical(id).name()
                 }

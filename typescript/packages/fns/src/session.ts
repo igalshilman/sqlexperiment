@@ -182,7 +182,7 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined
     get,
     set: (key, value) => ctx.set(keyOf(key), value, serde.binary, named(keyOf(key))),
     clear: (key) => ctx.clear(keyOf(key), named(keyOf(key))),
-    // A sweep's, now and then: the database's keys.
+    // The database's keys, for a garbage collection.
     keys: async () => {
       const keys = await end.race(ctx.stateKeys());
       if (database === undefined) return keys;

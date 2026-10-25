@@ -148,7 +148,8 @@ A flush that writes anything checkpoints first once the tail holds
 `checkpoint_entries` (128) entries since the head's checkpoint, or
 `checkpoint_bytes` (1 MiB); with packs in Restate, where a checkpoint costs
 only its bytes, once it holds the bytes the checkpoint holds (its packs
-and its manifest), if fewer, so a small database's tail stays short. A mutation marked with
+and its manifest), if fewer, but at least a frame's (16 KiB), so a small
+database's tail stays short. A mutation marked with
 `Mutation::checkpoint` checkpoints however short the tail is. A checkpoint
 writes the state as of the head, into one new pack:
 
@@ -253,7 +254,8 @@ every flush that checkpoints):
    previous checkpoint's manifests name.
 3. **Delete** every listed pack older than the head's previous checkpoint
    that neither names, and every manifest older than it: in Restate,
-   queued and stored by one sync; in S3, one request.
+   queued and stored by one sync; in S3, one DELETE per pack, sent
+   together.
 
 A later head names only packs its head's checkpoints name, or newer than
 its previous checkpoint, so whatever head a collection read (a reader's, a
@@ -357,7 +359,7 @@ pack, offset) in memory, spilling to a local disk file
 for as long as it likes. There is nothing to invalidate: no versions, no
 generations, no epochs, no read marks. A range of a pack that never became
 durable is harmless: no head will ever name it. The namespace is a
-process-wide counter, drawn per namespace handle, and the disk tier starts
+per-cache counter, randomly seeded, drawn per namespace handle, and the disk tier starts
 empty in every process. A memory hit is served without foyer's disk hop,
 and concurrent reads of one range share one get, held weakly, so a
 cancelled read cancels the get.

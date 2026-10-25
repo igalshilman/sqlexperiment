@@ -49,7 +49,7 @@ the body. A COMMIT that fails rolls back. An SQL error leaves the session
 usable (`isUsable()`); a storage error ends it.
 
 A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
-puts them in the same head, so they are stored exactly when the
+puts them in the same tail entry, as the record `effects`, so they are stored exactly when the
 transaction is, even if it changes nothing, and stay until a later
 transaction commits others. `effects()` returns them. The SDK keeps a
 transaction's sends there, its outbox, and makes them once it commits.

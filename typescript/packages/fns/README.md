@@ -53,10 +53,10 @@ below). It commits when `body` resolves and rolls back when it rejects. A
 library that brings its own transactions uses `ctx.db.transaction`.
 
 An attempt has one session. It opens on the first call to `ctx.db` or
-`ctx.transaction` (a read of the database's root), stays open while the
+`ctx.transaction` (a read of the database's head), stays open while the
 handler runs, however many calls it makes, and is saved when the handler
-ends. A transaction commits with one write of the root, after the blobs it
-names, and is durable when the statement or `ctx.transaction` that commits
+ends. A transaction commits as one tail entry, then the head that names it,
+and is durable when the statement or `ctx.transaction` that commits
 it resolves: the SDK waits for an empty `ctx.run` after the write. A library
 that wants a database for the handler's work gets `ctx.db`: the
 [pi integration](../integrations/src/pi/README.md) runs pi-durable's storage
@@ -91,8 +91,8 @@ ctx.transaction(async ({ db, tx }) => {
 });
 ```
 
-The sends commit with the transaction, in the same write: the root holds
-them (its _effects_, opaque to the storage), as the database's outbox.
+The sends commit with the transaction, in the same tail entry: the record
+`effects` holds them (opaque to the storage), as the database's outbox.
 Once the commit is done the SDK makes them, each with an idempotency key of
 the transaction, `transaction/<id>/<index>` (or the send's own key), with a
 random id of the transaction. Restate keeps an attempt's commands in the
@@ -172,17 +172,19 @@ the invocation started with it (lazy state, so an invocation does not start
 by loading every page). A set or clear is a state write, and returns at once.
 Restate keeps an attempt's writes, and its sends, in the order they were
 made: a crash loses a suffix of them, never a write without the ones before
-it. A transaction writes the chunks of pages it changed as new blobs, which
-are never overwritten, then the root, which names them: the commit point.
-Then one empty `ctx.run` waits until all of it is stored: a commit is one
-round trip. Whatever prefix a crash keeps, the stored root names only blobs
-that are stored.
+it. A transaction writes the pages it changed and its effects as one tail
+entry under a key of its own, then the head, which names it: the commit
+point. Then one empty `ctx.run` waits until all of it is stored: a commit is
+one round trip. Whatever prefix a crash keeps, the stored head names only a
+tail and checkpoints that are stored. Now and then a commit first folds the
+tail into a checkpoint (see the [state's architecture](../../../core/state/docs/ARCHITECTURE.md)).
 
 **The page cache.** The process's page cache keeps the pages it read and
-wrote, as the blobs that hold them, for the object's next invocation. A blob
-never changes once a root names it, so the cache keeps it under its number
-and never invalidates it: a session reads the stored root, then the blobs it
-names that the cache lacks. The root carries the database's random id, which
+wrote, and the database's state as of its last head, for the object's next
+invocation. Checkpoints' packs never change, so the cache keeps their ranges
+by location and never invalidates them: a session reads the stored head and,
+if another process wrote since, the ranges it names that the cache lacks.
+The head carries the database's random id, which
 the cache's keys include, so one process may serve several Restate clusters,
 or a cluster wiped and made again, without mixing their databases.
 
@@ -193,7 +195,7 @@ fetches depends on what the page cache holds. With explicit
 recovery (`restate.internal.explicitRecovery()`, which the handlers here
 have) the SDK skips the recorded journal: the handler runs again from the
 start against the state as it is. Recovery is then the storage
-protocol's: open reads the root, so a lost commit from the crashed attempt is
+protocol's: open reads the head, so a lost commit from the crashed attempt is
 as if it never started.
 
 **One owner.** The protocol needs one writer per namespace. Restate runs one
@@ -322,7 +324,7 @@ transfers take 18.8 ms each on one local node.
 - **A suspension is a restart.** Resuming means running from the start, so
   long handlers that hit the inactivity timeout start over.
 - **A sync per commit.** Every transaction waits for an empty `ctx.run` after
-  its root: a round trip to the runtime, which statements that commit one
+  its head: a round trip to the runtime, which statements that commit one
   by one pay each time. Group them in a transaction.
 - **10 GiB a database.** A statement that would grow a key's database past it
   fails with SQLite's "database or disk is full", as an SQL error (a

@@ -766,12 +766,12 @@ impl Run {
 
     /// The turn's transaction. Each participant prepares its part into one
     /// mutation of the scope's state (the extensions first, then the run's
-    /// progress, its memory and its tables); the flush puts the seal, the
-    /// state's root, after the blobs it names; then each participant
+    /// progress, its memory and its tables); the flush puts the seal, a
+    /// tail entry, then the state's head; then each participant
     /// hears whether it committed. A participant that fails, or a failed
     /// flush, drops the mutation with everything prepared. Only after a flush are
     /// the blobs no seal names collected, and the VM's write tracking reset:
-    /// a crash anywhere before the root is stored loses the whole turn,
+    /// a crash anywhere before the head is stored loses the whole turn,
     /// which runs again.
     async fn seal(&mut self, mut written: Written) -> Result<()> {
         let mut extensions = self.extensions.lock().await;

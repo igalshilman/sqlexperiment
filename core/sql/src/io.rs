@@ -732,8 +732,11 @@ impl KvIo {
         // Pages a block each (the default page size): tidied, unless the
         // database has pointer-map pages (`auto_vacuum`, whose header names
         // its largest root page), which `tidied` may take for b-tree pages.
-        let first = database.get(&(DB, 0)).cloned().flatten();
-        let first = first.or_else(|| private.header.first().cloned());
+        // The first page as this mutation leaves it: changed now, or by a
+        // pending mutation, or as the file holds it.
+        let first = (database.get(&(DB, 0)).cloned().flatten())
+            .or_else(|| private.flushed.get(&0).cloned().flatten())
+            .or_else(|| private.header.first().cloned());
         let tidy =
             first.is_some_and(|first| page_size(&first) == BLOCK_SIZE && first[52..56] == [0; 4]);
         for ((_, block), page) in database {

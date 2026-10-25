@@ -202,7 +202,7 @@ class SqlHost(Protocol):
         ...
 
     def sql_keys(self) -> Awaitable[list[str]]:
-        """The object's state keys, issued now: a sweep's."""
+        """The object's state keys, issued now, for a garbage collection."""
         ...
 
     def sql_send(

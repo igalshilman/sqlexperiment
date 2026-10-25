@@ -51,7 +51,8 @@ When the tail is long enough, a flush first writes the durable state as a
 checkpoint, then names it in its head. Long enough is `checkpoint_entries`
 (128) entries, or `checkpoint_bytes` (1 MiB); with packs in Restate, where a
 checkpoint costs only its bytes, at most the bytes the checkpoint holds
-(its packs and its manifest), so the tail of a small database stays short.
+(its packs and its manifest), but at least a frame's (16 KiB), so the tail
+of a small database stays short.
 
 1. **Frames.** A frame the overlay changed only a few pages of is
    _patched_: each page it changed is put as a patch, compressed against
@@ -90,7 +91,7 @@ write unless it is opened with that base.
 
 ## What it replaced
 
-| tail+checkpoints (v18)                                        | frame packs (v19)                         |
+| tail+checkpoints (v18)                                        | frame packs (v19, now v20)                |
 | ------------------------------------------------------------- | ----------------------------------------- |
 | Tail entries of copy-on-write blobs (chunk deltas, map nodes) | Tail entries that are the mutation itself |
 | A radix map of chunks per file, each a base and a delta       | A flat row of frames per file             |
@@ -110,8 +111,8 @@ makes.
 
 | Workload        | Put B/flush          | Cold gets    |
 | --------------- | -------------------- | ------------ |
-| chat+effects    | 1907 → 2201 → 1938   | 7 → 5 → 35   |
-| small: update 1 | 1112 → 1786 → 554    | 7 → 6 → 19   |
+| chat+effects    | 1907 → 2201 → 1949   | 7 → 5 → 30   |
+| small: update 1 | 1112 → 1786 → 675    | 7 → 6 → 26   |
 | 10k: update 1   | 1055 → 9322 → 638    | 12 → 6 → 6   |
 | 10k: update 10  | 4017 → 10693 → 2032  | 9 → 6 → 7    |
 | 10k: insert 1   | 2324 → 3449 → 1876   | 11 → 6 → 8   |
@@ -201,7 +202,7 @@ a checkpoint one PUT:
   a tail page costs what changed since the checkpoint. With packs in S3 a
   small database's tail is cut only every 128 flushes or 1 MiB, so its
   pages drift further from the checkpoint and cost more (small update 1:
-  1735 bytes, against 554 with packs in Restate).
+  1735 bytes, against 675 with packs in Restate).
 - **Cold opens:** the manifest (in Restate) and a frame, not a walk of map
   nodes: cold S3 GETs drop from up to 534 to 5. With packs in Restate a small
   database's open reads its tail, as long as its packs (chat: 35 gets, in

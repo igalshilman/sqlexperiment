@@ -27,7 +27,7 @@ use crate::{
     Base, PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
     format::{
-        Checkpoint, Entry, FileChange, FileIndex, Head, Location, LogChange, LogIndex,
+        Checkpoint, Entry, FileChange, FileIndex, Head, Location, LogChange, LogIndex, MAX_DECODED,
         MAX_FILE_BYTES, MAX_FRAME_PAGES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_NAMES,
         MAX_RECORD_BYTES, Manifest, PackId, Value, invalid,
     },
@@ -472,7 +472,8 @@ impl Snapshot {
             Some(bytes) => Head::decode(bytes)?,
             None => Head::new(cache::random(), options.frame_pages),
         };
-        let known = owner.is_some_and(|owner| owner.validate(head_bytes.as_deref()));
+        let validated = owner.map(|owner| owner.validate(head_bytes.as_deref()));
+        let known = validated.as_ref().is_some_and(|validated| validated.known);
         let reused = owner.filter(|_| known).and_then(NamespaceCache::durable);
         let mut snapshot = Self {
             tiered,
@@ -489,11 +490,11 @@ impl Snapshot {
             Some(durable) => durable,
             None => Arc::new(snapshot.load(head).await?),
         };
-        if let Some(owner) = owner {
+        if let (Some(owner), Some(validated)) = (owner, validated) {
             let version = snapshot.version();
             snapshot.unchanged = known && owner.committed() == Some(version);
             let committed = (!known).then_some(version);
-            owner.record(head_bytes, committed, snapshot.durable.clone());
+            owner.record(&validated, head_bytes, committed, snapshot.durable.clone());
         }
         Ok(snapshot)
     }
@@ -855,8 +856,35 @@ impl Snapshot {
             if (written.pages.keys()).any(|&page| page >= MAX_FILE_BYTES / PAGE) {
                 return refuse(format!("{name:?}: a page past the largest file"));
             }
-            // A checkpoint rebuilds its frames against its base.
-            self.base_of(name)?;
+            // A checkpoint rebuilds its frames against its base; an emptied
+            // file has none left.
+            if size > 0 {
+                self.base_of(name)?;
+            }
+        }
+        // Its tail entry must decode: refused here, before anything is
+        // written, is a mutation whose entry could pass the limit (a page
+        // compresses to at most its bytes and 128 more).
+        let named = |name: &String| name.len() + 64;
+        let bound: usize =
+            (records.iter())
+                .map(|(name, value)| named(name) + value.len())
+                .chain(logs.iter().map(|(name, log)| {
+                    named(name)
+                        + log
+                            .values
+                            .iter()
+                            .map(|value| value.len() + 16)
+                            .sum::<usize>()
+                }))
+                .chain((writes.iter()).map(|(name, written)| {
+                    named(name) + written.pages.len() * (PAGE as usize + 144)
+                }))
+                .sum();
+        if bound > MAX_DECODED {
+            return refuse(format!(
+                "a mutation of up to {bound} bytes exceeds the {MAX_DECODED} a flush stores"
+            ));
         }
         let new = (records.keys().chain(writes.keys()).chain(logs.keys()))
             .filter(|name| self.is(name).is_none())
@@ -899,10 +927,13 @@ impl Snapshot {
         // due once the tail passes what the checkpoint holds (its packs and
         // its manifest), as it costs more to read, and to write against its
         // pages, than a checkpoint.
+        // A tail under a frame's bytes is never worth one: a checkpoint, and
+        // the collection after it, costs a round trip or two.
         let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
         let held: u64 = self.durable.manifest.sizes.values().sum::<u64>() + manifest;
+        let frame = head.frame_pages * PAGE;
         let limit = match self.tiered.packs_in_restate {
-            true => bytes.min(held),
+            true => bytes.min(held.max(frame)),
             false => bytes,
         };
         head.version > 0
@@ -980,7 +1011,7 @@ impl Snapshot {
             };
             entry.logs.push((name, change));
         }
-        let parts = entry.encode();
+        let parts = entry.encode()?;
         let entry_bytes: usize = parts.iter().map(Bytes::len).sum();
         let mut next = match &staged {
             Some(staged) => self.durable.rebased(staged),
@@ -1257,7 +1288,7 @@ impl Snapshot {
         if !body.is_empty() {
             manifest.sizes.insert(pack, body.len() as u64);
         }
-        let encoded = manifest.encode();
+        let encoded = manifest.encode()?;
         let checkpoint = Checkpoint {
             pack,
             manifest: encoded.len() as u64,
@@ -1319,6 +1350,15 @@ impl Snapshot {
             frames: self.frames.clone(),
             fetching: self.fetching.clone(),
         }
+    }
+
+    /// This snapshot, with the bases `of` holds that it lacks: those given
+    /// while a flush ran, which its snapshot replaces.
+    pub(crate) fn keeping_bases(mut self, of: &Self) -> Self {
+        for (name, base) in &of.bases {
+            (self.bases.entry(name.clone())).or_insert_with(|| base.clone());
+        }
+        self
     }
 
     pub(crate) fn with_base(&self, name: &str, base: Arc<dyn Base>) -> io::Result<Self> {

@@ -154,15 +154,16 @@ pub struct StateOptions {
     /// Bytes of a record or log entry a checkpoint's manifest holds; a
     /// larger one is a value of its own in the pack.
     pub inline_record_bytes: usize,
-    /// Every frame of a file of at most this many pages is fetched at open,
-    /// alongside the manifest's values.
+    /// Every frame and patch of a file without a base, of at most this many
+    /// pages, is fetched at open, alongside the manifest's values.
     pub prefetch_pages: u64,
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
     /// ... or this many bytes; 0 never does by size. With packs kept in
-    /// Restate too, at most the bytes the checkpoint's packs hold: there a
-    /// checkpoint costs only its bytes, and spares the tail's.
+    /// Restate too, at most the bytes the checkpoint holds (its packs and its
+    /// manifest), but at least a frame's: there a checkpoint costs only its
+    /// bytes, and spares the tail's, though a round trip or two too.
     pub checkpoint_bytes: u64,
 }
 
@@ -217,7 +218,8 @@ impl Shared {
         self.snapshot.lock().unwrap().clone()
     }
 
-    /// Delete the packs no checkpoint the head names needs. A failure, or
+    /// Delete the packs no checkpoint the head names needs, and the
+    /// manifests of checkpoints older than the previous one. A failure, or
     /// dropping the future midway, ends the state: in Restate, what it
     /// deleted has an unknown outcome, which the next open syncs.
     async fn collect_garbage(&self) -> Result<usize> {
@@ -262,6 +264,14 @@ struct Flushing<'a> {
     returned: bool,
     /// It succeeded.
     done: bool,
+}
+
+impl Flushing<'_> {
+    /// Refuse the flush before it wrote anything: the state goes on.
+    fn refuse<T>(&mut self, error: Box<dyn std::error::Error + Send + Sync>) -> Result<T> {
+        (self.returned, self.done) = (true, true);
+        Err(error)
+    }
 }
 
 impl Drop for Flushing<'_> {
@@ -391,8 +401,7 @@ impl State {
     /// page, or a hole, reads as the base's page, and pages are compressed
     /// against it. A file made with a base opens only with that one again
     /// (by [`Base::id`]). [`Self::file`] opens it without its base: it then
-    /// reads nothing, and a flush may only make pages of it holes,
-    /// or cut its length.
+    /// reads nothing, and a flush may only empty it (cut its length to 0).
     pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
         let file = self.file(name)?;
         let mut snapshot = self.shared.snapshot.lock().unwrap();
@@ -497,8 +506,9 @@ impl State {
         !self.shared.poisoned.load(Ordering::SeqCst)
     }
 
-    /// Delete the packs no checkpoint the head names needs: those older
-    /// than the checkpoint before the head's, which neither names. How
+    /// Delete the packs no checkpoint the head names needs (those older
+    /// than the checkpoint before the head's, which neither names), and the
+    /// manifests of checkpoints older than that one. How
     /// many. A flush that makes a checkpoint collects too.
     ///
     /// Any state may collect, an owner's or a reader's, beside the owner's
@@ -781,18 +791,9 @@ impl Mutation {
     /// flush landed: its receipts say so.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
-        if shared.poisoned.load(Ordering::SeqCst) {
-            return Err(ENDED.into());
-        }
         if shared.reader.load(Ordering::SeqCst) {
             return Err("a reader writes nothing".into());
         }
-        let snapshot = shared.snapshot();
-        // What the writes checked as they were made still holds, unless
-        // another mutation flushed since: refused before anything is written.
-        snapshot
-            .check(&self.files, &self.records, &self.logs)
-            .await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
         }
@@ -801,6 +802,20 @@ impl Mutation {
             returned: false,
             done: false,
         };
+        // Read once no other flush runs: one that ended before this one
+        // started is in the snapshot, so this one builds on it.
+        if shared.poisoned.load(Ordering::SeqCst) {
+            return running.refuse(ENDED.into());
+        }
+        let snapshot = shared.snapshot();
+        // What the writes checked as they were made still holds, unless
+        // another mutation flushed since: refused before anything is written.
+        if let Err(error) = (snapshot)
+            .check(&self.files, &self.records, &self.logs)
+            .await
+        {
+            return running.refuse(error.into());
+        }
         let mut files = std::mem::take(&mut self.files);
         let mut records = std::mem::take(&mut self.records);
         let mut logs = std::mem::take(&mut self.logs);
@@ -820,7 +835,10 @@ impl Mutation {
         running.returned = true;
         let (mut report, after) = result?;
         report.checkpoint_failed = failed;
-        *shared.snapshot.lock().unwrap() = Arc::new(after);
+        {
+            let mut current = shared.snapshot.lock().unwrap();
+            *current = Arc::new(after.keeping_bases(&current));
+        }
         running.done = true;
         for receipt in &self.receipts {
             receipt.0.store(FLUSHED, Ordering::SeqCst);

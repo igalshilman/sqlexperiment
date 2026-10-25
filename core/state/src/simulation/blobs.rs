@@ -3,7 +3,7 @@
 //! A request to S3 may fail before it does anything, do its work and lose
 //! the response, or be in flight when its caller gives up on it, and land
 //! later: after the attempt that sent it failed, while a retry, a zombie or
-//! a sweep runs. [`MemoryBlobs::faults`] makes requests fail in each of
+//! a garbage collection runs. [`MemoryBlobs::faults`] makes requests fail in each of
 //! these ways; a write whose future is dropped once sent lands later too.
 //! What lands later waits for [`MemoryBlobs::land_late`].
 use super::yield_now;

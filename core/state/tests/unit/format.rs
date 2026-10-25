@@ -95,7 +95,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
         },
     );
     manifest.sizes = BTreeMap::from([(old, 1 << 31), (new, 5900)]);
-    let bytes = manifest.encode();
+    let bytes = manifest.encode().unwrap();
     assert_eq!(Manifest::decode(&bytes).unwrap(), manifest);
     assert_eq!(manifest.packs(), BTreeSet::from([old, new]));
     assert_eq!(manifest.locations().count(), 6);
@@ -106,7 +106,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
         );
     }
     let empty = Manifest::default();
-    assert_eq!(Manifest::decode(&empty.encode()).unwrap(), empty);
+    assert_eq!(Manifest::decode(&empty.encode().unwrap()).unwrap(), empty);
 }
 
 #[test]
@@ -133,11 +133,11 @@ fn a_tail_entry_splits_into_parts_and_reads_back() {
             },
         )],
     };
-    let parts = entry.encode();
+    let parts = entry.encode().unwrap();
     assert_eq!(parts.len(), 4);
     assert!(parts.iter().all(|part| part.len() <= PART_BYTES));
     assert_eq!(Entry::decode(&parts).unwrap(), entry);
-    let one = Entry::default().encode();
+    let one = Entry::default().encode().unwrap();
     assert_eq!(Entry::decode(&one).unwrap(), Entry::default());
     assert!(Entry::decode(&parts[..3]).is_err());
 }

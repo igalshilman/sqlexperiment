@@ -108,7 +108,7 @@ fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
             for i in 0..60i64 {
                 db.transaction(async |db| {
                     db.execute(&format!(
-                        "INSERT INTO t VALUES({}, {i}, zeroblob(900))",
+                        "INSERT INTO t VALUES({}, {i}, randomblob(900))",
                         2 * i
                     ))
                     .await?;

@@ -148,6 +148,42 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
     })
 }
 
+/// A file with a base, opened without it, can still be emptied (as a new
+/// run of another image empties the last one's memory); the checkpoints
+/// after need no base.
+#[test]
+fn a_based_file_is_emptied_without_its_base() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).await?;
+        let mut mutation = state.mutation();
+        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
+        for n in 0..8 {
+            mutation.write(&vm, n, Some(page(n as u8 + 1)))?;
+        }
+        mutation.checkpoint();
+        mutation.flush().await?;
+        let state = State::open(store.clone()).await?;
+        let mut mutation = state.mutation();
+        mutation.set_len(&state.file("vm")?, 0)?;
+        mutation.flush().await?;
+        let mut mutation = state.mutation();
+        mutation.set(&state.record("run"), "next".into())?;
+        mutation.checkpoint();
+        let report = mutation.flush().await?;
+        assert_eq!(report.checkpoint_failed, None);
+        assert!(report.checkpoint.is_some());
+        let state = State::open(store).await?;
+        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
+        assert_eq!(vm.len(), 0);
+        let mut mutation = state.mutation();
+        mutation.write(&vm, 1, Some(page(7)))?;
+        mutation.flush().await?;
+        assert_eq!(byte(&vm, 1).await?, Some(7));
+        Ok(())
+    })
+}
+
 /// A flush without a cache gets nothing: the open before it got the head,
 /// then the manifest and the whole tail (400 pages), together, in
 /// one round trip; the flush is one more.

@@ -7,7 +7,7 @@ paged **files** (4 KiB pages, read and written at random) and **logs**
 (entries appended, and truncated from the start). The state is read; it
 changes only through a **mutation**, an owned value that collects the records
 set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
-once, in one round trip. It needs only `get`, `put` and `delete` from the backend,
+once, in one round trip. It needs only `get`, `put`, `delete` and `sync` from the backend,
 and a listing of its keys to collect the garbage.
 
 The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
@@ -88,8 +88,8 @@ durable; before, it doesn't exist.
 
 **Checkpoint.** Once the tail holds `checkpoint_entries` (128) entries or
 `checkpoint_bytes` (1 MiB) since the last checkpoint (with packs in Restate,
-at most the bytes the checkpoint holds, its packs and its manifest, so a
-small database's tail stays short), a flush first writes a checkpoint, as does any flush of a
+at most the bytes the checkpoint holds, its packs and its manifest, but at
+least a frame's, so a small database's tail stays short), a flush first writes a checkpoint, as does any flush of a
 mutation marked `mutation.checkpoint()`. It rewrites each frame the tail
 changed, from the old frame and the tail's pages; or, where the tail changed
 only a few of a frame's pages (their patches stay within half the frame's

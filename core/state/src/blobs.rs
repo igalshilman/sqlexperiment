@@ -35,8 +35,8 @@ pub trait BlobStore: Send + Sync {
 
 /// Where [`KvBlobs::new`] keeps its blobs' parts: packs kept in Restate.
 pub const KV_PREFIX: &str = "v20/pack/";
-/// Where [`KvBlobs::manifests`] keeps its blobs' parts: checkpoints'
-/// manifests.
+/// Where checkpoints' manifests are kept, in Restate wherever the packs
+/// are, in parts of 64 KiB.
 pub const MANIFEST_PREFIX: &str = "v20/manifest/";
 /// Bytes of a part of a blob in [`KvBlobs`]: a range read gets the parts it
 /// overlaps.
