@@ -94,7 +94,9 @@ mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub use format::{HEAD_KEY, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
+pub use format::{
+    HEAD_KEY, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, TAIL_PREFIX,
+};
 use store::Is;
 pub use store::{Checkpointed, FlushReport};
 
@@ -468,6 +470,7 @@ impl State {
             files: Default::default(),
             logs: Default::default(),
             receipts: Vec::new(),
+            checkpoint: false,
             taken: false,
         }
     }
@@ -589,6 +592,8 @@ pub struct Mutation {
     files: store::Writes,
     logs: store::Appends,
     receipts: Vec<Receipt>,
+    /// [`Self::checkpoint`]: checkpoint first, however short the tail.
+    checkpoint: bool,
     /// [`Self::flush`] took its writes: dropping discards nothing.
     taken: bool,
 }
@@ -597,6 +602,12 @@ impl Mutation {
     /// Whether nothing was set or written.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty() && self.files.is_empty() && self.logs.is_empty()
+    }
+
+    /// Have [`Self::flush`] checkpoint first, however short the tail, if it
+    /// writes anything: the checkpoint holds every flush before this one.
+    pub fn checkpoint(&mut self) {
+        self.checkpoint = true;
     }
 
     /// A receipt for what becomes of this mutation (see [`Receipt`]).
@@ -785,7 +796,8 @@ impl Mutation {
         self.taken = true;
         // Only a flush that writes a head adopts a checkpoint. A failed
         // checkpoint fails nothing: the next flush tries again.
-        let staged = match snapshot.changes(&mut files, &mut records, &mut logs) && snapshot.due() {
+        let due = self.checkpoint || snapshot.due();
+        let staged = match snapshot.changes(&mut files, &mut records, &mut logs) && due {
             true => snapshot.checkpoint().await.ok(),
             false => None,
         };

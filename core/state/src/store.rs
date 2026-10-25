@@ -868,12 +868,12 @@ impl Snapshot {
         // due once the tail passes what the checkpoint holds, as it costs
         // more to read, and to write against its pages, than a checkpoint.
         let held: u64 = self.durable.manifest.sizes.values().sum();
-        let bytes = match self.tiered.packs_in_restate {
+        let limit = match self.tiered.packs_in_restate {
             true => bytes.min(held),
             false => bytes,
         };
         head.version > 0
-            && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= bytes))
+            && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= limit))
     }
 
     /// Flush `writes`, `records` and `logs`, which [`Self::check`] passed,
@@ -1236,8 +1236,17 @@ impl Snapshot {
             deleted: 0,
         };
         self.tiered.put_pack(pack, body.into()).await?;
-        // The pack is durable, and its name never reused: what it holds may
-        // be kept.
+        // The pack's name is never reused, and no head names it before it is
+        // durable: what it holds may be kept, its manifest too (the next
+        // writer's open reads it).
+        if let Some(cache) = &self.cache {
+            let at = Location {
+                pack,
+                offset: checkpoint.manifest.0,
+                len: checkpoint.manifest.1,
+            };
+            cache.insert(at, encoded);
+        }
         let mut images = HashMap::new();
         for (at, raw, image) in written {
             if let Some(cache) = &self.cache {

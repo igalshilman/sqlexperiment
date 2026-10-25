@@ -15,8 +15,9 @@ use bytes::{Bytes, BytesMut};
 use futures::future::{BoxFuture, try_join_all};
 use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 
-/// A store of blobs, each durable once its put returns: S3, say, through
-/// the feature `object-store` ([`ObjectStoreBlobs`]).
+/// A store of blobs: S3, say, through the feature `object-store`
+/// ([`ObjectStoreBlobs`]). A blob is durable once its put returns, or, in
+/// [`KvBlobs`], with the next sync of the head that names it.
 pub trait BlobStore: Send + Sync {
     /// Bytes `range` of the value of `key`; `None` if absent.
     fn get_range<'a>(
@@ -33,13 +34,17 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// Where [`KvBlobs`] keeps its blobs' parts.
-pub(crate) const KV_PREFIX: &str = "v19/pack/";
+pub const KV_PREFIX: &str = "v19/pack/";
 /// Bytes of a part of a blob in [`KvBlobs`]: a range read gets the parts it
 /// overlaps.
 const KV_PART: u64 = 64 << 10;
 
 /// Blobs in a [`KvStore`] (Restate's state, beside the head and the tail),
-/// each in parts of 64 KiB: `v19/pack/<key>/<part>`. A put syncs.
+/// each in parts of 64 KiB: `v19/pack/<key>/<part>`.
+///
+/// A put only queues its parts: they are durable with the store's next sync.
+/// That is enough for a checkpoint, as a [`KvStore`] keeps its writes in
+/// order: the head naming the pack, put after it, is never durable without it.
 pub struct KvBlobs {
     store: Arc<dyn KvStore>,
 }
@@ -107,7 +112,7 @@ impl BlobStore for KvBlobs {
                 let slice = value.slice(at as usize..end as usize);
                 self.store.put(&Self::part(key, part as u64), slice)?;
             }
-            self.store.sync().await
+            Ok(())
         })
     }
 

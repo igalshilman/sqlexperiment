@@ -24,7 +24,7 @@ use std::{
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
 pub const HEAD_KEY: &str = "v19/head";
-pub(crate) const TAIL_PREFIX: &str = "v19/tail/";
+pub const TAIL_PREFIX: &str = "v19/tail/";
 /// Where packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "checkpoint/";
 const HEAD_MAGIC: &[u8; 4] = b"SH19";
@@ -56,6 +56,7 @@ pub(crate) fn tail_key(version: u64, part: u32) -> String {
 }
 
 /// The version and part a tail entry's key names.
+#[cfg(any(test, feature = "simulation"))]
 pub(crate) fn parse_tail_key(key: &str) -> Option<(u64, u32)> {
     let (version, part) = key.strip_prefix(TAIL_PREFIX)?.split_once('/')?;
     Some((version.parse().ok()?, part.parse().ok()?))
