@@ -8,11 +8,10 @@
 //! S3=1 cargo bench --locked --features simulation --bench flush_costs
 //! ```
 //!
-//! `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES`,
-//! `CHECKPOINT_ENTRIES` and `CHECKPOINT_BYTES` set the state's options;
-//! `WORKLOAD` runs only the workloads it names part of, `FLUSHES` that many
-//! flushes each (an aged database); `LABEL` names the run in its rows.
-//! Prints Markdown rows.
+//! `FRAME_PAGES`, `INLINE_BYTES`, `CHECKPOINT_ENTRIES` and
+//! `CHECKPOINT_BYTES` set the state's options; `WORKLOAD` runs only the
+//! workloads it names part of, `FLUSHES` that many flushes each (an aged
+//! database); `LABEL` names the run in its rows. Prints Markdown rows.
 //!
 //! Without `S3`, the packs are kept in Restate's state too. With `S3=1`,
 //! they are in an object store, and the rows are what S3 would bill:
@@ -82,9 +81,7 @@ fn options() -> StateOptions {
     }
     let default = StateOptions::default();
     StateOptions {
-        chunk_pages: var("CHUNK_PAGES").unwrap_or(default.chunk_pages),
-        fanout: var("FANOUT").unwrap_or(default.fanout),
-        rebase_ratio: var("REBASE_RATIO").unwrap_or(default.rebase_ratio),
+        frame_pages: var("FRAME_PAGES").unwrap_or(default.frame_pages),
         inline_record_bytes: var("INLINE_BYTES").unwrap_or(default.inline_record_bytes),
         checkpoint_entries: var("CHECKPOINT_ENTRIES").unwrap_or(default.checkpoint_entries),
         checkpoint_bytes: var("CHECKPOINT_BYTES").unwrap_or(default.checkpoint_bytes),
