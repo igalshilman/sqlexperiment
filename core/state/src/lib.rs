@@ -17,43 +17,31 @@
 //! before the host flushes it; the durable functions runtime adds a
 //! program's memory and its run. Coordinating them is theirs.
 //!
-//! # Copy on write
+//! # Copy on write, a tail and checkpoints
 //!
 //! Nothing stored is ever changed: a flush writes what changed as new,
-//! immutable blobs, then the root, the one key it overwrites, which names
-//! them; then it syncs once. A file is stored as chunks of a few pages, each
-//! a zstd frame compressed against the chunk's base, so a flush costs about
-//! what it changed. A crash keeps a prefix of a flush's writes, so the root
-//! stored names only blobs that are there: there is no log to replay, and
-//! nothing to repair. See the private `store` module, and `docs/DESIGN.md`.
+//! immutable blobs, and a new root that names them. A file is stored as
+//! chunks of a few pages, each a zstd frame compressed against the chunk's
+//! base, so a flush costs about what it changed (see the private `store`
+//! module, and `docs/DESIGN.md`).
+//!
+//! Where they go is split by what each store is good at (see the private
+//! `tail` module, and `docs/TAIL_EXPERIMENT.md`). A flush puts its blobs as
+//! one entry of a *tail* in Restate, then the *head*, which holds the root,
+//! and syncs once: one round trip, which Restate fences. Now and then
+//! ([`StateOptions::checkpoint_entries`]), a flush first moves the blobs the
+//! durable root names out of the tail, into one *pack*, a *checkpoint*, in a
+//! [`blobs::BlobStore`]: S3 ([`Open::checkpoints`]), or Restate's state
+//! itself by default. Its head then names the checkpoint, and drops the
+//! tail it covered. Pack names are unique, so S3 needs no fencing, nor
+//! conditional puts.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Root | `v17/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
-//! | Blobs | `v17/blob/<n>`: a chunk's base or delta, a map node, a large record, or a log entry | Yes, until a sweep deletes it, once no root a reader may hold names it |
-//! | Claim | `v17/claim`: the first blob number no attempt claimed, where blobs are not fenced ([`kv::KvStore::unfenced_blobs`]) | Yes |
-//! | Sweep | `v17/sweep`: the blobs the last sweep found dead | Yes |
-//!
-//! # Garbage collection
-//!
-//! A flush deletes nothing. Blob numbers only grow, so a blob below the
-//! root's next blob that the root does not name is dead for good;
-//! [`State::collect_garbage`] lists the blobs and deletes those, in two
-//! phases, [`StateOptions::garbage_after`] versions apart, for the readers.
-//! It writes no root, so any state may sweep, beside the owner; a flush
-//! sweeps every [`StateOptions::sweep_every`] versions. It lists keys with
-//! [`kv::KvStore::keys`] (Restate's `getKeys()`): a store that cannot list
-//! is never swept.
-//!
-//! # Blobs beside Restate
-//!
-//! Where the blobs are elsewhere than the root ([`blobs::SplitStore`]: S3
-//! beside Restate), Restate fences an earlier attempt from the root but
-//! not from the blobs. So an owner claims its blob numbers in the root's
-//! store, and syncs, before it puts a blob: no later attempt uses them, and
-//! a sync that fails ends the state, and so the attempt. No conditional put
-//! is needed: no two attempts ever put the same key.
+//! | Head | `v18/head`: the root (the directory, small records, the top of each file's chunk map), the checkpoints, the tail's extent | Yes, after an acknowledged flush |
+//! | Tail | `v18/tail/<version>/<part>`: the blobs a flush wrote: chunks' bases and deltas, map nodes, large records, log entries | Yes, until a checkpoint after the next one |
+//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: the blobs a checkpoint moved, and its manifest | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -64,10 +52,9 @@
 //! Any number of states may read beside the owner ([`Open::reader`], or
 //! states of the owner that overlap in a [`PageCache`]): each reads the root
 //! it opened, a consistent snapshot, while the owner flushes, because blobs
-//! never change and are deleted only [`StateOptions::garbage_after`]
-//! versions after a sweep found no root naming them. Only one flushes: a
-//! flush is refused if another state of the owner flushed since this one
-//! opened.
+//! never change, and the tail and the packs a head names stay for one
+//! checkpoint more. Only one flushes: a flush is refused if another state
+//! of the owner flushed since this one opened.
 //!
 //! The [`PageCache`] is the process's: it keeps blobs in memory and on a
 //! local disk tier under one budget for every namespace it opens, under
@@ -108,18 +95,19 @@ mod map;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod store;
+mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
 use store::Is;
-pub use store::{
-    Collected, FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES,
-    ROOT_KEY,
-};
+pub use store::{FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
+pub use tail::{Checkpointed, HEAD_KEY};
 
+use crate::blobs::{BlobStore, KvBlobs};
 use crate::cache::{NamespaceCache, ParkedValue};
 use crate::kv::KvStore;
 use crate::store::Snapshot;
+use crate::tail::Tiered;
 use bytes::Bytes;
 use std::{
     any::Any,
@@ -180,14 +168,11 @@ pub struct StateOptions {
     /// Every chunk of a file of at most this many pages is fetched at open,
     /// alongside the root's other blobs.
     pub prefetch_pages: u64,
-    /// Versions between the sweep that finds a blob dead and the one that
-    /// deletes it (at least 1): a reader that opened before the first reads
-    /// its root for as long ([`State::collect_garbage`]).
-    pub garbage_after: u64,
-    /// A flush whose version is a multiple of this sweeps too, where the
-    /// store lists its keys ([`Mutation::flush`]); 0 never does: then sweep
-    /// with [`State::collect_garbage`], beside the owner if you like.
-    pub sweep_every: u64,
+    /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
+    /// this many entries since the last checkpoint; 0 never does by count.
+    pub checkpoint_entries: u64,
+    /// ... or about this many bytes; 0 never does by size.
+    pub checkpoint_bytes: u64,
 }
 
 impl Default for StateOptions {
@@ -198,8 +183,8 @@ impl Default for StateOptions {
             rebase_ratio: 0.25,
             inline_record_bytes: 1024,
             prefetch_pages: 16,
-            garbage_after: 16,
-            sweep_every: 16,
+            checkpoint_entries: 128,
+            checkpoint_bytes: 1 << 20,
         }
     }
 }
@@ -223,6 +208,8 @@ pub struct State {
 struct Shared {
     /// The durable state: as opened, then as the mutations flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
+    /// Where the snapshot reads and flushes: the head, the tail, the packs.
+    tail: Arc<Tiered>,
     options: StateOptions,
     cache: Option<NamespaceCache>,
     /// What was parked at the state this one opened on, by key, until
@@ -241,45 +228,27 @@ impl Shared {
         self.snapshot.lock().unwrap().clone()
     }
 
-    /// Sweep against `latest`, a durable root, or the root as stored now
-    /// ([`State::collect_garbage`]); `None` where the store cannot list its
-    /// keys. A failure, or dropping the future midway, ends the state.
-    async fn sweep(&self, latest: Option<Arc<Snapshot>>) -> Result<Option<Collected>> {
-        let mut sweeping = Sweeping {
+    /// Delete the packs no checkpoint the head names needs. A failure, or
+    /// dropping the future midway, ends the state: in Restate, what it
+    /// deleted has an unknown outcome, which the next open syncs.
+    async fn collect_garbage(&self) -> Result<usize> {
+        let mut collecting = Collecting {
             shared: self,
             done: false,
         };
-        let store = self.snapshot().store().clone();
-        let listed = match store.keys().await {
-            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
-                sweeping.done = true;
-                return Ok(None);
-            }
-            listed => listed,
-        };
-        let latest = match latest {
-            Some(latest) => latest,
-            None => {
-                let options = self.options.clone();
-                Arc::new(Snapshot::latest(store, options, self.cache.clone()).await?)
-            }
-        };
-        let marked = latest.mark(&listed?).await?;
-        let collected = latest.sweep(marked).await?;
-        sweeping.done = true;
-        Ok(Some(collected))
+        let deleted = self.tail.collect_garbage().await?;
+        collecting.done = true;
+        Ok(deleted)
     }
 }
 
-/// A running sweep. One that fails or is dropped midway ends the state, and
-/// the owner's cache forgets what it knew of the namespace: what the sweep
-/// wrote has an unknown outcome, which the next open syncs.
-struct Sweeping<'a> {
+/// A running garbage collection: see [`Shared::collect_garbage`].
+struct Collecting<'a> {
     shared: &'a Shared,
     done: bool,
 }
 
-impl Drop for Sweeping<'_> {
+impl Drop for Collecting<'_> {
     fn drop(&mut self) {
         if self.done {
             return;
@@ -338,9 +307,10 @@ impl Drop for Shared {
 const ENDED: &str = "the state ended after a failed or cancelled flush; open a new one";
 
 impl State {
-    /// Open the namespace over `store`: read its root (and the blobs of its
-    /// large records and small files) before anything reads; a crash leaves
-    /// nothing to recover. Await it as it is, or set how first:
+    /// Open the namespace over `store`, Restate's state: read its head (and
+    /// the blobs of its large records and small files) before anything
+    /// reads; a crash leaves nothing to recover. Await it as it is, or set
+    /// how first:
     ///
     /// ```no_run
     /// # use std::sync::Arc;
@@ -349,7 +319,7 @@ impl State {
     /// let state = State::open(store.clone()).await?;
     /// let state = State::open(store.clone()).cached(&cache, "object-42").await?;
     /// let state = State::open(store)
-    ///     .options(StateOptions { garbage_after: 4, ..StateOptions::default() })
+    ///     .options(StateOptions { checkpoint_entries: 64, ..StateOptions::default() })
     ///     .await?;
     /// # Ok(())
     /// # }
@@ -357,19 +327,24 @@ impl State {
     pub fn open(store: Arc<dyn KvStore>) -> Open {
         Open {
             store,
+            packs: None,
             options: StateOptions::default(),
             cache: None,
             reader: false,
         }
     }
 
-    async fn open_as(
-        store: Arc<dyn KvStore>,
-        options: StateOptions,
-        cache: Option<NamespaceCache>,
-        reader: bool,
-    ) -> Result<Self> {
-        let snapshot = Snapshot::open(store, options.clone(), cache.clone(), reader).await?;
+    async fn open_as(open: Open) -> Result<Self> {
+        let Open {
+            store,
+            packs,
+            options,
+            cache,
+            reader,
+        } = open;
+        let packs = packs.unwrap_or_else(|| Arc::new(KvBlobs::new(store.clone())));
+        let tail = Arc::new(Tiered::new(store, packs));
+        let snapshot = Snapshot::open(tail.clone(), options.clone(), cache.clone(), reader).await?;
         let mut parked = match &cache {
             Some(cache) if snapshot.unchanged => cache.take_parked(),
             _ => HashMap::new(),
@@ -378,6 +353,7 @@ impl State {
         Ok(Self {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
+                tail,
                 options,
                 cache,
                 parked: Mutex::new(parked),
@@ -530,35 +506,34 @@ impl State {
         !self.shared.poisoned.load(Ordering::SeqCst)
     }
 
-    /// Delete the blobs no root names any more: mark and sweep, in two
-    /// phases. It reads the namespace's root as stored now (synced first, so
-    /// that it is durable) and lists the blobs: those below the root's next
-    /// blob that it does not name are dead for good, since a flush numbers
-    /// its blobs past it. It deletes those the last sweep found dead too, at
-    /// least [`StateOptions::garbage_after`] versions ago, so that a reader
-    /// that opened before then read its root for as long; it keeps the
-    /// others for the next sweep. A flush sweeps too, every
-    /// [`StateOptions::sweep_every`] versions.
+    /// Delete the packs no checkpoint the head names needs: those older
+    /// than the checkpoint before the head's, which neither names. How
+    /// many. A flush that makes a checkpoint collects too.
     ///
-    /// A sweep writes no root, so any state may run it, an owner's or a
-    /// reader's, beside the owner's flushes: in the owner's handler, or in a
-    /// separate worker where the blobs are elsewhere than the root
-    /// ([`blobs::SplitStore`]). It needs a store that lists its keys
-    /// ([`KvStore::keys`]): one that cannot fails before anything is
-    /// written, and the state goes on. Any other failure ends the state, as
-    /// a failed flush does.
-    pub async fn collect_garbage(&self) -> Result<Collected> {
+    /// Any state may collect, an owner's or a reader's, beside the owner's
+    /// flushes, or one Restate fenced: whatever head it read, a pack a later
+    /// head needs is one its head names, or newer than its previous
+    /// checkpoint. A failure, or dropping the future midway, ends the state,
+    /// as a failed flush does.
+    pub async fn collect_garbage(&self) -> Result<usize> {
         if self.shared.poisoned.load(Ordering::SeqCst) {
             return Err(ENDED.into());
         }
-        match self.shared.sweep(None).await? {
-            Some(collected) => Ok(collected),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "this store cannot list its keys, so it is never swept",
-            )
-            .into()),
-        }
+        self.shared.collect_garbage().await
+    }
+
+    /// The packs the head's checkpoints need: those its checkpoint and the
+    /// one before name. Others are garbage.
+    #[cfg(feature = "simulation")]
+    pub async fn needed_packs(&self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(self
+            .shared
+            .tail
+            .needed()
+            .await?
+            .iter()
+            .map(|pack| pack.key())
+            .collect())
     }
 }
 
@@ -566,6 +541,7 @@ impl State {
 #[must_use = "a state opens when awaited"]
 pub struct Open {
     store: Arc<dyn KvStore>,
+    packs: Option<Arc<dyn BlobStore>>,
     options: StateOptions,
     cache: Option<NamespaceCache>,
     reader: bool,
@@ -575,6 +551,15 @@ impl Open {
     /// Flush and read with `options` rather than the defaults.
     pub fn options(self, options: StateOptions) -> Self {
         Self { options, ..self }
+    }
+
+    /// Keep checkpoints in `packs`, S3 say ([`blobs::ObjectStoreBlobs`]),
+    /// rather than in the store: every state of the namespace must.
+    pub fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
+        Self {
+            packs: Some(packs),
+            ..self
+        }
     }
 
     /// Keep the state warm in the process's `cache`, as `namespace`: the
@@ -591,8 +576,8 @@ impl Open {
 
     /// Open a reader of a namespace that another owns, alongside it: a
     /// state that writes nothing to the store (its mutations refuse to flush). It
-    /// reads the state as of open, whatever the owner flushes meanwhile, for
-    /// [`StateOptions::garbage_after`] of its flushes. With a cache
+    /// reads the state as of open, whatever the owner flushes meanwhile,
+    /// until the owner's second checkpoint after it. With a cache
     /// ([`Self::cached`]), it reads the blobs the owner cached, and changes
     /// nothing there.
     pub fn reader(self) -> Self {
@@ -608,13 +593,7 @@ impl IntoFuture for Open {
     type IntoFuture = Pin<Box<dyn Future<Output = Result<State>> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let Open {
-            store,
-            options,
-            cache,
-            reader,
-        } = self;
-        Box::pin(State::open_as(store, options, cache, reader))
+        Box::pin(State::open_as(self))
     }
 }
 
@@ -783,19 +762,22 @@ impl Mutation {
     }
 
     /// Make every record set, page written and entry appended durable: the
-    /// blobs of the chunks, records and entries it changes, then the root
-    /// that names them, then one sync, in one round trip. Nothing changed:
-    /// nothing is written. It is refused while another flush of the state
+    /// blobs of the chunks, records and entries it changes, as a tail
+    /// entry, then the head that names them, then one sync, in one round
+    /// trip. Nothing changed: nothing is written. It is refused while another flush of the state
     /// runs, and for writes the state cannot store; a refused flush writes
     /// nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the
     /// state: open it again.
     ///
-    /// A flush whose version is a multiple of [`StateOptions::sweep_every`]
-    /// then sweeps ([`State::collect_garbage`]), against the root it made
-    /// durable, where the store lists its keys. A sweep that fails ends the
-    /// state as well, though the flush landed: its receipts say so.
+    /// Once the tail passes [`StateOptions::checkpoint_entries`] or
+    /// [`StateOptions::checkpoint_bytes`], a flush first checkpoints the
+    /// durable state: it puts a pack, which its head names; then it
+    /// collects garbage ([`State::collect_garbage`]). A checkpoint that
+    /// fails changes nothing: the flush goes on, and a later one
+    /// checkpoints. A collection that fails ends the state, though the
+    /// flush landed: its receipts say so.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
         if shared.poisoned.load(Ordering::SeqCst) {
@@ -822,6 +804,14 @@ impl Mutation {
         let records = std::mem::take(&mut self.records);
         let logs = std::mem::take(&mut self.logs);
         self.taken = true;
+        let options = &shared.options;
+        if shared
+            .tail
+            .due(options.checkpoint_entries, options.checkpoint_bytes)
+        {
+            // A failed checkpoint fails nothing: the next flush tries again.
+            let _ = shared.tail.checkpoint(&snapshot).await;
+        }
         let result = snapshot.commit(files, records, logs).await;
         running.returned = true;
         let (report, after) = result?;
@@ -831,11 +821,9 @@ impl Mutation {
             receipt.0.store(FLUSHED, Ordering::SeqCst);
         }
         let mut report = report;
-        let every = shared.options.sweep_every;
-        let version = shared.snapshot().version();
-        if report.root_bytes > 0 && every > 0 && version.is_multiple_of(every) {
-            // Against the root it made durable.
-            report.swept = shared.sweep(Some(shared.snapshot())).await?;
+        report.checkpoint = shared.tail.take_adopted();
+        if let Some(checkpoint) = &mut report.checkpoint {
+            checkpoint.deleted = shared.collect_garbage().await?;
         }
         Ok(report)
     }

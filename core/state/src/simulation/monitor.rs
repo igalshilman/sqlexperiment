@@ -1,43 +1,46 @@
-//! A protocol monitor: checks every request the code issues against the
-//! rules of [`crate::store`]: a blob is written before the first root that
-//! names it, and deleted only once it is dead for good.
+//! A protocol monitor: checks every request the code issues to Restate's
+//! state against the rules of [`crate::store`] and [`crate::tail`]: a blob
+//! is stored before the first head that names it, and dropped only once no
+//! head a state may hold needs it.
 //!
 //! The store keeps writes in issue order, and a crash keeps a prefix of them,
 //! so a write may rely on every write issued before it. The monitor wraps a
 //! store and keeps the state those writes make: each write applied as it is
-//! issued, and values it read (after a crash, a read learns what was kept;
-//! a listing, which blobs are there). A write that fails makes its key
-//! unknown until a read learns it; a read of the root forgets the blobs at
-//! or past its next blob, which a crash may have lost (a flush issues its
-//! blobs and root with nothing between). Each write is checked when it is
-//! issued:
+//! issued, and values it read (after a crash, a read learns what was kept).
+//! A write that fails makes its key unknown until a read learns it; a read
+//! of the head forgets the blobs at or past its root's next blob, which a
+//! crash may have lost. Each write is checked when it is issued:
 //!
-//! 1. **Name only what is written**: a root names only blobs that are there.
-//! 2. **Build on the root**: a root is the next version of the root, with
-//!    the same identity and chunk size, and a next blob never lower.
-//! 3. **Never overwrite**: a blob is put only at or past the root's next
-//!    blob, which no root names yet.
-//! 4. **Claim first** (where blobs are unfenced): a blob is put only below
-//!    the claim, and the claim only grows.
-//! 5. **Delete only the dead**: a blob is deleted only if it is below the
-//!    root's next blob, and the root does not name it.
-//! 6. **Leak nothing**: a sweep that keeps its list of dead blobs (or
-//!    drops it) leaves no dead blob out of it, deleted or listed.
-//! 7. **Decodable**: every root decodes, and every map node, chunk and
-//!    record and log entry blob it names decodes: a chunk's base against its file's golden
-//!    pages, its delta against its base.
+//! 1. **Name only what is stored**: a head's root names only blobs in the
+//!    tail entries it keeps, or, below its checkpoint's next blob, in its
+//!    checkpoint's manifest.
+//! 2. **Build on the head**: a head is the next version, with the same
+//!    identity, chunk size and fanout, a next blob never lower, and a tail
+//!    that starts no earlier; a new checkpoint's previous is the one held.
+//! 3. **Never overwrite**: a tail entry is put only for the version after
+//!    the head's, its blobs at or past the root's next blob.
+//! 4. **A checkpoint holds what it names**: when a head first names a
+//!    checkpoint, every blob its root names below the checkpoint's next blob
+//!    is in the manifest, in a pack, with the bytes the tail held (where the
+//!    monitor sees the packs: in the store, or given [`MonitorKv::packs`]).
+//! 5. **Drop only what no head needs**: a tail entry is deleted only once
+//!    the head's checkpoint covers it, and a pack in the store only if
+//!    older than the head's previous checkpoint, and neither checkpoint
+//!    names it.
+//! 6. **Decodable**: every head and root decodes, and every map node, chunk
+//!    and record and log entry blob it names decodes: a chunk's base against
+//!    its file's golden pages, its delta against its base.
 //!
 //! What a root names it learns by walking each file's map through the node
-//! blobs it knows; a node a failed write left unknown is not walked, and
-//! rule 6 waits for a root it can walk whole.
+//! blobs it knows; a node a failed write left unknown is not walked.
 use crate::{
     Base, PAGE,
+    blobs::KV_PREFIX,
     kv::KvStore,
     map::{Map, Node, Nodes, Shape, Visit},
-    store::{
-        CLAIM_KEY, Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, SWEEP_KEY, Sweep, Value,
-        decode_chunk, decode_claim, parse_blob_key, reference,
-    },
+    simulation::MemoryBlobs,
+    store::{Chunk, Kind, MAX_RECORD_BYTES, Root, Value, decode_chunk, reference},
+    tail::{HEAD_KEY, Head, Manifest, PackId, parse_tail_key, read_part},
     zstd,
 };
 use bytes::Bytes;
@@ -65,20 +68,46 @@ impl<S> Deref for MonitorKv<S> {
 /// The state the writes issued so far make.
 #[derive(Default)]
 struct Known {
+    /// Blobs the stored state holds: in tail entries, or moved to packs.
     blobs: BTreeMap<u64, Bytes>,
     /// Blobs a failed write may or may not have changed.
     unknown: BTreeSet<u64>,
-    /// The root, unless a failed write left it unknown.
-    root: Option<Root>,
-    root_unknown: bool,
-    /// The claim, if any was written or read.
-    claim: Option<u64>,
-    /// The store's blobs are unfenced: the state claims its numbers.
-    unfenced: bool,
+    /// The head and its root, unless a failed write left them unknown.
+    head: Option<(Head, Root)>,
+    head_unknown: bool,
+    /// The blobs of each tail entry, by version.
+    tail: BTreeMap<u64, BTreeSet<u64>>,
+    /// Packs in the store: their parts, by key.
+    packs: BTreeMap<String, BTreeMap<u64, Bytes>>,
+    /// Packs elsewhere ([`MonitorKv::packs`]).
+    external: Option<MemoryBlobs>,
+    manifests: HashMap<PackId, Option<Manifest>>,
     violations: Vec<String>,
     /// The bases of files made with one, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
     checked: usize,
+}
+
+/// A key of the store, as the monitor tells them apart.
+enum Key {
+    Head,
+    Tail(u64),
+    Pack(String, u64),
+    Other,
+}
+
+fn key(key: &str) -> Key {
+    if key == HEAD_KEY {
+        return Key::Head;
+    }
+    if let Some((version, _)) = parse_tail_key(key) {
+        return Key::Tail(version);
+    }
+    let pack = (key.strip_prefix(KV_PREFIX)).and_then(|rest| rest.rsplit_once('/'));
+    match pack.and_then(|(pack, part)| Some((pack.to_owned(), part.parse().ok()?))) {
+        Some((pack, part)) => Key::Pack(pack, part),
+        None => Key::Other,
+    }
 }
 
 impl Known {
@@ -86,132 +115,249 @@ impl Known {
         self.violations.push(message);
     }
 
-    fn learn(&mut self, key: &str, value: Option<Bytes>) {
-        if key == CLAIM_KEY {
-            self.claim = value.and_then(|bytes| decode_claim(&bytes).ok());
-        } else if key == ROOT_KEY {
-            self.root = value.and_then(|bytes| Root::decode(&bytes).ok());
-            self.root_unknown = false;
-            let next = self.root.as_ref().map_or(0, |root| root.next_blob);
-            self.blobs.retain(|&n, _| n < next);
-            self.unknown.retain(|&n| n < next);
-        } else if let Some(n) = parse_blob_key(key) {
-            self.unknown.remove(&n);
-            match value {
-                Some(value) => self.blobs.insert(n, value),
-                None => self.blobs.remove(&n),
-            };
-        }
-    }
-
-    fn forget(&mut self, key: &str) {
-        if key == ROOT_KEY {
-            self.root_unknown = true;
-        } else if let Some(n) = parse_blob_key(key) {
-            self.unknown.insert(n);
-        }
-    }
-
-    /// The root, unless a failed write left it unknown.
-    fn held(&self) -> Option<&Root> {
-        self.root.as_ref().filter(|_| !self.root_unknown)
-    }
-
-    fn check_put(&mut self, key: &str, value: &Bytes) {
-        self.checked += 1;
-        if let Some(n) = parse_blob_key(key) {
-            if let Some(root) = self.held()
-                && n < root.next_blob
-            {
-                self.violation(format!("blob {n} put, below the root's next blob"));
+    fn learn(&mut self, at: &str, value: Option<Bytes>) {
+        match key(at) {
+            Key::Head => {
+                let head = value.and_then(|bytes| {
+                    let head = Head::decode(&bytes).ok()?;
+                    let root = Root::decode(&head.root).ok()?;
+                    Some((head, root))
+                });
+                let (next, version) = head
+                    .as_ref()
+                    .map_or((0, 0), |(head, root)| (root.next_blob, head.version));
+                self.head = head;
+                self.head_unknown = false;
+                self.blobs.retain(|&n, _| n < next);
+                self.unknown.retain(|&n| n < next);
+                self.tail.retain(|&v, _| v <= version);
             }
-            if self.unfenced && self.claim.is_none_or(|claim| n >= claim) {
-                let claim = self.claim;
-                self.violation(format!("blob {n} put, not below the claim {claim:?}"));
-            }
-            return;
-        }
-        if key == CLAIM_KEY {
-            match decode_claim(value) {
-                Ok(claim) if self.claim.is_some_and(|held| claim < held) => {
-                    self.violation(format!("the claim falls to {claim}"));
+            Key::Tail(version) => match value {
+                Some(value) => {
+                    let mut blobs = HashMap::new();
+                    if read_part(&value, &mut blobs).is_ok() {
+                        for (n, blob) in blobs {
+                            self.unknown.remove(&n);
+                            self.tail.entry(version).or_default().insert(n);
+                            self.blobs.insert(n, blob);
+                        }
+                    }
                 }
-                Ok(_) => {}
-                Err(error) => self.violation(format!("a claim that does not decode: {error}")),
+                None => {
+                    // Its blobs the checkpoint holds stay; the others go
+                    // (all stay where the monitor cannot read the manifest).
+                    let moved = self.checkpointed();
+                    for n in self.tail.remove(&version).unwrap_or_default() {
+                        if moved.as_ref().is_some_and(|moved| !moved.contains(&n)) {
+                            self.blobs.remove(&n);
+                        }
+                    }
+                }
+            },
+            Key::Pack(pack, part) => {
+                let parts = self.packs.entry(pack.clone()).or_default();
+                match value {
+                    Some(value) => {
+                        parts.insert(part, value);
+                    }
+                    None => {
+                        parts.remove(&part);
+                        if parts.is_empty() {
+                            self.packs.remove(&pack);
+                        }
+                    }
+                }
             }
-            return;
+            Key::Other => {}
         }
-        if key == SWEEP_KEY {
-            match Sweep::decode(value) {
-                Ok(sweep) => self.check_sweep(Some(&sweep)),
-                Err(error) => self.violation(format!("a sweep that does not decode: {error}")),
+    }
+
+    fn forget(&mut self, at: &str, value: Option<&Bytes>) {
+        match key(at) {
+            Key::Head => self.head_unknown = true,
+            Key::Tail(_) => {
+                let mut blobs = HashMap::new();
+                if let Some(value) = value
+                    && read_part(value, &mut blobs).is_ok()
+                {
+                    self.unknown.extend(blobs.into_keys());
+                }
             }
-            return;
+            Key::Pack(..) | Key::Other => {}
         }
-        if key != ROOT_KEY {
-            return self.violation(format!("a put of {key:?}, neither root nor blob"));
+    }
+
+    /// The head and its root, unless a failed write left them unknown.
+    fn held(&self) -> Option<&(Head, Root)> {
+        self.head.as_ref().filter(|_| !self.head_unknown)
+    }
+
+    /// The bytes `range` of the pack `pack`, if the monitor sees it.
+    fn pack_range(&self, pack: PackId, range: std::ops::Range<u64>) -> Option<Bytes> {
+        let key = pack.key();
+        if let Some(external) = &self.external {
+            return external.peek(&key, range);
         }
-        let root = match Root::decode(value) {
-            Ok(root) => root,
-            Err(error) => return self.violation(format!("a root that does not decode: {error}")),
+        let parts = self.packs.get(&key)?;
+        let mut whole = Vec::new();
+        for (expected, (&part, bytes)) in parts.iter().enumerate() {
+            if part != expected as u64 {
+                return None;
+            }
+            whole.extend_from_slice(bytes);
+        }
+        let range = range.start as usize..range.end as usize;
+        whole.get(range).map(Bytes::copy_from_slice)
+    }
+
+    /// The manifest of the checkpoint `checkpoint`, if the monitor sees it.
+    fn manifest(&mut self, checkpoint: &crate::tail::Checkpoint) -> Option<&Manifest> {
+        if !self.manifests.contains_key(&checkpoint.pack) {
+            let (at, len) = checkpoint.manifest;
+            let manifest = self
+                .pack_range(checkpoint.pack, at..at + len)
+                .and_then(|bytes| Manifest::decode(&bytes).ok());
+            self.manifests.insert(checkpoint.pack, manifest);
+        }
+        self.manifests[&checkpoint.pack].as_ref()
+    }
+
+    /// The blobs the held head's checkpoint holds, if the monitor sees its
+    /// manifest.
+    fn checkpointed(&mut self) -> Option<BTreeSet<u64>> {
+        let Some(checkpoint) = self.held().and_then(|(head, _)| head.checkpoint) else {
+            return Some(BTreeSet::new());
         };
-        if let Some(held) = self.held()
-            && (root.version != held.version + 1
-                || root.id != held.id
-                || root.chunk_pages != held.chunk_pages
-                || root.fanout != held.fanout
-                || root.next_blob < held.next_blob)
-        {
-            let (v, held_v) = (root.version, held.version);
-            self.violation(format!("root {v} does not build on root {held_v}"));
+        let manifest = self.manifest(&checkpoint)?;
+        Some(manifest.blobs.keys().copied().collect())
+    }
+
+    fn check_put(&mut self, at: &str, value: &Bytes) {
+        self.checked += 1;
+        match key(at) {
+            Key::Head => self.check_head(value),
+            Key::Tail(version) => {
+                let mut blobs = HashMap::new();
+                if let Err(error) = read_part(value, &mut blobs) {
+                    return self.violation(format!("tail entry {version}: {error}"));
+                }
+                let Some((head, root)) = self.held() else {
+                    return;
+                };
+                let (expected, next) = (head.version + 1, root.next_blob);
+                if version != expected {
+                    self.violation(format!("tail entry {version} put; the next is {expected}"));
+                }
+                for n in blobs.into_keys().filter(|&n| n < next) {
+                    self.violation(format!("blob {n} put, below the root's next blob"));
+                }
+            }
+            Key::Pack(..) => {}
+            Key::Other => self.violation(format!("a put of {at:?}")),
         }
-        for n in self.named(&root).0 {
-            if !self.blobs.contains_key(&n) && !self.unknown.contains(&n) {
-                self.violation(format!("root {} names blob {n}, not written", root.version));
+    }
+
+    fn check_head(&mut self, value: &Bytes) {
+        let decoded = Head::decode(value).and_then(|head| {
+            let root = Root::decode(&head.root)?;
+            Ok((head, root))
+        });
+        let (head, root) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => return self.violation(format!("a head that does not decode: {error}")),
+        };
+        let v = head.version;
+        if let Some((held, held_root)) = self.held().cloned() {
+            if head.version != held.version + 1
+                || root.version != head.version
+                || root.id != held_root.id
+                || root.chunk_pages != held_root.chunk_pages
+                || root.fanout != held_root.fanout
+                || root.next_blob < held_root.next_blob
+                || head.tail_first < held.tail_first
+            {
+                let held_v = held.version;
+                self.violation(format!("head {v} does not build on head {held_v}"));
+            }
+            if head.checkpoint != held.checkpoint && head.previous != held.checkpoint {
+                self.violation(format!(
+                    "head {v}: a new checkpoint, not after the one held"
+                ));
+            }
+        }
+        let (named, _) = self.named(&root);
+        let manifest = match head.checkpoint {
+            Some(checkpoint) => {
+                let visible =
+                    self.external.is_some() || self.packs.contains_key(&checkpoint.pack.key());
+                match self.manifest(&checkpoint).cloned() {
+                    Some(manifest) => Some((checkpoint, manifest)),
+                    None if visible => {
+                        let error = format!("head {v}: its checkpoint's manifest is unreadable");
+                        return self.violation(error);
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        for &n in &named {
+            let packed = manifest.as_ref().filter(|(c, _)| n < c.next_blob);
+            match packed {
+                Some((_, manifest)) => match manifest.blobs.get(&n) {
+                    None => {
+                        self.violation(format!("head {v} names blob {n}, not in its checkpoint"))
+                    }
+                    Some(at) => {
+                        let stored = self.pack_range(at.pack, at.offset..at.offset + at.len);
+                        let held = self.blobs.get(&n);
+                        if stored.is_none() {
+                            self.violation(format!("head {v} names blob {n}, its pack gone"));
+                        } else if held.is_some() && stored.as_ref() != held {
+                            self.violation(format!("head {v}: blob {n} differs in its pack"));
+                        }
+                    }
+                },
+                None if !self.blobs.contains_key(&n) && !self.unknown.contains(&n) => {
+                    self.violation(format!("head {v} names blob {n}, not stored"));
+                }
+                None => {}
             }
         }
         if let Err(error) = self.decode(&root) {
-            self.violation(format!("root {}: {error}", root.version));
+            self.violation(format!("root {v}: {error}"));
         }
     }
 
-    fn check_delete(&mut self, key: &str) {
+    fn check_delete(&mut self, at: &str) {
         self.checked += 1;
-        if key == SWEEP_KEY {
-            return self.check_sweep(None);
-        }
-        let Some(n) = parse_blob_key(key) else {
-            return self.violation(format!("a delete of {key:?}, not a blob"));
+        let Some((head, _)) = self.held().cloned() else {
+            return;
         };
-        if let Some(root) = self.held()
-            && (n >= root.next_blob || self.named(root).0.contains(&n))
-        {
-            self.violation(format!("blob {n} deleted, not dead"));
-        }
-    }
-
-    /// A sweep keeps `sweep` (or nothing): every blob it lists is dead, and
-    /// no dead blob is left out of it.
-    fn check_sweep(&mut self, sweep: Option<&Sweep>) {
-        let Some(root) = self.held() else { return };
-        let (named, whole) = self.named(root);
-        let listed = sweep.map(|sweep| &sweep.dead);
-        let mut violations = Vec::new();
-        for &n in listed.into_iter().flatten() {
-            if n >= root.next_blob || named.contains(&n) {
-                violations.push(format!("the sweep lists blob {n}, not dead"));
-            }
-        }
-        if whole {
-            let dead = (self.blobs.keys().chain(&self.unknown))
-                .filter(|&&n| n < root.next_blob && !named.contains(&n));
-            for &n in dead {
-                if listed.is_none_or(|listed| !listed.contains(&n)) {
-                    violations.push(format!("the sweep leaks blob {n}"));
+        match key(at) {
+            Key::Tail(version) => {
+                if head.checkpoint.is_none_or(|c| version > c.pack.version) {
+                    self.violation(format!("tail entry {version} deleted, not checkpointed"));
                 }
             }
+            Key::Pack(pack, _) => {
+                let Some(id) = PackId::parse(&pack) else {
+                    return self.violation(format!("a delete of {at:?}"));
+                };
+                let mut needed = BTreeSet::new();
+                for checkpoint in [head.checkpoint, head.previous].into_iter().flatten() {
+                    needed.insert(checkpoint.pack);
+                    if let Some(manifest) = self.manifest(&checkpoint) {
+                        needed.extend(manifest.packs());
+                    }
+                }
+                let older = head.previous.is_some_and(|p| id.version < p.pack.version);
+                if !older || needed.contains(&id) {
+                    self.violation(format!("pack {pack} deleted, still needed"));
+                }
+            }
+            Key::Head | Key::Other => self.violation(format!("a delete of {at:?}")),
         }
-        self.violations.extend(violations);
     }
 
     /// Walk `map`, of `shape`, through the node blobs known, decoding them
@@ -344,13 +490,9 @@ impl Known {
 
 impl<S: KvStore> MonitorKv<S> {
     pub fn new(inner: S) -> Self {
-        let known = Known {
-            unfenced: inner.unfenced_blobs(),
-            ..Known::default()
-        };
         Self {
             inner,
-            known: Mutex::new(known),
+            known: Mutex::default(),
         }
     }
 
@@ -360,11 +502,21 @@ impl<S: KvStore> MonitorKv<S> {
         let monitor = Self::new(inner);
         {
             let mut known = monitor.known.lock().unwrap();
+            let mut values: Vec<(String, Bytes)> = values.into_iter().collect();
+            // The head last: it forgets the blobs past its root's next.
+            values.sort_by_key(|(key, _)| key == HEAD_KEY);
             for (key, value) in values {
                 known.learn(&key, Some(value));
             }
         }
         monitor
+    }
+
+    /// Read checkpoints' packs from `packs`, where the state keeps them
+    /// ([`crate::Open::checkpoints`]).
+    pub fn packs(self, packs: &MemoryBlobs) -> Self {
+        self.known.lock().unwrap().external = Some(packs.clone());
+        self
     }
 
     /// Decode the chunks of the file `name` against `base`, the one it is
@@ -400,7 +552,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
         let result = self.inner.put(key, value.clone());
         match &result {
             Ok(()) => known.learn(key, Some(value)),
-            Err(_) => known.forget(key),
+            Err(_) => known.forget(key, Some(&value)),
         }
         result
     }
@@ -411,7 +563,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
         let result = self.inner.delete(key);
         match &result {
             Ok(()) => known.learn(key, None),
-            Err(_) => known.forget(key),
+            Err(_) => known.forget(key, None),
         }
         result
     }
@@ -419,24 +571,8 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.inner.sync()
     }
+
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
-        Box::pin(async move {
-            let keys = KvStore::keys(&self.inner).await?;
-            {
-                // Which blobs are there: those a crash lost are not.
-                let listed: BTreeSet<u64> = keys.iter().filter_map(|k| parse_blob_key(k)).collect();
-                let mut known = self.known.lock().unwrap();
-                known.blobs.retain(|n, _| listed.contains(n));
-                let missing: Vec<u64> = (listed.iter())
-                    .filter(|n| !known.blobs.contains_key(n))
-                    .copied()
-                    .collect();
-                known.unknown = missing.into_iter().collect();
-            }
-            Ok(keys)
-        })
-    }
-    fn unfenced_blobs(&self) -> bool {
-        self.inner.unfenced_blobs()
+        self.inner.keys()
     }
 }

@@ -6,7 +6,7 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{ROOT_KEY, Result, StateOptions, kv::KvStore, simulation::*};
+use state::{HEAD_KEY, Result, StateOptions, kv::KvStore, simulation::*};
 use std::{
     pin::pin,
     sync::Arc,
@@ -14,17 +14,19 @@ use std::{
 };
 use support::*;
 
-/// Chunks rebase often, garbage goes at once, and large records go to blobs.
+/// Chunks rebase often, checkpoints come every other flush, and large records
+/// go to blobs.
 fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
             chunk_pages: 2,
             rebase_ratio: 0.2,
-            garbage_after: 1,
+            checkpoint_entries: 2,
             inline_record_bytes: 200,
             ..StateOptions::default()
         },
         cache,
+        packs: None,
     }
 }
 
@@ -100,6 +102,14 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 }
                 let case = format!("cached {cached}, crash {crash}, dropped after {polls} polls");
                 assert!(!state.is_usable(), "{case}");
+                if receipt.is_flushed() {
+                    // Dropped while it collected garbage, after it landed.
+                    drop(session);
+                    let reopened = Session::open(store.clone(), options(cache)).await?;
+                    assert_eq!(new.differs(&reopened).await?, None, "{case}");
+                    assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
+                    continue;
+                }
                 assert!(
                     !receipt.is_flushed() && !receipt.is_discarded(),
                     "{case}: an unknown outcome settles the receipt neither way"
@@ -107,9 +117,9 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 let error = state.mutation().flush().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
-                // The flush lands with its root; a crash takes it back, as
+                // The flush lands with its head; a crash takes it back, as
                 // no sync completed.
-                let rooted = memory.unsynced().iter().any(|(key, _)| key == ROOT_KEY);
+                let rooted = memory.unsynced().iter().any(|(key, _)| key == HEAD_KEY);
                 if crash {
                     memory.crash();
                 }

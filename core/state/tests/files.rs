@@ -161,11 +161,11 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
     })
 }
 
-/// A flush without a cache gets the stored chunks it changes together: one
-/// round trip for the chunks, however many, then one for the flush. The open
-/// before it got the root, then the map's leaves (100 chunks, two levels).
+/// A flush without a cache gets nothing: the open before it got the head,
+/// then, for the map's leaves (100 chunks, two levels), the whole tail, in
+/// one round trip; the flush is one more.
 #[test]
-fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
+fn a_cold_flush_gets_nothing_the_open_fetched_the_tail() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let state = State::open(Arc::new(memory.clone())).await?;
@@ -185,7 +185,7 @@ fn a_cold_flush_gets_the_chunks_it_changes_together() -> Result<()> {
             mutation.write(&file, n, Some(page(2)))?;
         }
         mutation.flush().await?;
-        assert_eq!(store.round_trips(), 2);
+        assert_eq!(store.round_trips(), 1);
         assert_eq!(byte(&file, 37).await?, Some(2));
         Ok(())
     })

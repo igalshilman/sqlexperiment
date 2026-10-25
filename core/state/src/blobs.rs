@@ -1,43 +1,29 @@
-//! The root in one store, the blobs in another: Restate's state keeps the
-//! root, the commit point, which Restate fences, and the claim; an object
-//! store such as S3 keeps the blobs (and the sweep's list of dead ones).
-//!
-//! [`SplitStore`] is a [`KvStore`] over the two. It queues every write in
-//! memory, and its sync writes them in order, each write to the root's
-//! store a barrier: the blobs issued before it, in parallel, then it; then a
-//! sync of the root's store. A crash may keep any of the blobs, but never a
-//! root without the blobs it names: what the state needs from the order.
-//!
-//! Its blobs are not fenced ([`KvStore::unfenced_blobs`]): an earlier
-//! attempt that Restate has fenced from the root may still be putting them.
-//! So the state claims its blob numbers in Restate, and syncs, before it
-//! puts any: no two attempts ever put the same key.
+//! Where checkpoints' packs are: a [`BlobStore`], S3 through
+//! [`ObjectStoreBlobs`] (the feature `object-store`), or Restate's state
+//! itself ([`KvBlobs`], the default).
 //!
 //! ```rust,ignore
-//! let blobs = ObjectStoreBlobs::new(s3, "objects/42"); // the feature `object-store`
-//! let state = State::open(Arc::new(SplitStore::new(restate, Arc::new(blobs)))).await?;
+//! let packs = ObjectStoreBlobs::new(s3, "objects/42"); // the feature `object-store`
+//! let state = State::open(restate).checkpoints(Arc::new(packs)).await?;
 //! ```
 //!
-//! What no root names any more, a sweep deletes
-//! ([`crate::State::collect_garbage`]): any process that reads Restate's
-//! root and lists the blob store can run it, beside the owner.
+//! A pack is put once, under a name no other put uses, read in ranges, and
+//! deleted once no checkpoint needs it ([`crate::State::collect_garbage`]):
+//! a store needs no conditional put, and no fencing.
 use crate::kv::KvStore;
-use crate::store::{CLAIM_KEY, ROOT_KEY};
-use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, future::BoxFuture, lock::Mutex as AsyncMutex, stream};
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
+use bytes::{Bytes, BytesMut};
+use futures::future::{BoxFuture, try_join_all};
+use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 
-/// Requests a sync keeps in flight to the blob store.
-const PARALLEL: usize = 32;
-
-/// A store of blobs, each durable once its request returns: S3, say,
-/// through the feature `object-store` ([`ObjectStoreBlobs`]).
+/// A store of blobs, each durable once its put returns: S3, say, through
+/// the feature `object-store` ([`ObjectStoreBlobs`]).
 pub trait BlobStore: Send + Sync {
-    /// The value of `key`; `None` if absent.
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>>;
+    /// Bytes `range` of the value of `key`; `None` if absent.
+    fn get_range<'a>(
+        &'a self,
+        key: &'a str,
+        range: Range<u64>,
+    ) -> BoxFuture<'a, io::Result<Option<Bytes>>>;
     /// Store `value` at `key`.
     fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>>;
     /// Remove `key`; a missing key succeeds.
@@ -46,125 +32,103 @@ pub trait BlobStore: Send + Sync {
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>>;
 }
 
-/// A [`KvStore`] that keeps the root and the claim in `root`, and the rest
-/// in `blobs`: see the module documentation.
-pub struct SplitStore {
-    root: Arc<dyn KvStore>,
-    blobs: Arc<dyn BlobStore>,
-    /// The writes issued and not yet synced, in order; reads see them.
-    queued: Mutex<Vec<(String, Option<Bytes>)>>,
-    /// One sync at a time.
-    syncing: AsyncMutex<()>,
+/// Where [`KvBlobs`] keeps its blobs' parts.
+pub(crate) const KV_PREFIX: &str = "v18/pack/";
+/// Bytes of a part of a blob in [`KvBlobs`]: a range read gets the parts it
+/// overlaps.
+const KV_PART: u64 = 64 << 10;
+
+/// Blobs in a [`KvStore`] (Restate's state, beside the head and the tail),
+/// each in parts of 64 KiB: `v18/pack/<key>/<part>`. A put syncs.
+pub struct KvBlobs {
+    store: Arc<dyn KvStore>,
 }
 
-/// Whether `key` lives in the root's store.
-fn in_root(key: &str) -> bool {
-    key == ROOT_KEY || key == CLAIM_KEY
-}
-
-impl SplitStore {
-    pub fn new(root: Arc<dyn KvStore>, blobs: Arc<dyn BlobStore>) -> Self {
-        Self {
-            root,
-            blobs,
-            queued: Mutex::default(),
-            syncing: AsyncMutex::new(()),
-        }
+impl KvBlobs {
+    pub fn new(store: Arc<dyn KvStore>) -> Self {
+        Self { store }
     }
 
-    fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
-        self.queued.lock().unwrap().push((key.to_owned(), value));
-        Ok(())
+    fn part(key: &str, part: u64) -> String {
+        format!("{KV_PREFIX}{key}/{part}")
     }
 
-    /// Write `blobs` in parallel, each durable when this returns.
-    async fn write_blobs(&self, blobs: &[(String, Option<Bytes>)]) -> io::Result<()> {
-        let mut writes: Vec<BoxFuture<'_, io::Result<()>>> = Vec::with_capacity(blobs.len());
-        for (key, value) in blobs {
-            writes.push(match value {
-                Some(value) => self.blobs.put(key, value.clone()),
-                None => self.blobs.delete(key),
-            });
-        }
-        stream::iter(writes)
-            .buffer_unordered(PARALLEL)
-            .try_collect()
-            .await
+    /// The parts' keys of every blob under `prefix`.
+    async fn parts(&self, prefix: &str) -> io::Result<Vec<String>> {
+        let ours = format!("{KV_PREFIX}{prefix}");
+        let keys = self.store.keys().await?;
+        Ok(keys
+            .into_iter()
+            .filter(|key| key.starts_with(&ours))
+            .collect())
     }
 }
 
-impl KvStore for SplitStore {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+impl BlobStore for KvBlobs {
+    fn get_range<'a>(
+        &'a self,
+        key: &'a str,
+        range: Range<u64>,
+    ) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
-            let queued = (self.queued.lock().unwrap().iter().rev())
-                .find(|(queued, _)| queued == key)
-                .map(|(_, value)| value.clone());
-            match queued {
-                Some(value) => Ok(value),
-                None if in_root(key) => self.root.get(key).await,
-                None => self.blobs.get(key).await,
+            if range.is_empty() {
+                return Ok(Some(Bytes::new()));
             }
-        })
-    }
-
-    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
-        self.queue(key, Some(value))
-    }
-
-    fn delete(&self, key: &str) -> io::Result<()> {
-        self.queue(key, None)
-    }
-
-    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            let _syncing = self.syncing.lock().await;
-            let writes = self.queued.lock().unwrap().clone();
-            let synced = async {
-                let mut blobs = Vec::new();
-                for (key, value) in &writes {
-                    if !in_root(key) {
-                        blobs.push((key.clone(), value.clone()));
-                        continue;
-                    }
-                    // A root goes only after the blobs issued before it.
-                    self.write_blobs(&std::mem::take(&mut blobs)).await?;
-                    match value {
-                        Some(value) => self.root.put(key, value.clone())?,
-                        None => self.root.delete(key)?,
-                    }
-                }
-                self.write_blobs(&blobs).await?;
-                self.root.sync().await
-            }
-            .await;
-            // Synced or failed, they are no longer queued: what failed has an
-            // unknown outcome, which the next read learns from the stores.
-            self.queued.lock().unwrap().drain(..writes.len());
-            synced
-        })
-    }
-
-    /// The blob store's keys, and those queued for it: a sweep needs only
-    /// the blobs, so the root store's are left out (no round trip to it).
-    fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
-        Box::pin(async move {
-            let mut keys = self.blobs.list("").await?;
-            for (key, value) in self.queued.lock().unwrap().iter() {
-                if !in_root(key) {
-                    match value {
-                        Some(_) => keys.push(key.clone()),
-                        None => keys.retain(|listed| listed != key),
-                    }
+            let parts = range.start / KV_PART..range.end.div_ceil(KV_PART);
+            let first = parts.start;
+            let got = try_join_all(parts.map(|part| {
+                let key = Self::part(key, part);
+                async move { self.store.get(&key).await }
+            }))
+            .await?;
+            let mut out = BytesMut::new();
+            for part in got {
+                match part {
+                    Some(part) => out.extend_from_slice(&part),
+                    None => return Ok(None),
                 }
             }
-            keys.sort();
-            keys.dedup();
-            Ok(keys)
+            let start = (range.start - first * KV_PART) as usize;
+            let end = start + (range.end - range.start) as usize;
+            if end > out.len() {
+                return Err(io::Error::other(format!("{key} is shorter than {range:?}")));
+            }
+            Ok(Some(out.freeze().slice(start..end)))
         })
     }
 
-    fn unfenced_blobs(&self) -> bool {
-        true
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            for (part, at) in (0..value.len() as u64)
+                .step_by(KV_PART as usize)
+                .enumerate()
+            {
+                let end = (at + KV_PART).min(value.len() as u64);
+                let slice = value.slice(at as usize..end as usize);
+                self.store.put(&Self::part(key, part as u64), slice)?;
+            }
+            self.store.sync().await
+        })
+    }
+
+    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            for part in self.parts(&format!("{key}/")).await? {
+                self.store.delete(&part)?;
+            }
+            self.store.sync().await
+        })
+    }
+
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        Box::pin(async move {
+            let keys: BTreeSet<String> = (self.parts(prefix).await?.iter())
+                .filter_map(|part| {
+                    Some(part.strip_prefix(KV_PREFIX)?.rsplit_once('/')?.0.to_owned())
+                })
+                .collect();
+            Ok(keys.into_iter().collect())
+        })
     }
 }
 
@@ -177,7 +141,7 @@ mod object {
     use bytes::Bytes;
     use futures::{TryStreamExt, future::BoxFuture};
     use object_store::{Error, ObjectStore, ObjectStoreExt, path::Path};
-    use std::{io, sync::Arc};
+    use std::{io, ops::Range, sync::Arc};
 
     /// A [`BlobStore`] in an object store, under a prefix of its own (one per
     /// namespace: the object's key, say): S3 through `object_store`'s
@@ -202,10 +166,14 @@ mod object {
     }
 
     impl BlobStore for ObjectStoreBlobs {
-        fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        fn get_range<'a>(
+            &'a self,
+            key: &'a str,
+            range: Range<u64>,
+        ) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
             Box::pin(async move {
-                match self.store.get(&self.path(key)).await {
-                    Ok(found) => Ok(Some(found.bytes().await?)),
+                match self.store.get_range(&self.path(key), range).await {
+                    Ok(bytes) => Ok(Some(bytes)),
                     Err(Error::NotFound { .. }) => Ok(None),
                     Err(error) => Err(error.into()),
                 }

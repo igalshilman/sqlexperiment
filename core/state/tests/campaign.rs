@@ -1,11 +1,15 @@
 //! A seeded random campaign over the public API: mutations of changes to several
-//! files (one with a base), records and logs, flushed with small chunks and random
-//! rebase ratios so that deltas, rebases and garbage deletion all happen,
-//! and random faults, cancellations, crashes and reopens by owners with and
-//! without a cache, every request checked by the protocol monitor. After
-//! each reopen the state reads as the model: every acknowledged flush, and
-//! an unacknowledged one wholly or not at all. Readers opened beside the
-//! owner read the state they opened while it flushes.
+//! files (one with a base), records and logs, flushed with small chunks, random
+//! rebase ratios and random checkpoint thresholds so that deltas, rebases,
+//! checkpoints, compactions and garbage collection all happen, and random
+//! faults, cancellations, crashes and reopens by owners with and without a
+//! cache, every request checked by the protocol monitor. Even seeds keep
+//! checkpoints in the store; odd ones in an S3 that fails as S3 does, its
+//! writes lost, done without a response, or landing late. After each reopen
+//! the state reads as the model: every acknowledged flush, and an
+//! unacknowledged one wholly or not at all. Readers opened beside the owner
+//! read the state they opened while it flushes, and at the end only what
+//! the head needs is stored.
 //!
 //! ```sh
 //! cargo test --features simulation --test campaign                  # a few seeds
@@ -67,9 +71,15 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
     if seeds().len() as u64 >= SEEDS {
         let t = &totals;
         assert!(
-            t.blobs > 0 && t.collected > 0 && t.sweeps > 0 && t.rebased > 0 && t.reads_beside > 0,
+            t.tail_entries > 0
+                && t.checkpoints > 0
+                && t.compacted > 0
+                && t.collected > 0
+                && t.rebased > 0
+                && t.reads_beside > 0,
             "{t:?}"
         );
+        assert!(t.s3_faults > 0 && t.landed_late > 0, "{t:?}");
         assert!(
             t.landed > 0 && t.lost > 0 && t.crashes > 0 && t.cancelled > 0,
             "{t:?}"
@@ -88,15 +98,21 @@ struct Totals {
     cancelled: usize,
     handovers: usize,
     requests_checked: usize,
-    /// Blobs put, and deleted as garbage; chunks rebased.
-    blobs: u64,
-    collected: u64,
+    /// Tail entries put; checkpoints adopted, packs they compacted, and
+    /// packs deleted as garbage; chunks rebased.
+    tail_entries: u64,
+    checkpoints: usize,
+    compacted: usize,
+    collected: usize,
     rebased: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
-    /// Sweeps by a flush, the owner or a worker beside it, faulty ones
+    /// Garbage collections by the owner or a worker beside it, faulty ones
     /// included.
-    sweeps: usize,
+    collections: usize,
+    /// S3 requests failed, and writes that landed late.
+    s3_faults: u64,
+    landed_late: u64,
 }
 
 impl Totals {
@@ -108,11 +124,15 @@ impl Totals {
         self.cancelled += run.cancelled;
         self.handovers += run.handovers;
         self.requests_checked += run.requests_checked;
-        self.blobs += run.blobs;
+        self.tail_entries += run.tail_entries;
+        self.checkpoints += run.checkpoints;
+        self.compacted += run.compacted;
         self.collected += run.collected;
         self.rebased += run.rebased;
         self.reads_beside += run.reads_beside;
-        self.sweeps += run.sweeps;
+        self.collections += run.collections;
+        self.s3_faults += run.s3_faults;
+        self.landed_late += run.landed_late;
     }
 }
 
@@ -148,11 +168,13 @@ struct World {
     /// The states a crash may go back to: the durable one, then each one
     /// read or flushed since the last sync.
     since_sync: Vec<Model>,
-    /// Flushes after the last root that named a blob before it goes: the
-    /// world's, as readers rely on it.
-    garbage_after: u64,
-    /// Readers beside the owner, and what they opened.
-    readers: Vec<(Session, Model)>,
+    /// Where checkpoints are, if not in the store: an S3, with faults.
+    packs: Option<MemoryBlobs>,
+    faults: Option<BlobFaults>,
+    /// Flushes that may have named a new checkpoint, so far.
+    adopted: usize,
+    /// Readers beside the owner, what they opened, and `adopted` then.
+    readers: Vec<(Session, Model, usize)>,
     totals: Totals,
 }
 
@@ -169,10 +191,18 @@ impl World {
                 rebase_ratio: rng.pick(&[0.0, 0.25, 1.0, 100.0]),
                 inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),
-                garbage_after: self.garbage_after,
-                sweep_every: rng.pick(&[0, 1, 3, 16]),
+                checkpoint_entries: rng.pick(&[0, 1, 2, 3, 8]),
+                checkpoint_bytes: rng.pick(&[0, 0, 2048, 1 << 20]),
             },
             cache,
+            packs: self.packs.clone(),
+        }
+    }
+
+    /// S3 fails at random while the owner flushes.
+    fn s3_faults(&self, on: bool) {
+        if let Some(packs) = &self.packs {
+            packs.faults(self.faults.filter(|_| on));
         }
     }
 
@@ -322,6 +352,12 @@ impl World {
             mutation = session.state.mutation();
             pending = self.model.clone();
         }
+        if self.rng.percent(20)
+            && let Some(packs) = &self.packs
+        {
+            packs.land_late();
+        }
+        self.s3_faults(true);
         let outcome = match self.rng.below(10) {
             0..=5 => mutation.flush().await,
             6..=7 => {
@@ -336,6 +372,7 @@ impl World {
                 // Never polled: nothing happened, and the mutation went with the
                 // future.
                 None => {
+                    self.s3_faults(false);
                     if !session.state.is_usable() {
                         return Err("a flush never polled ended the state".into());
                     }
@@ -343,6 +380,7 @@ impl World {
                 }
             },
         };
+        self.s3_faults(false);
         self.totals.flushes += 1;
         trace(|| {
             let outcome = if outcome.is_ok() {
@@ -352,9 +390,18 @@ impl World {
             };
             format!("flush: {outcome}")
         });
-        if let Ok(report) = &outcome {
-            self.totals.rebased += report.rebased;
-            self.totals.sweeps += usize::from(report.swept.is_some());
+        match &outcome {
+            Ok(report) => {
+                self.totals.rebased += report.rebased;
+                if let Some(checkpoint) = &report.checkpoint {
+                    self.adopted += 1;
+                    self.totals.checkpoints += 1;
+                    self.totals.compacted += checkpoint.compacted;
+                    self.totals.collected += checkpoint.deleted;
+                }
+            }
+            // It may have named one.
+            Err(_) => self.adopted += 1,
         }
         if outcome.is_ok() {
             // One that wrote syncs; an unchanged one writes nothing, and
@@ -363,9 +410,9 @@ impl World {
                 return Err("an acknowledged flush left writes unsynced".into());
             }
             self.observed(pending);
-            text(self.read_beside(session.state.version()).await)?;
+            text(self.read_beside().await)?;
             if self.rng.percent(25) {
-                session = self.sweep(session).await?;
+                session = self.collect(session).await?;
             }
             // The session goes on, or a new one (after a crash, perhaps)
             // reads exactly what was acknowledged.
@@ -402,18 +449,14 @@ impl World {
         Ok(session)
     }
 
-    /// After a flush by the owner, at `version`: each reader beside it reads
-    /// what it opened, until the owner's flushes may have deleted its blobs
-    /// (`garbage_after` versions on). Sometimes a new reader opens, on what
-    /// is durable: a reader sees only what the store holds.
-    async fn read_beside(&mut self, version: u64) -> Result<()> {
-        let grace = self.garbage_after;
+    /// After a flush by the owner: each reader beside it reads what it
+    /// opened, until the owner's second checkpoint since may have dropped
+    /// what it reads. Sometimes a new reader opens, on what is durable: a
+    /// reader sees only what the store holds.
+    async fn read_beside(&mut self) -> Result<()> {
         let mut kept = Vec::new();
-        for (reader, model) in std::mem::take(&mut self.readers) {
-            // A flush at the next version, or one at this version that did
-            // not land, deletes what died `grace` versions before it.
-            let opened = reader.state.version();
-            let may_be_gone = version >= opened + grace;
+        for (reader, model, opened) in std::mem::take(&mut self.readers) {
+            let may_be_gone = self.adopted >= opened + 2;
             match model.differs(&reader).await {
                 Ok(None) => self.totals.reads_beside += 1,
                 Ok(Some(differs)) => {
@@ -422,8 +465,8 @@ impl World {
                 Err(error) if may_be_gone && error.to_string().contains("is gone") => continue,
                 Err(error) => return Err(format!("a reader beside the owner: {error}").into()),
             }
-            if version < opened + 2 * grace + 4 {
-                kept.push((reader, model));
+            if self.adopted < opened + 4 {
+                kept.push((reader, model, opened));
             }
         }
         self.readers = kept;
@@ -432,27 +475,27 @@ impl World {
             let setup = Setup {
                 options: StateOptions::default(),
                 cache: cache.map(|owner| self.caches[owner].clone()),
+                packs: self.packs.clone(),
             };
             let reader = Session::reader(self.store.clone(), setup).await?;
-            self.readers.push((reader, self.model.clone()));
+            self.readers
+                .push((reader, self.model.clone(), self.adopted));
         }
         Ok(())
     }
 
-    /// A sweep after an acknowledged flush, by the owner's state or by a
-    /// worker beside it, sometimes with a fault. A failed sweep ends the
-    /// state that ran it: the owner's reopens. Returns the session that goes
-    /// on.
-    async fn sweep(&mut self, session: Session) -> std::result::Result<Session, String> {
+    /// A garbage collection after an acknowledged flush, by the owner's
+    /// state or by a worker beside it, sometimes with a fault. A failed one
+    /// ends the state that ran it: the owner's reopens. Returns the session
+    /// that goes on.
+    async fn collect(&mut self, session: Session) -> std::result::Result<Session, String> {
         let worker = match self.rng.percent(50) {
             true => None,
             false => {
                 let setup = Setup {
-                    options: StateOptions {
-                        garbage_after: self.garbage_after,
-                        ..StateOptions::default()
-                    },
+                    options: StateOptions::default(),
                     cache: None,
+                    packs: self.packs.clone(),
                 };
                 Some(text(Session::reader(self.store.clone(), setup).await)?)
             }
@@ -466,7 +509,9 @@ impl World {
             6..=8 => {
                 let failpoint = self.failpoint();
                 let _signal = self.store.arm(failpoint);
+                self.s3_faults(true);
                 let swept = state.collect_garbage().await;
+                self.s3_faults(false);
                 self.store.disarm();
                 (true, swept)
             }
@@ -490,17 +535,20 @@ impl World {
                 }
             }
         };
-        self.totals.sweeps += 1;
+        self.totals.collections += 1;
         trace(|| {
             let by = if worker.is_some() {
                 "a worker"
             } else {
                 "the owner"
             };
-            format!("sweep by {by}: {swept:?}")
+            format!("collection by {by}: {swept:?}")
         });
         let error = match swept {
-            Ok(_) => return Ok(session),
+            Ok(deleted) => {
+                self.totals.collected += deleted;
+                return Ok(session);
+            }
             Err(error)
                 if faulty
                     && ["injected", "cancelled"]
@@ -509,10 +557,12 @@ impl World {
             {
                 error
             }
-            Err(error) => return Err(format!("sweep: {error}")),
+            Err(error) => return Err(format!("collection: {error}")),
         };
         if state.is_usable() {
-            return Err(format!("a failed sweep left the state usable: {error}"));
+            return Err(format!(
+                "a failed collection left the state usable: {error}"
+            ));
         }
         if worker.is_some() {
             // The worker's requests settle, in its own process.
@@ -527,49 +577,56 @@ impl World {
         self.reopen(&candidates).await
     }
 
-    /// Sweep everything dead, as a fresh owner that keeps garbage a single
-    /// version: what was dead at one sweep, the next one, a version on,
-    /// deletes.
+    /// Collect all garbage, as a fresh owner that checkpoints at every
+    /// flush, once every write sent to S3 landed: then only the packs the
+    /// head needs are stored.
     async fn collect_all(&mut self) -> std::result::Result<(), String> {
+        if let Some(packs) = &self.packs {
+            packs.land_late();
+        }
         let setup = Setup {
             options: StateOptions {
-                garbage_after: 1,
-                sweep_every: 0,
+                checkpoint_entries: 1,
                 ..StateOptions::default()
             },
             cache: None,
+            packs: self.packs.clone(),
         };
         let session = text(Session::open(self.store.clone(), setup).await)?;
-        let mut swept = Vec::new();
         for tick in 0..3 {
-            swept.push(text(session.state.collect_garbage().await)?);
             let ops = [Op::Set("progress", format!("tick {tick}").into())];
             text(session.flush(&ops).await)?;
         }
-        if swept[2].waiting || swept[2].deleted != swept[1].dead {
-            return Err(format!("a sweep left garbage: {swept:#?}"));
+        let needed = text(session.state.needed_packs().await)?;
+        let stored: std::collections::BTreeSet<String> = match &self.packs {
+            Some(packs) => packs.keys().into_iter().collect(),
+            None => (self.memory.keys().iter())
+                .filter_map(|key| Some(key.strip_prefix("v18/pack/")?.rsplit_once('/')?.0.into()))
+                .collect(),
+        };
+        if stored != needed {
+            return Err(format!("garbage left: {stored:#?}, needed {needed:#?}"));
         }
         Ok(())
     }
 
-    /// A random failpoint, at any request a flush or a sweep makes: of the
-    /// claim, the blobs, the root, the sweep, or the listing. It may match
-    /// nothing.
+    /// A random failpoint, at any request to the store a flush or a garbage
+    /// collection makes: of the head, the tail, the packs kept there, or the
+    /// listing. It may match nothing.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
         let (operation, key_prefix) = rng.pick(&[
             (Operation::Put, ""),
-            (Operation::Put, "v17/blob/"),
-            (Operation::Put, "v17/root"),
-            (Operation::Put, "v17/claim"),
-            (Operation::Put, "v17/sweep"),
+            (Operation::Put, "v18/tail/"),
+            (Operation::Put, "v18/head"),
+            (Operation::Put, "v18/pack/"),
             (Operation::Delete, ""),
-            (Operation::Delete, "v17/blob/"),
-            (Operation::Delete, "v17/sweep"),
+            (Operation::Delete, "v18/tail/"),
+            (Operation::Delete, "v18/pack/"),
             (Operation::Get, ""),
-            (Operation::Get, "v17/blob/"),
-            (Operation::Get, "v17/root"),
-            (Operation::Get, "v17/sweep"),
+            (Operation::Get, "v18/tail/"),
+            (Operation::Get, "v18/head"),
+            (Operation::Get, "v18/pack/"),
             (Operation::Sync, ""),
             (Operation::Sync, ""),
             (Operation::Keys, ""),
@@ -636,15 +693,19 @@ fn text<T>(result: Result<T>) -> std::result::Result<T, String> {
 
 async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let mut rng = Rng::new(seed);
-    // Odd seeds leave blobs unfenced, as in S3 beside Restate: the owner
-    // claims its numbers, and no reopen after a crash or a fault may put a
-    // blob number twice.
-    let memory = match seed % 2 {
-        1 => MemoryKv::unfenced(),
-        _ => MemoryKv::default(),
+    // Odd seeds keep checkpoints in S3, which fails one request in eight.
+    let packs = (seed % 2 == 1).then(MemoryBlobs::default);
+    let faults = BlobFaults {
+        one_in: 8,
+        seed: rng.below(u64::MAX),
     };
+    let memory = MemoryKv::default();
     let fault = FaultKv::new(memory.clone(), rng.below(3));
-    let store = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
+    let mut monitor = MonitorKv::new(fault);
+    if let Some(packs) = &packs {
+        monitor = monitor.packs(packs);
+    }
+    let store = Arc::new(monitor.with_base("vm", golden()));
     let caches = [new_owner(&mut rng), new_owner(&mut rng)];
     let mut world = World {
         rng,
@@ -654,11 +715,12 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
         owner: Some(0),
         model: Model::default(),
         since_sync: vec![Model::default()],
-        garbage_after: 0,
+        packs,
+        faults: Some(faults),
+        adopted: 0,
         readers: Vec::new(),
         totals: Totals::default(),
     };
-    world.garbage_after = world.rng.pick(&[1, 2, 4, 16]);
     let mut session = world.reopen(&[Model::default()]).await?;
     for step in 0..STEPS {
         session = (world.step(session).await).map_err(|e| format!("step {step}: {e}"))?;
@@ -678,7 +740,10 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
     world.violations()?;
     let stats = world.memory.stats();
     world.totals.requests_checked = world.store.checked();
-    world.totals.blobs = stats.kind("blob").puts;
-    world.totals.collected = stats.kind("blob").deletes;
+    world.totals.tail_entries = stats.kind("tail").puts;
+    if let Some(packs) = &world.packs {
+        world.totals.s3_faults = packs.failed();
+        world.totals.landed_late = packs.landed_late();
+    }
     Ok(world.totals)
 }

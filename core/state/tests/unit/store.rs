@@ -104,21 +104,3 @@ fn a_frame_of_noise_is_not_a_root() {
         assert!(Root::decode(&bytes).is_err(), "{body:?}");
     }
 }
-
-#[test]
-fn a_sweep_and_a_claim_decode_as_encoded() {
-    let sweep = Sweep {
-        database: 7,
-        marked: 40,
-        dead: BTreeSet::from([0, 3, 900, 1 << 40]),
-    };
-    assert_eq!(Sweep::decode(&sweep.encode()).unwrap(), sweep);
-    let empty = Sweep::default();
-    assert_eq!(Sweep::decode(&empty.encode()).unwrap(), empty);
-    let bytes = sweep.encode();
-    for len in 0..bytes.len() {
-        assert!(Sweep::decode(&bytes[..len]).is_err(), "truncated to {len}");
-    }
-    assert_eq!(decode_claim(&encode_claim(4096)).unwrap(), 4096);
-    assert!(decode_claim(&encode_claim(4096)[..4]).is_err());
-}

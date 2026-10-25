@@ -8,12 +8,13 @@
 //! What lands later waits for [`MemoryBlobs::land_late`].
 use super::yield_now;
 use crate::blobs::BlobStore;
-use crate::store::BLOB_PREFIX;
+use crate::tail::PACK_PREFIX;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
     collections::BTreeMap,
     io,
+    ops::Range,
     sync::{Arc, Mutex},
 };
 
@@ -51,6 +52,8 @@ type Write = (String, Option<Bytes>);
 struct Inner {
     values: BTreeMap<String, Bytes>,
     puts: u64,
+    gets: u64,
+    lists: u64,
     /// Puts of a blob key that held a value.
     overwrites: u64,
     /// Puts left to accept before the store fails every put.
@@ -84,8 +87,8 @@ impl Inner {
         match value {
             Some(value) => {
                 self.puts += 1;
-                let blob = key.starts_with(BLOB_PREFIX);
-                if self.values.insert(key, value).is_some() && blob {
+                let pack = key.starts_with(PACK_PREFIX);
+                if self.values.insert(key, value).is_some() && pack {
                     self.overwrites += 1;
                 }
             }
@@ -115,6 +118,15 @@ fn injected(what: &str, key: &str) -> io::Error {
 }
 
 impl MemoryBlobs {
+    /// An independent copy of what is stored, without the faults or what is
+    /// in flight: for crash simulations.
+    pub fn fork(&self) -> Self {
+        let values = self.inner.lock().unwrap().values.clone();
+        let fork = Self::default();
+        fork.inner.lock().unwrap().values = values;
+        fork
+    }
+
     pub fn keys(&self) -> Vec<String> {
         self.inner.lock().unwrap().values.keys().cloned().collect()
     }
@@ -127,13 +139,30 @@ impl MemoryBlobs {
         self.len() == 0
     }
 
+    /// Bytes `range` of `key`, as stored: no request, so no fault.
+    pub fn peek(&self, key: &str, range: Range<u64>) -> Option<Bytes> {
+        let inner = self.inner.lock().unwrap();
+        let value = inner.values.get(key)?;
+        let range = range.start as usize..range.end as usize;
+        (range.end <= value.len()).then(|| value.slice(range))
+    }
+
     /// Puts that stored a value, late ones included.
     pub fn puts(&self) -> u64 {
         self.inner.lock().unwrap().puts
     }
 
-    /// Puts of a blob key that held a value: what no two attempts may do.
-    /// (The sweep's key is put over at each sweep.)
+    /// Gets (of a range) asked, failed ones included.
+    pub fn gets(&self) -> u64 {
+        self.inner.lock().unwrap().gets
+    }
+
+    /// Listings asked, failed ones included.
+    pub fn lists(&self) -> u64 {
+        self.inner.lock().unwrap().lists
+    }
+
+    /// Puts of a pack's key that held a value: what no two attempts may do.
     pub fn overwrites(&self) -> u64 {
         self.inner.lock().unwrap().overwrites
     }
@@ -213,13 +242,25 @@ impl MemoryBlobs {
 }
 
 impl BlobStore for MemoryBlobs {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+    fn get_range<'a>(
+        &'a self,
+        key: &'a str,
+        range: Range<u64>,
+    ) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             yield_now().await;
             let mut inner = self.inner.lock().unwrap();
-            match inner.fault() {
-                Some(_) => Err(injected("get", key)),
-                None => Ok(inner.values.get(key).cloned()),
+            inner.gets += 1;
+            if inner.fault().is_some() {
+                return Err(injected("get", key));
+            }
+            let Some(value) = inner.values.get(key) else {
+                return Ok(None);
+            };
+            let range = range.start as usize..range.end as usize;
+            match range.end <= value.len() {
+                true => Ok(Some(value.slice(range))),
+                false => Err(io::Error::other(format!("{key} is shorter than {range:?}"))),
             }
         })
     }
@@ -236,6 +277,7 @@ impl BlobStore for MemoryBlobs {
         Box::pin(async move {
             yield_now().await;
             let mut inner = self.inner.lock().unwrap();
+            inner.lists += 1;
             if inner.fault().is_some() {
                 return Err(injected("list", prefix));
             }

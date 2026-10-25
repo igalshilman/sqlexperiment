@@ -63,9 +63,6 @@ impl<S: KvStore> KvStore for LatencyKv<S> {
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         self.timed(KvStore::keys(&self.inner))
     }
-    fn unfenced_blobs(&self) -> bool {
-        self.inner.unfenced_blobs()
-    }
 }
 
 #[cfg(test)]

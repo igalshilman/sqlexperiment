@@ -1,9 +1,11 @@
 //! In-memory model of a Restate object's state, as [`crate::kv`] describes
 //! it, with exact logical traffic counters.
 use crate::{
+    blobs::KV_PREFIX,
     kv::KvStore,
     simulation::yield_now,
-    store::{BLOB_PREFIX, CLAIM_KEY, ROOT_KEY, Root, SWEEP_KEY},
+    store::Root,
+    tail::{HEAD_KEY, Head, TAIL_PREFIX, read_part},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -30,17 +32,15 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `root`, `blob`, `claim`,
-/// `sweep` or `other`.
+/// Class of a key, used to split traffic counters: `head`, `tail`, `pack`
+/// (a part of a checkpoint's pack, kept in the store) or `other`.
 pub fn object_kind(key: &str) -> &'static str {
-    if key == ROOT_KEY {
-        "root"
-    } else if key == CLAIM_KEY {
-        "claim"
-    } else if key == SWEEP_KEY {
-        "sweep"
-    } else if key.starts_with(BLOB_PREFIX) {
-        "blob"
+    if key == HEAD_KEY {
+        "head"
+    } else if key.starts_with(TAIL_PREFIX) {
+        "tail"
+    } else if key.starts_with(KV_PREFIX) {
+        "pack"
     } else {
         "other"
     }
@@ -80,8 +80,6 @@ struct Inner {
     /// The writes issued since the last sync, in order.
     unsynced: Vec<(String, Option<Bytes>)>,
     stats: Stats,
-    /// Blob keys ever put, when its blobs are unfenced ([`MemoryKv::unfenced`]).
-    put_once: Option<BTreeSet<String>>,
 }
 
 /// Memory simulator of a store that keeps writes in issue order: reads see
@@ -93,17 +91,7 @@ pub struct MemoryKv {
 }
 
 impl MemoryKv {
-    /// A store whose blobs are not fenced ([`KvStore::unfenced_blobs`]),
-    /// like blobs in S3 beside Restate, so the state claims its numbers: a
-    /// put of a blob key ever put before panics, as two attempts would.
-    pub fn unfenced() -> Self {
-        let store = Self::default();
-        store.inner.lock().unwrap().put_once = Some(BTreeSet::new());
-        store
-    }
-
-    /// Replace the value durably at `key`, as a fault of the disk would:
-    /// no request, so no check of a blob put twice.
+    /// Replace the value durably at `key`, as a fault of the disk would.
     pub fn corrupt(&self, key: &str, value: Bytes) {
         let mut inner = self.inner.lock().unwrap();
         inner.values.insert(key.to_owned(), value.clone());
@@ -119,7 +107,6 @@ impl MemoryKv {
                 durable: inner.durable.clone(),
                 unsynced: inner.unsynced.clone(),
                 stats: Stats::default(),
-                put_once: inner.put_once.clone(),
             })),
         }
     }
@@ -164,10 +151,12 @@ impl MemoryKv {
     /// zeroed: two stores that hold the same state compare equal.
     pub fn contents(&self) -> BTreeMap<String, Bytes> {
         let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
-        if let Some(root) = contents.get_mut(ROOT_KEY) {
-            let mut decoded = Root::decode(root).expect("a stored root decodes");
-            decoded.id = 0;
-            *root = decoded.encode();
+        if let Some(bytes) = contents.get_mut(HEAD_KEY) {
+            let mut head = Head::decode(bytes).expect("a stored head decodes");
+            let mut root = Root::decode(&head.root).expect("a stored root decodes");
+            root.id = 0;
+            head.root = root.encode();
+            *bytes = head.encode();
         }
         contents
     }
@@ -192,15 +181,26 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
-    /// Number of stored blobs.
-    pub fn blob_count(&self) -> usize {
-        let prefix = BLOB_PREFIX;
+    /// The blobs of the tail entries stored.
+    pub fn tail_blobs(&self) -> BTreeSet<u64> {
+        let inner = self.inner.lock().unwrap();
+        let mut blobs = std::collections::HashMap::new();
+        for (key, value) in &inner.values {
+            if key.starts_with(TAIL_PREFIX) {
+                read_part(value, &mut blobs).expect("a stored tail entry decodes");
+            }
+        }
+        blobs.into_keys().collect()
+    }
+
+    /// Number of keys of the kind `kind` ([`object_kind`]).
+    pub fn count(&self, kind: &str) -> usize {
         self.inner
             .lock()
             .unwrap()
             .values
             .keys()
-            .filter(|k| k.starts_with(prefix))
+            .filter(|key| object_kind(key) == kind)
             .count()
     }
 }
@@ -234,12 +234,6 @@ impl KvStore for MemoryKv {
     }
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(put) = &mut inner.put_once
-            && key.starts_with(BLOB_PREFIX)
-            && !put.insert(key.to_owned())
-        {
-            panic!("{key} put twice where blobs are unfenced");
-        }
         let bytes = value.len() as u64;
         inner.stats.puts += 1;
         inner.stats.bytes_written += bytes;
@@ -284,9 +278,6 @@ impl KvStore for MemoryKv {
             inner.stats.list_pages += keys.len().div_ceil(1000).max(1) as u64;
             Ok(keys)
         })
-    }
-    fn unfenced_blobs(&self) -> bool {
-        self.inner.lock().unwrap().put_once.is_some()
     }
 }
 

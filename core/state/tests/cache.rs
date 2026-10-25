@@ -9,16 +9,19 @@ use state::{Result, State, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-/// Small chunks, rebased often, and large records in blobs.
+/// Small chunks, rebased often, large records in blobs, and a checkpoint
+/// every other flush.
 fn options(cache: Option<&Namespace>) -> Setup {
     Setup {
         options: StateOptions {
             chunk_pages: 2,
             rebase_ratio: 0.1,
             inline_record_bytes: 256,
+            checkpoint_entries: 2,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
+        packs: None,
     }
 }
 
@@ -194,10 +197,11 @@ fn a_namespace_made_again_never_reads_the_old_databases_blobs() -> Result<()> {
     })
 }
 
-/// A reader beside the owner, which flushes meanwhile, and a worker that
-/// sweeps after each flush: the reader reads the state it opened, and never
-/// writes to the store; once a sweep deleted a blob it needs, a read of it
-/// fails, never reads another state.
+/// A reader beside the owner, which flushes and checkpoints meanwhile, and a
+/// worker that collects garbage after each flush: the reader reads the state
+/// it opened, and never writes to the store; once the owner's second
+/// checkpoint since dropped a blob it needs, a read of it fails, never reads
+/// another state.
 #[test]
 fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
     futures::executor::block_on(async {
@@ -206,7 +210,9 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
         let store: Arc<dyn KvStore> = Arc::new(memory.clone());
         let owner = fresh_namespace();
         let mut model = Model::default();
-        let grace = StateOptions::default().garbage_after;
+        // The owner's second checkpoint after the reader opened may come at
+        // its third flush.
+        let grace = 3;
         let (mut read, mut gone) = (0, 0);
         for round in 0..60 {
             let ops: Vec<Op> = (0..1 + rng.below(6))
@@ -219,11 +225,12 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                     ..StateOptions::default()
                 },
                 cache: rng.percent(50).then(|| owner.clone()),
+                packs: None,
             };
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();
             // Past the grace sometimes: then blobs it reads may be gone.
-            let flushes = rng.pick(&[0, 1, 3, grace - 1, grace + 4]);
+            let flushes = rng.pick(&[0, 1, grace - 1, grace, grace + 4]);
             for _ in 0..flushes {
                 // Pages the reader reads often, and anything else.
                 let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));

@@ -14,13 +14,6 @@
 //! So a write needs no acknowledgement for a later one to rely on it: if the
 //! later one survives, so does it. A value is atomic: no partial value is ever
 //! visible.
-//!
-//! A store may keep blobs where an earlier attempt of the owner, still
-//! running, can write too: S3 beside Restate, say ([`crate::blobs`]), where
-//! Restate fences the root but nothing fences the blobs. It says so
-//! ([`KvStore::unfenced_blobs`]), and the state then claims the numbers of
-//! its blobs, durably, before it puts any: no two attempts ever put the same
-//! blob key.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::io;
@@ -37,9 +30,9 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
-    /// Every key, stored or written since, as Restate's `getKeys`: what a
-    /// sweep ([`crate::State::collect_garbage`]) needs, which keeps the
-    /// blobs' and ignores the others. A store that cannot fails with
+    /// Every key, stored or written since, as Restate's `getKeys`: what
+    /// checkpoints kept here need ([`crate::blobs::KvBlobs`]), to delete the
+    /// packs no checkpoint needs. A store that cannot fails with
     /// [`io::ErrorKind::Unsupported`]; its garbage stays.
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async {
@@ -48,13 +41,5 @@ pub trait KvStore: Send + Sync {
                 "this store cannot list its keys",
             ))
         })
-    }
-    /// Whether an earlier attempt of the owner, fenced from the root, may
-    /// still put blobs: the blobs are elsewhere than the root, as in S3
-    /// beside Restate. The state then claims its blob numbers before it puts
-    /// any: it writes the claim and syncs, and only then puts the blobs.
-    /// A wrapper forwards it.
-    fn unfenced_blobs(&self) -> bool {
-        false
     }
 }

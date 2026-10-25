@@ -1,7 +1,7 @@
-//! Corrupted stored values: truncated, bit-flipped or garbage, at the root,
-//! the claim, the sweep's record or a blob. Open and reads fail or read what
-//! was flushed, never panic; and a sweep after them never deletes what the
-//! root names.
+//! Corrupted stored values: truncated, bit-flipped or garbage, at the head,
+//! a tail entry or a part of a pack. Open and reads fail or read what was
+//! flushed, never panic; and garbage collected after them never takes what
+//! the head needs.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -16,15 +16,15 @@ fn options() -> StateOptions {
         rebase_ratio: 0.5,
         inline_record_bytes: 200,
         prefetch_pages: 2,
+        checkpoint_entries: 2,
         ..StateOptions::default()
     }
 }
 
-/// A namespace with every kind of key: the root, the claim (its blobs are
-/// not fenced), the sweep's record, and blobs of chunks (bases and deltas)
-/// and of records.
+/// A namespace with every kind of key: the head, tail entries and packs,
+/// which hold blobs of chunks (bases and deltas), map nodes and records.
 async fn flushed() -> Result<(MemoryKv, Model)> {
-    let memory = MemoryKv::unfenced();
+    let memory = MemoryKv::default();
     let mut model = Model::default();
     let mut rng = Rng::new(0xbad);
     for _ in 0..5 {
@@ -56,7 +56,7 @@ fn corruptions(value: &[u8], rng: &mut Rng) -> Vec<(String, Vec<u8>)> {
     let garbage = 1 + rng.below(2 * len as u64 + 8) as usize;
     let garbage = rng.bytes(garbage);
     out.push(("garbage".into(), garbage));
-    // A short value (the claim) has a bit flipped in every byte.
+    // A short value has a bit flipped in every byte.
     let flips: Vec<usize> = match len <= 16 {
         true => (0..len).collect(),
         false => (0..12).map(|_| rng.below(len as u64) as usize).collect(),
@@ -78,11 +78,12 @@ enum Read {
 }
 
 /// Open the namespace and read everything, without a cache or with one;
-/// then sweep, and read again as a new owner: what the sweep left.
+/// then collect garbage, and read again as a new owner: what it left.
 async fn read(store: Arc<dyn KvStore>, model: &Model, cached: bool) -> (Read, Read) {
     let options = |cached: bool| Setup {
         options: options(),
         cache: cached.then(fresh_namespace),
+        packs: None,
     };
     let read = async |swept: bool| {
         let session = Session::open(store.clone(), options(cached && !swept)).await?;
@@ -107,7 +108,7 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
     futures::executor::block_on(async {
         let (memory, model) = flushed().await?;
         let keys = memory.keys();
-        for prefix in ["v17/root", "v17/claim", "v17/sweep", "v17/blob/"] {
+        for prefix in ["v18/head", "v18/tail/", "v18/pack/"] {
             assert!(
                 keys.iter().any(|key| key.starts_with(prefix)),
                 "{prefix}: {keys:?}"
@@ -127,9 +128,9 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
                     let Ok((read, swept)) = read.await else {
                         panic!("{case}: panicked");
                     };
-                    // A sweep deletes only what the root does not name.
+                    // Garbage is only what the head does not need.
                     if read == Read::AsFlushed && swept != Read::AsFlushed {
-                        panic!("{case}: read as flushed, then after a sweep {swept:?}");
+                        panic!("{case}: read as flushed, then after collecting {swept:?}");
                     }
                     // A bit flip may stay undetected: frames have a
                     // checksum, but not their headers.
