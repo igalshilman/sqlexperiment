@@ -659,6 +659,23 @@ pub async fn page_cache() -> anyhow::Result<PageCache> {
     Ok(PageCache::open(PageCacheConfig::new(64 << 20, 256 << 20)).await?)
 }
 
+/// Turn off transparent huge pages for this process. The SQL engine maps a
+/// 3 MiB buffer arena for each database it opens and asks for huge pages
+/// (`MADV_HUGEPAGE`): the first page it reads then waits for the kernel to
+/// zero a 2 MiB page, up to 15 ms on a virtual machine, at about one cold
+/// open in eight. Nothing else here asks for them.
+// TODO: drop once the engine opens without them (FUTURE.md).
+pub fn no_huge_pages() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a flag of the calling process, no memory passed.
+        if unsafe { libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Milliseconds since the epoch: a turn's logical time never runs backwards.
 fn now() -> u64 {
     SystemTime::now()

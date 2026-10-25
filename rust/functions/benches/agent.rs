@@ -49,6 +49,8 @@ fn main() -> Result<()> {
         println!("Use cargo bench --bench agent for optimized measurements");
         return Ok(());
     }
+    // As the server runs: see no_huge_pages.
+    functions::no_huge_pages()?;
     let source = include_str!("../../../examples-functions/coder.js");
     let runtime = Arc::new(Runtime::new()?);
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
