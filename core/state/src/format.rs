@@ -52,14 +52,17 @@ pub(crate) const MAX_NAMES: usize = 1 << 16;
 /// Largest version, far from overflow.
 const MAX_VERSION: u64 = 1 << 62;
 /// Largest decoded tail entry or manifest.
-const MAX_DECODED: usize = 1 << 30;
+pub(crate) const MAX_DECODED: usize = 1 << 30;
+
+fn too_large(what: &str, bytes: usize) -> io::Error {
+    io::Error::other(format!("{what} of {bytes} bytes exceeds {MAX_DECODED}"))
+}
 
 pub(crate) fn tail_key(version: u64, part: u32) -> String {
     format!("{TAIL_PREFIX}{version}/{part}")
 }
 
 /// The version and part a tail entry's key names.
-#[cfg(any(test, feature = "simulation"))]
 pub(crate) fn parse_tail_key(key: &str) -> Option<(u64, u32)> {
     let (version, part) = key.strip_prefix(TAIL_PREFIX)?.split_once('/')?;
     Some((version.parse().ok()?, part.parse().ok()?))
@@ -222,7 +225,8 @@ impl Checkpoint {
                     version: r.varint()?,
                     nonce: r.varint()?,
                 },
-                manifest: r.varint()?,
+                // Its compressed body, of at most what a decode takes.
+                manifest: r.bounded(MAX_DECODED as u64)?,
             })),
             _ => Err(r.invalid()),
         }
@@ -310,7 +314,10 @@ impl Head {
         let at = |c: Option<Checkpoint>| c.map_or(0, |c| c.version());
         let ordered = at(previous) <= at(checkpoint) && at(checkpoint) <= version;
         let kept = previous.is_none() || checkpoint.is_some();
-        if frame_pages == 0 || tail_first == 0 || version == 0 || !ordered || !kept {
+        // The tail kept starts past the previous checkpoint, which covers
+        // what went before it.
+        let tail = tail_first == at(previous) + 1;
+        if frame_pages == 0 || version == 0 || !ordered || !kept || !tail {
             return Err(invalid("head"));
         }
         Ok(Self {
@@ -369,8 +376,9 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// The entry, in parts of at most [`PART_BYTES`].
-    pub fn encode(&self) -> Vec<Bytes> {
+    /// The entry, in parts of at most [`PART_BYTES`]; an error past the
+    /// 1 GiB a decode takes.
+    pub fn encode(&self) -> io::Result<Vec<Bytes>> {
         let mut out = ENTRY_MAGIC.to_vec();
         put_varint(&mut out, self.records.len() as u64);
         for (name, value) in &self.records {
@@ -401,11 +409,14 @@ impl Entry {
                 put_bytes(&mut out, frame.as_deref().unwrap_or_default());
             }
         }
+        if out.len() > MAX_DECODED {
+            return Err(too_large("a tail entry", out.len()));
+        }
         let out = Bytes::from(out);
-        (0..out.len())
+        Ok((0..out.len())
             .step_by(PART_BYTES)
             .map(|at| out.slice(at..(at + PART_BYTES).min(out.len())))
-            .collect()
+            .collect())
     }
 
     /// The entry of `parts`, in order.
@@ -579,7 +590,8 @@ impl Manifest {
         self.locations().map(|at| at.pack).collect()
     }
 
-    pub fn encode(&self) -> Bytes {
+    /// The manifest; an error past the 1 GiB a decode takes.
+    pub fn encode(&self) -> io::Result<Bytes> {
         let packs: Vec<PackId> = self.sizes.keys().copied().collect();
         let index: HashMap<PackId, usize> =
             packs.iter().enumerate().map(|(i, &p)| (p, i)).collect();
@@ -645,10 +657,13 @@ impl Manifest {
                 location(&mut body, Some(at));
             }
         }
+        if body.len() > MAX_DECODED {
+            return Err(too_large("a manifest", body.len()));
+        }
         let mut out = MANIFEST_MAGIC.to_vec();
         zstd::compress(&body, &[], |frame| out.extend_from_slice(frame))
             .expect("compressing in memory");
-        out.into()
+        Ok(out.into())
     }
 
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
@@ -665,6 +680,7 @@ impl Manifest {
             manifest.sizes.insert(pack, r.varint()?);
             packs.push(pack);
         }
+        let sizes = manifest.sizes.clone();
         let mut end = 0u64;
         let mut location = |r: &mut Reading| -> io::Result<Option<Location>> {
             let Some(pack) = r.varint()?.checked_sub(1) else {
@@ -675,7 +691,10 @@ impl Manifest {
             let delta = (z >> 1) as i64 ^ -((z & 1) as i64);
             let offset = end.wrapping_add(delta as u64);
             let len = r.varint()?;
-            end = (offset.checked_add(len)).ok_or_else(|| r.invalid())?;
+            // Within its pack, whose size the manifest holds.
+            end = (offset.checked_add(len))
+                .filter(|&end| end <= sizes[&pack])
+                .ok_or_else(|| r.invalid())?;
             Ok(Some(Location { pack, offset, len }))
         };
         let mut value = |r: &mut Reading| -> io::Result<Value> {

@@ -266,6 +266,14 @@ struct Flushing<'a> {
     done: bool,
 }
 
+impl Flushing<'_> {
+    /// Refuse the flush before it wrote anything: the state goes on.
+    fn refuse<T>(&mut self, error: Box<dyn std::error::Error + Send + Sync>) -> Result<T> {
+        (self.returned, self.done) = (true, true);
+        Err(error)
+    }
+}
+
 impl Drop for Flushing<'_> {
     fn drop(&mut self) {
         self.shared.flushing.store(false, Ordering::SeqCst);
@@ -393,8 +401,7 @@ impl State {
     /// page, or a hole, reads as the base's page, and pages are compressed
     /// against it. A file made with a base opens only with that one again
     /// (by [`Base::id`]). [`Self::file`] opens it without its base: it then
-    /// reads nothing, and a flush may only make pages of it holes,
-    /// or cut its length.
+    /// reads nothing, and a flush may only empty it (cut its length to 0).
     pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
         let file = self.file(name)?;
         let mut snapshot = self.shared.snapshot.lock().unwrap();
@@ -784,18 +791,9 @@ impl Mutation {
     /// flush landed: its receipts say so.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
-        if shared.poisoned.load(Ordering::SeqCst) {
-            return Err(ENDED.into());
-        }
         if shared.reader.load(Ordering::SeqCst) {
             return Err("a reader writes nothing".into());
         }
-        let snapshot = shared.snapshot();
-        // What the writes checked as they were made still holds, unless
-        // another mutation flushed since: refused before anything is written.
-        snapshot
-            .check(&self.files, &self.records, &self.logs)
-            .await?;
         if shared.flushing.swap(true, Ordering::SeqCst) {
             return Err("a flush of this state is running".into());
         }
@@ -804,6 +802,20 @@ impl Mutation {
             returned: false,
             done: false,
         };
+        // Read once no other flush runs: one that ended before this one
+        // started is in the snapshot, so this one builds on it.
+        if shared.poisoned.load(Ordering::SeqCst) {
+            return running.refuse(ENDED.into());
+        }
+        let snapshot = shared.snapshot();
+        // What the writes checked as they were made still holds, unless
+        // another mutation flushed since: refused before anything is written.
+        if let Err(error) = (snapshot)
+            .check(&self.files, &self.records, &self.logs)
+            .await
+        {
+            return running.refuse(error.into());
+        }
         let mut files = std::mem::take(&mut self.files);
         let mut records = std::mem::take(&mut self.records);
         let mut logs = std::mem::take(&mut self.logs);
@@ -823,7 +835,10 @@ impl Mutation {
         running.returned = true;
         let (mut report, after) = result?;
         report.checkpoint_failed = failed;
-        *shared.snapshot.lock().unwrap() = Arc::new(after);
+        {
+            let mut current = shared.snapshot.lock().unwrap();
+            *current = Arc::new(after.keeping_bases(&current));
+        }
         running.done = true;
         for receipt in &self.receipts {
             receipt.0.store(FLUSHED, Ordering::SeqCst);

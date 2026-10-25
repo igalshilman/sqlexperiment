@@ -527,3 +527,72 @@ fn a_collection_lists_once_and_syncs_once() -> Result<()> {
         Ok(())
     })
 }
+
+/// With packs in Restate, a state of a few small records does not
+/// checkpoint at every flush, though its checkpoint holds less than one
+/// flush puts: the tail holds a frame's bytes (16 KiB) first.
+#[test]
+fn small_records_checkpoint_once_the_tail_holds_a_frame() -> Result<()> {
+    futures::executor::block_on(async {
+        let state = State::open(Arc::new(MemoryKv::default())).await?;
+        let effects = state.record("effects");
+        let mut checkpoints = Vec::new();
+        for n in 0..120u8 {
+            let mut mutation = state.mutation();
+            mutation.set(&effects, vec![n; 200].into())?;
+            if mutation.flush().await?.checkpoint.is_some() {
+                checkpoints.push(n);
+            }
+        }
+        // About 210 bytes a flush: the tail passes 16 KiB at the 79th.
+        assert_eq!(checkpoints.len(), 1, "{checkpoints:?}");
+        Ok(())
+    })
+}
+
+/// A mutation whose tail entry would pass the 1 GiB a decode takes is
+/// refused before anything is written: the state stays usable, and its
+/// next open reads it.
+#[test]
+fn a_mutation_past_a_gib_is_refused() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).await?;
+        let value = Bytes::from(vec![7; MAX_RECORD_BYTES]);
+        let mut mutation = state.mutation();
+        for n in 0..65 {
+            mutation.set(&state.record(&format!("r{n}")), value.clone())?;
+        }
+        let error = mutation.flush().await.unwrap_err().to_string();
+        assert!(error.contains("exceeds"), "{error}");
+        assert!(state.is_usable());
+        let mut mutation = state.mutation();
+        mutation.set(&state.record("r0"), value.clone())?;
+        mutation.flush().await?;
+        assert_eq!(State::open(store).await?.record("r0").get(), value);
+        Ok(())
+    })
+}
+
+/// A part of a tail entry no head names, which a crashed flush left past
+/// the parts its retry put, goes with a collection once a checkpoint
+/// covers its version.
+#[test]
+fn a_crashed_flushs_extra_tail_parts_are_collected() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = Arc::new(MemoryKv::default());
+        // The first flush's crashed attempt put more parts than it does.
+        memory.put("v20/tail/1/3", Bytes::from_static(b"stray"))?;
+        memory.sync().await?;
+        let state = State::open(memory.clone()).await?;
+        for n in 0..3u8 {
+            let mut mutation = state.mutation();
+            mutation.set(&state.record("n"), vec![n; 8].into())?;
+            mutation.checkpoint();
+            mutation.flush().await?;
+        }
+        let keys = memory.keys();
+        assert!(!keys.contains("v20/tail/1/3"), "{keys:?}");
+        Ok(())
+    })
+}
