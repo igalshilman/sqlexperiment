@@ -85,9 +85,8 @@ down stops checkpoints, not writes (up to a hard cap of tail).
 
 - **Open:** get the head; then, together, the checkpoint's manifest (one
   ranged GET from S3, cached) and the tail entries (one round trip of
-  gets). An owner whose cache remembers the head it wrote reads nothing
-  more: its overlay and checkpoint are parked, so a warm open is one
-  round trip, as now.
+  gets). An owner whose cache remembers the head reads less, or nothing
+  more (see [Cache](#cache)).
 - **Read:** a page in the overlay is materialized from its frames, in
   order, on its first read (a frame compressed against the previous image
   needs it: the checkpoint's page, read anyway); any other page is the
@@ -95,6 +94,47 @@ down stops checkpoints, not writes (up to a hard cap of tail).
   pack never changes).
 - **Readers** read the head, the checkpoint and the tail at open, and then
   only the checkpoint's packs.
+
+## Cache
+
+The process's `PageCache`, in memory with a disk tier, as now. Nothing
+depends on it for correctness: it only spares reads, and losing any of it
+makes a namespace colder. It keeps three things.
+
+1. **Immutable bytes**, shared by the process's namespaces:
+   - ranges of packs (a chunk, a map node, a large record) and checkpoints'
+     manifests, keyed by pack name and offset. A pack is never rewritten
+     and its name is unique, so there is nothing to invalidate, and two
+     attempts' blobs never share a key: no database id, no claims.
+   - tail entries, keyed by database id and version, once a head names
+     them (an entry no head names may be put over, and is never cached).
+
+   They spare S3's first-byte latency and its GETs, on reads and on
+   checkpoints (which rewrite the chunks the tail changed, from their
+   images in the last checkpoint), and Restate's gets of the tail.
+
+2. **The head this owner last read or wrote**, per namespace. The open gets
+   the head from Restate anyway; if it is the same, nothing changed since
+   this process last held the namespace, and what it parked is current. As
+   now, the namespace also remembers its last durable flush, so a state
+   refuses to flush over another's, and flushes with an unknown outcome, so
+   the next open syncs before it reads.
+3. **The open database, parked** between sessions, within the parked
+   budget: the overlay (the tail, materialized), the opened checkpoint (its
+   manifest and maps), and what the host parks beside them (SQL's engine).
+
+So an open is one of:
+
+| Open     | When                                               | Reads                                                                                        |
+| -------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Warm     | the head is the one cached, its database parked    | the head                                                                                     |
+| Lukewarm | the head is the one cached, its database evicted   | the head; the tail and the manifest from the cache, replayed                                 |
+| Cold     | another process, a restart, or another owner wrote | the head, the tail from Restate, the manifest and the pages from S3, each cached as it comes |
+
+The tail in Restate stays the only durable copy of what it holds until a
+checkpoint covers it; the cache holds copies, never the original. The
+overlay is bounded by the checkpoint thresholds, so a parked database
+weighs its engine and at most `checkpoint_bytes` of tail, materialized.
 
 ## Garbage
 
@@ -116,8 +156,8 @@ down stops checkpoints, not writes (up to a hard cap of tail).
   attempt's checkpoint, or a late upload, lands at a key no head names, and
   is deleted as garbage. Nothing in S3 is ever overwritten, so S3 needs no
   claims and no conditional puts.
-- **The cache keys blobs by their pack**, so two attempts' blobs of the same
-  number never meet.
+- **The cache keys blobs by their pack** ([Cache](#cache)), so two
+  attempts' blobs of the same number never meet.
 - **Crashes:** a crash before the head's sync loses the flush, as now; one
   after an upload and before the head leaves an unnamed pack, deleted at the
   next checkpoint.
