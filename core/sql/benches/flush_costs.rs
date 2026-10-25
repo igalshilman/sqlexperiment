@@ -387,7 +387,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "| {} | {label} | {} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.2} | {:.1} | {:.0} | {keys} | {} | {} | {} | {:.0} |",
+        "| {} | {label} | {} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.0} | {:.2} | {:.1} | {:.0} | {keys} | {} | {} | {} | {:.0} |",
         w.name,
         if cached { "yes" } else { "no" },
         rts as f64 / n,
@@ -395,6 +395,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         restate_written,
         s.kind("tail").bytes_written as f64 / n,
         s.kind("pack").bytes_written as f64 / n,
+        s.kind("manifest").bytes_written as f64 / n,
         s.deletes as f64 / n,
         s.gets as f64 / n,
         restate_stored as f64 / 1024.0,
@@ -414,9 +415,9 @@ fn main() -> Result<()> {
         println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     } else {
         println!(
-            "| Workload | Run | Cache | RT/flush | Puts/flush | Put B/flush | Tail B | Pack B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
+            "| Workload | Run | Cache | RT/flush | Puts/flush | Put B/flush | Tail B | Pack B | Manifest B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
         );
-        println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     }
     let only = std::env::var("WORKLOAD").ok();
     let flushes = std::env::var("FLUSHES").ok().and_then(|v| v.parse().ok());

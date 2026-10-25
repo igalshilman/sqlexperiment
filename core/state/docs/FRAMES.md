@@ -105,20 +105,25 @@ cell reads tail+checkpoints → the first frame packs (whole frames, 4
 pages) → frame packs as they are now.
 
 **Packs in Restate** (the default): bytes put to Restate per flush, tail
-entries, packs and heads together, and the gets a cold open makes.
+entries, packs, manifests and heads together, and the gets a cold open
+makes.
 
 | Workload        | Put B/flush          | Cold gets    |
 | --------------- | -------------------- | ------------ |
-| chat+effects    | 1907 → 2201 → 1942   | 7 → 5 → 35   |
-| small: update 1 | 1112 → 1786 → 557    | 7 → 6 → 19   |
-| 10k: update 1   | 1055 → 9322 → 644    | 12 → 6 → 6   |
-| 10k: update 10  | 4017 → 10693 → 2037  | 9 → 6 → 7    |
-| 10k: insert 1   | 2324 → 3449 → 1879   | 11 → 6 → 8   |
-| 100k: update 1  | 853 → 12965 → 633    | 60 → 6 → 6   |
-| 200k: update 1  | 1009 → 12444 → 667   | 62 → 6 → 8   |
-| 200k: update 10 | 3141 → 108279 → 1357 | 55 → 7 → 9   |
-| 1M: update 1    | 1983 → 13718 → 880   | 296 → 6 → 6  |
-| 1M: update 10   | 4360 → 127000 → 1664 | 1331 → 7 → 6 |
+| chat+effects    | 1907 → 2201 → 1938   | 7 → 5 → 35   |
+| small: update 1 | 1112 → 1786 → 554    | 7 → 6 → 19   |
+| 10k: update 1   | 1055 → 9322 → 638    | 12 → 6 → 6   |
+| 10k: update 10  | 4017 → 10693 → 2032  | 9 → 6 → 7    |
+| 10k: insert 1   | 2324 → 3449 → 1876   | 11 → 6 → 8   |
+| 100k: update 1  | 853 → 12965 → 628    | 60 → 6 → 6   |
+| 200k: update 1  | 1009 → 12444 → 660   | 62 → 6 → 8   |
+| 200k: update 10 | 3141 → 108279 → 1350 | 55 → 7 → 8   |
+| 1M: update 1    | 1983 → 13718 → 873   | 296 → 6 → 6  |
+| 1M: update 10   | 4360 → 127000 → 1657 | 1331 → 7 → 6 |
+
+Of those bytes, the manifests are 4 (small) to 300 (1M rows) per flush: a
+checkpoint rewrites its manifest whole, about 1.7 bytes per frame (30 KiB
+for 1M rows), once in up to 128 flushes.
 
 A cached flush is two round trips in all three: the head's read and the
 sync.
@@ -149,23 +154,45 @@ flush needs from S3; cached, one whose page cache holds them.
 
 | Workload             | Uncached $/M flushes | Cached $/M flushes | Stored in S3 | Storage $/month |
 | -------------------- | -------------------- | ------------------ | ------------ | --------------- |
-| chat+effects         | $1.29                | $0.07              | 0.06 MiB     | ~$0             |
-| small: update 1      | $0.87                | $0.07              | 0.01 MiB     | ~$0             |
-| 10k rows: update 1   | $3.13                | $0.09              | 1.2 MiB      | $0.00003        |
-| 10k rows: update 10  | $15.83               | $0.09              | 1.1 MiB      | $0.00003        |
-| 10k rows: insert 1   | $2.66                | $0.09              | 1.1 MiB      | $0.00003        |
-| 100k rows: update 1  | $3.34                | $0.09              | 10.8 MiB     | $0.00024        |
-| 200k rows: update 1  | $4.76                | $0.09              | 21.6 MiB     | $0.00048        |
-| 200k rows: update 10 | $23.78               | $0.09              | 21.6 MiB     | $0.00049        |
-| 1M rows: update 1    | $4.27                | $0.09              | 108 MiB      | $0.0024         |
-| 1M rows: update 10   | $29.11               | $0.09              | 108 MiB      | $0.0024         |
+| chat+effects         | $1.02                | $0.07              | 0.06 MiB     | ~$0             |
+| small: update 1      | $0.60                | $0.07              | 0.01 MiB     | ~$0             |
+| 10k rows: update 1   | $2.73                | $0.08              | 1.2 MiB      | $0.00003        |
+| 10k rows: update 10  | $15.42               | $0.08              | 1.1 MiB      | $0.00003        |
+| 10k rows: insert 1   | $2.25                | $0.08              | 1.1 MiB      | $0.00003        |
+| 100k rows: update 1  | $2.93                | $0.08              | 10.8 MiB     | $0.00024        |
+| 200k rows: update 1  | $4.35                | $0.08              | 21.5 MiB     | $0.00048        |
+| 200k rows: update 10 | $23.38               | $0.08              | 21.6 MiB     | $0.00048        |
+| 1M rows: update 1    | $3.86                | $0.08              | 108 MiB      | $0.0024         |
+| 1M rows: update 10   | $28.70               | $0.08              | 108 MiB      | $0.0024         |
 
 - **Cached:** the checkpoints, nearly all of it: a PUT and a LIST each,
   about once in 128 flushes, at $5 a million requests.
 - **Uncached:** the GETs, at $0.40 a million: a flush reads the frames
   its pages are in, so the cost follows the rows it touches more than the
-  database's size.
+  database's size. The manifest is in Restate, so an open makes no GET
+  for it.
 - **Storage:** a rounding error at any size.
+
+**Read latency** (`read_latency`, `S3=1`): an uncached open and query,
+with a Restate request taking 2 ms and an S3 request 20 ms, on a virtual
+clock where requests issued together overlap; milliseconds at the median.
+
+| Database  | Open | Point (primary key) | Point (index) | Range of 100 rows |
+| --------- | ---- | ------------------- | ------------- | ----------------- |
+| 100 rows  | 4    | 0                   | 0             | 0                 |
+| 10k rows  | 24   | 40                  | 60            | 80                |
+| 100k rows | 24   | 40                  | 80            | 80                |
+| 1M rows   | 24   | 60                  | 120           | 100               |
+
+- **Open:** the head, then the manifest and the tail together, from
+  Restate (2 round trips); then the database's first frame from S3. With
+  the manifest in the pack, the open was 42 ms: its GET, then the frame's.
+- **Queries:** each S3 round trip is a b-tree level whose frame is not
+  read yet, 2 to 6 of them; a second query in the same session reuses the
+  upper levels (20 to 80 ms).
+- **100 rows:** the database is still in its tail, in Restate.
+- **Packs in Restate:** the same requests at 2 ms: an open in 6 ms, a
+  query in 4 to 12.
 
 Against tail+checkpoints, with a cached flush two round trips in both and
 a checkpoint one PUT:
@@ -174,15 +201,15 @@ a checkpoint one PUT:
   a tail page costs what changed since the checkpoint. With packs in S3 a
   small database's tail is cut only every 128 flushes or 1 MiB, so its
   pages drift further from the checkpoint and cost more (small update 1:
-  1737 bytes, against 557 with packs in Restate).
-- **Cold opens:** the manifest and a frame, not a walk of map nodes: cold
-  S3 GETs drop from up to 534 to 6. With packs in Restate a small
+  1735 bytes, against 554 with packs in Restate).
+- **Cold opens:** the manifest (in Restate) and a frame, not a walk of map
+  nodes: cold S3 GETs drop from up to 534 to 5. With packs in Restate a small
   database's open reads its tail, as long as its packs (chat: 35 gets, in
   4 round trips).
 - **Uncached flushes** read the checkpoint's frames their pages are in,
   not chunk deltas: more GETs on small databases and ten-row updates (up
-  to 4× for a small one, $0.87 rather than $0.25 a million on Standard),
-  far fewer on large ones (1M update 1: $4.27 rather than $93.70).
+  to 2.4× for a small one, $0.60 rather than $0.25 a million on Standard),
+  far fewer on large ones (1M update 1: $3.86 rather than $93.70).
 - **Code:** 3,017 lines in the state crate, without comments and blanks,
   against 3,492 for tail+checkpoints and 3,051 for blob-claims; the SQL
   crate's page tidying is 50 more.
