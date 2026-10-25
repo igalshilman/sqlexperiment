@@ -175,8 +175,8 @@ One `PageCache` per process. A state opens in it under its namespace's key
 it (a `NamespaceCache`, inside the crate).
 
 **Packs.** A pack never changes, and its name is never reused, so the cache
-keeps its ranges (frames, patches, values, manifests) under (namespace,
-pack, offset) in memory, spilling to a local disk file
+keeps its ranges (frames, patches, values, manifests, and the parts read
+of packs kept in Restate) under (namespace, pack, offset, length) in memory, spilling to a local disk file
 ([foyer](https://github.com/foyer-rs/foyer)), one budget for all namespaces,
 for as long as it likes. There is nothing to invalidate: no versions, no
 generations, no epochs, no read marks. A range of a pack that never became

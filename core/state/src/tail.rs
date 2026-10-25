@@ -18,7 +18,7 @@
 //! whatever head it holds, every pack a later head names is either named by
 //! its head's checkpoints or newer than the previous one.
 use crate::{
-    blobs::{BlobStore, KvBlobs},
+    blobs::{BlobStore, KV_PART, KvBlobs},
     format::{Checkpoint, Entry, HEAD_KEY, Head, Manifest, PACK_PREFIX, PackId, parse_tail_key},
     kv::KvStore,
 };
@@ -30,6 +30,8 @@ use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 pub(crate) struct Tiered {
     pub restate: Arc<dyn KvStore>,
     packs: Arc<dyn BlobStore>,
+    /// The packs, where they are kept in Restate: read by part.
+    parts: Option<KvBlobs>,
     manifests: KvBlobs,
     /// Whether the packs are kept in Restate too, without `packs`.
     pub packs_in_restate: bool,
@@ -39,6 +41,7 @@ impl Tiered {
     pub fn new(restate: Arc<dyn KvStore>, packs: Option<Arc<dyn BlobStore>>) -> Self {
         Self {
             packs_in_restate: packs.is_none(),
+            parts: packs.is_none().then(|| KvBlobs::new(restate.clone())),
             packs: packs.unwrap_or_else(|| Arc::new(KvBlobs::new(restate.clone()))),
             manifests: KvBlobs::manifests(restate.clone()),
             restate,
@@ -68,6 +71,23 @@ impl Tiered {
     pub async fn get(&self, pack: PackId, range: Range<u64>) -> io::Result<Bytes> {
         let key = pack.key();
         (self.packs.get_range(&key, range).await?).ok_or_else(|| {
+            io::Error::other(format!(
+                "{key} is gone: the owner collected it since this state opened"
+            ))
+        })
+    }
+
+    /// Bytes of the unit a read of a pack fetches whole, where there is
+    /// one: a part, for packs kept in Restate.
+    pub fn block(&self) -> Option<u64> {
+        self.parts.as_ref().map(|_| KV_PART)
+    }
+
+    /// Block `index` of `pack` (see [`Self::block`]): shorter at the pack's end.
+    pub async fn get_block(&self, pack: PackId, index: u64) -> io::Result<Bytes> {
+        let parts = self.parts.as_ref().expect("packs kept by part");
+        let key = pack.key();
+        (parts.part(&key, index).await?).ok_or_else(|| {
             io::Error::other(format!(
                 "{key} is gone: the owner collected it since this state opened"
             ))

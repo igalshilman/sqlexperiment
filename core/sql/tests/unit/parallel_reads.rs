@@ -51,13 +51,32 @@ impl KvStore for GatedReads {
     }
 }
 
+/// The page read second, far enough from page 0 to be in another part.
+const FAR: u64 = 18;
+
+/// `len` bytes that compress to about as many.
+fn noise(len: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
 #[test]
 fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Result<()> {
     futures::executor::block_on(async {
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
-            // Two pages in a frame each, checkpointed by every publish, and
-            // no prefetch at open: the reads under test reach the pack.
+            // A page in a frame each, checkpointed by every publish, and no
+            // prefetch at open: the reads under test reach the pack. Pages
+            // 0 and `FAR` hold 7s; the noise between puts `FAR`'s frame in
+            // another 64 KiB part of the pack than page 0's, so that the
+            // two reads are two gets.
             let all = state::StateOptions {
                 frame_pages: 1,
                 prefetch_pages: 0,
@@ -65,12 +84,14 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
                 ..Default::default()
             };
             let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;
-            initial
-                .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
-                .await?;
+            let mut pages = vec![7; BLOCK_SIZE];
+            pages.extend(noise((FAR as usize - 1) * BLOCK_SIZE));
+            pages.extend(vec![7; BLOCK_SIZE]);
+            initial.write(0, 0, &buffers(&pages)).await?;
             initial.publish().await?;
+            let after = (FAR + 1) * BLOCK_SIZE as u64;
             initial
-                .write(0, 2 * BLOCK_SIZE as u64, &buffers(&vec![7; BLOCK_SIZE]))
+                .write(0, after, &buffers(&vec![7; BLOCK_SIZE]))
                 .await?;
             initial.publish().await?;
             let (send_a, recv_a) = oneshot::channel();
@@ -92,7 +113,7 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
                 .collect();
             let first = file.pread(0, Completion::new_read(outputs[0].clone(), |_| None))?;
             let second = file.pread(
-                BLOCK_SIZE as u64,
+                FAR * BLOCK_SIZE as u64,
                 Completion::new_read(outputs[1].clone(), |_| None),
             )?;
             let changed = Arc::new(Buffer::new_temporary(BLOCK_SIZE));

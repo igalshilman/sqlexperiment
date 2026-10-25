@@ -374,8 +374,9 @@ That is at most 3 round trips, whatever the database's size.
 1. the overlay (the tail changed it): decompress it against its reference,
    the checkpoint's page, which may need reading first;
 2. its patch;
-3. its frame: one ranged read of the pack (a 64 KiB part in Restate, a
-   ranged GET in S3), decompressed in about 25 µs;
+3. its frame: one ranged read of the pack (in Restate, the 64 KiB parts
+   it is in, which the cache keeps for the frames beside it; in S3, a
+   ranged GET), decompressed in about 25 µs;
 4. a hole: zeros, or the base's page.
 
 A SQL query reads a page per b-tree level it descends, so a cold point
@@ -405,8 +406,9 @@ once the previous checkpoint passes it.
 One `PageCache` per process ([foyer](https://github.com/foyer-rs/foyer),
 in memory and spilling to a local disk file):
 
-- **Pack ranges**: frames, patches, values and manifests, kept by (pack,
-  offset). Packs never change, so nothing is ever invalidated.
+- **Pack ranges**: frames, patches, values and manifests, and the 64 KiB
+  parts read of packs in Restate, kept by (pack, offset, length). Packs
+  never change, so nothing is ever invalidated.
 - **Namespace states**: per namespace, the head bytes it last read or
   wrote and the state as of that head, kept by their bytes (256 MiB by
   default). An open that reads the same head bytes reuses the state and
