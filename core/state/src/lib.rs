@@ -102,7 +102,7 @@ use store::Is;
 pub use store::{Checkpointed, FlushReport};
 
 use crate::blobs::BlobStore;
-use crate::cache::{NamespaceCache, ParkedValue};
+use crate::cache::{Backoff, NamespaceCache, ParkedValue};
 use crate::kv::KvStore;
 use crate::store::Snapshot;
 use crate::tail::Tiered;
@@ -211,11 +211,23 @@ struct Shared {
     poisoned: AtomicBool,
     /// A flush is running.
     flushing: AtomicBool,
+    /// When the next checkpoint may be tried, after some failed: the
+    /// cache's, which the namespace's next states share, if it has one.
+    backoff: Mutex<Backoff>,
 }
 
 impl Shared {
     fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
+    }
+
+    /// Change the backoff with `f`, here and in the cache.
+    fn backoff(&self, f: impl FnOnce(&mut Backoff)) {
+        let mut backoff = self.backoff.lock().unwrap();
+        f(&mut backoff);
+        if let Some(cache) = &self.cache {
+            cache.set_backoff(*backoff);
+        }
     }
 
     /// Delete the packs no checkpoint the head names needs, and the
@@ -350,6 +362,7 @@ impl State {
             _ => HashMap::new(),
         };
         parked.retain(|_, value| value.version == snapshot.version());
+        let backoff = cache.as_ref().map(NamespaceCache::backoff).unwrap_or_default();
         Ok(Self {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
@@ -360,6 +373,7 @@ impl State {
                 reader: AtomicBool::new(reader),
                 poisoned: AtomicBool::new(false),
                 flushing: AtomicBool::new(false),
+                backoff: Mutex::new(backoff),
             }),
             prefix: Arc::from(""),
         })
@@ -821,19 +835,28 @@ impl Mutation {
         let mut logs = std::mem::take(&mut self.logs);
         self.taken = true;
         // Only a flush that writes a head adopts a checkpoint. A failed
-        // checkpoint fails nothing: the report says why, and the next flush
-        // tries again.
-        let due = self.checkpoint || snapshot.due();
+        // checkpoint fails nothing: the report says why, and a later flush
+        // tries again, the next one first, then fewer and fewer of them
+        // ([`Backoff`]); one asked for is tried regardless.
+        let version = snapshot.version();
+        let allowed = shared.backoff.lock().unwrap().allows(version);
+        let due = self.checkpoint || (snapshot.due() && allowed);
         let (staged, failed) = match snapshot.changes(&mut files, &mut records, &mut logs) && due {
             true => match snapshot.checkpoint().await {
                 Ok(staged) => (Some(staged), None),
-                Err(error) => (None, Some(error.to_string())),
+                Err(error) => {
+                    shared.backoff(|backoff| backoff.failed(version));
+                    (None, Some(error.to_string()))
+                }
             },
             false => (None, None),
         };
         let result = snapshot.commit(files, records, logs, staged).await;
         running.returned = true;
         let (mut report, after) = result?;
+        if report.checkpoint.is_some() {
+            shared.backoff(Backoff::succeeded);
+        }
         report.checkpoint_failed = failed;
         {
             let mut current = shared.snapshot.lock().unwrap();

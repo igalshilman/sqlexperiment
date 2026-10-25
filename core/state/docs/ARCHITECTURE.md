@@ -219,7 +219,11 @@ tail entries the previous checkpoint covered are deleted in the same sync.
 
 A checkpoint that fails (an upload, say) fails nothing: the flush commits
 its tail entry anyway, reports why (`FlushReport::checkpoint_failed`), and
-the next flush tries again.
+the next flush tries again. Each failure in a row after that doubles the
+flushes before the next try, up to 64, so a checkpoint that keeps failing
+(its store down, say) costs one flush in 64 rather than each; one that
+succeeds ends the wait. The process's cache keeps the wait for the
+namespace's next states, and `Mutation::checkpoint` tries regardless.
 
 ### Manifests
 
