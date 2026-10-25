@@ -159,7 +159,7 @@ impl FunctionSignals {
             return Ok(());
         }
         let mut waiting = waits(&ctx).await?;
-        waiting.push(listening);
+        queue(&mut waiting, listening);
         ctx.set(WAITING, Json(waiting));
         Ok(())
     }
@@ -183,6 +183,31 @@ impl FunctionSignals {
     }
 }
 
+/// Queue `listening` last, or else just ahead of the first wait of its own
+/// run that the run started after it: a run's waits started in one turn come
+/// in in any order, and a signal by name resolves the one the program
+/// started first.
+fn queue(waiting: &mut Vec<Listening>, listening: Listening) {
+    let id = &listening.waiting.id;
+    let at = (waiting.iter())
+        .position(|other| started_after(&other.waiting.id, id))
+        .unwrap_or(waiting.len());
+    waiting.insert(at, listening);
+}
+
+/// Whether the wait `id` is a later request of the same run as `than`: a
+/// wait's id is `<run>/<n>`, its run's requests numbered in order.
+fn started_after(id: &str, than: &str) -> bool {
+    let request = |id: &str| {
+        let (run, n) = id.rsplit_once('/')?;
+        Some((run.to_owned(), n.parse::<u64>().ok()?))
+    };
+    match (request(id), request(than)) {
+        (Some((run, n)), Some((other, m))) => run == other && n > m,
+        _ => false,
+    }
+}
+
 async fn waits(ctx: &ObjectContext<'_>) -> Result<Vec<Listening>, TerminalError> {
     Ok((ctx.get::<Json<Vec<Listening>>>(WAITING).await?)
         .map(Json::into_inner)
@@ -193,4 +218,39 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listening(id: &str) -> Listening {
+        Listening {
+            waiting: Waiting {
+                id: id.into(),
+                name: "vote".into(),
+                input: Value::Null,
+                since: 0,
+            },
+            awakeable: format!("awakeable of {id}"),
+        }
+    }
+
+    fn ids(waiting: &[Listening]) -> Vec<&str> {
+        waiting.iter().map(|w| w.waiting.id.as_str()).collect()
+    }
+
+    /// A run's waits come in in any order; they queue in the order it
+    /// started them, and the other runs' in the order they came.
+    #[test]
+    fn a_runs_waits_queue_in_the_order_it_started_them() {
+        let mut waiting = Vec::new();
+        for id in ["other/7", "run/10", "run/9", "late/1", "run/2"] {
+            queue(&mut waiting, listening(id));
+        }
+        assert_eq!(
+            ids(&waiting),
+            ["other/7", "run/2", "run/9", "run/10", "late/1"]
+        );
+    }
 }
