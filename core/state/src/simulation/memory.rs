@@ -98,6 +98,14 @@ impl MemoryKv {
         store
     }
 
+    /// Replace the value durably at `key`, as a fault of the disk would:
+    /// no request, so no check of a blob put twice.
+    pub fn corrupt(&self, key: &str, value: Bytes) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.values.insert(key.to_owned(), value.clone());
+        inner.durable.insert(key.to_owned(), value);
+    }
+
     /// Independent byte-for-byte copy for deterministic crash simulations.
     pub fn fork(&self) -> Self {
         let inner = self.inner.lock().unwrap();
