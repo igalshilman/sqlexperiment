@@ -314,7 +314,8 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     load(&stores, w, &mut words).await?;
     let cache =
         cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
-    // Warm the owner, and its cache with every blob, outside the measurement.
+    // Warm the owner, and its cache with every blob, and checkpoint the load,
+    // outside the measurement.
     let mut db = open(&stores, &cache).await?;
     if !w.name.starts_with("chat") {
         db.query("SELECT count(*), sum(length(payload)) FROM t")
@@ -322,10 +323,13 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         db.query("SELECT count(*) FROM t INDEXED BY by_a WHERE a > 0")
             .await?;
     }
-    save(db, None).await?;
+    save(db, Some("warm".into())).await?;
     stores.restate.reset();
     memory.reset_stats();
-    let s3_before = stores.s3.as_ref().map(|s3| (s3.puts(), s3.gets(), s3.lists(), s3.uploaded()));
+    let s3_before = stores
+        .s3
+        .as_ref()
+        .map(|s3| (s3.puts(), s3.gets(), s3.lists(), s3.uploaded()));
     for i in 0..w.flushes {
         let mut db = open(&stores, &cache).await?;
         let effects = step(&mut db, w, i, &mut words).await?;

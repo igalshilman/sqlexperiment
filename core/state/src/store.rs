@@ -1293,14 +1293,13 @@ impl Snapshot {
         }))
     }
 
-    /// Flush `writes` and `records`, which [`Self::check`] passed: see the
-    /// module documentation.
-    pub(crate) async fn commit(
+    /// Drop from a mutation what changes nothing; whether anything is left.
+    pub(crate) fn changes(
         &self,
-        mut writes: Writes,
-        mut records: Records,
-        mut logs: Appends,
-    ) -> io::Result<(FlushReport, Self)> {
+        writes: &mut Writes,
+        records: &mut Records,
+        logs: &mut Appends,
+    ) -> bool {
         records.retain(|name, value| {
             (self.records.get(name)).map_or(!value.is_empty(), |held| held != value)
         });
@@ -1311,7 +1310,18 @@ impl Snapshot {
         logs.retain(|name, appended| {
             !appended.values.is_empty() || appended.before > self.log(name).first
         });
-        if writes.is_empty() && records.is_empty() && logs.is_empty() {
+        !(writes.is_empty() && records.is_empty() && logs.is_empty())
+    }
+
+    /// Flush `writes` and `records`, which [`Self::check`] passed: see the
+    /// module documentation.
+    pub(crate) async fn commit(
+        &self,
+        mut writes: Writes,
+        mut records: Records,
+        mut logs: Appends,
+    ) -> io::Result<(FlushReport, Self)> {
+        if !self.changes(&mut writes, &mut records, &mut logs) {
             return Ok((
                 FlushReport::default(),
                 self.continued(self.root.clone(), self.root_bytes.clone()),

@@ -800,14 +800,14 @@ impl Mutation {
             returned: false,
             done: false,
         };
-        let files = std::mem::take(&mut self.files);
-        let records = std::mem::take(&mut self.records);
-        let logs = std::mem::take(&mut self.logs);
+        let mut files = std::mem::take(&mut self.files);
+        let mut records = std::mem::take(&mut self.records);
+        let mut logs = std::mem::take(&mut self.logs);
         self.taken = true;
         let options = &shared.options;
-        if shared
-            .tail
-            .due(options.checkpoint_entries, options.checkpoint_bytes)
+        // Only a flush that writes a head adopts a checkpoint.
+        if snapshot.changes(&mut files, &mut records, &mut logs)
+            && (shared.tail).due(options.checkpoint_entries, options.checkpoint_bytes)
         {
             // A failed checkpoint fails nothing: the next flush tries again.
             let _ = shared.tail.checkpoint(&snapshot).await;

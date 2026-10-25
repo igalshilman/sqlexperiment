@@ -160,9 +160,25 @@ impl MemoryBlobs {
         self.inner.lock().unwrap().uploaded
     }
 
+    /// Each key stored, and its size.
+    pub fn sizes(&self) -> Vec<(String, usize)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .values
+            .iter()
+            .map(|(key, value)| (key.clone(), value.len()))
+            .collect()
+    }
+
     /// Bytes stored now.
     pub fn stored_bytes(&self) -> usize {
-        self.inner.lock().unwrap().values.values().map(Bytes::len).sum()
+        self.inner
+            .lock()
+            .unwrap()
+            .values
+            .values()
+            .map(Bytes::len)
+            .sum()
     }
 
     /// Gets (of a range) asked, failed ones included.
