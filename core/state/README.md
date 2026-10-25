@@ -7,7 +7,8 @@ paged **files** (4 KiB pages, read and written at random) and **logs**
 (entries appended, and truncated from the start). The state is read; it
 changes only through a **mutation**, an owned value that collects the records
 set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
-once, in one round trip. It needs only `get`, `put` and `delete` from the backend.
+once, in one round trip. It needs only `get`, `put` and `delete` from the backend,
+and a listing of its keys to sweep the garbage.
 
 The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
 database in the file `db` and moves what it committed into a mutation before
@@ -58,10 +59,10 @@ but one key, the root, which names everything else: copy-on-write.
 
 A namespace holds:
 
-- **The root** (`v16/root`): the version, the directory of files (paged
+- **The root** (`v17/root`): the version, the directory of files (paged
   files, such as the SQL database's, records and logs), the small records,
   and the top of each paged file's chunk map.
-- **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
+- **Blobs** (`v17/blob/<n>`): one zstd frame each, written once and never
   changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,
   compressed against the base, so it costs about what changed), a node of a
   chunk map, or a large record, or a log entry.
@@ -81,16 +82,27 @@ doesn't exist.
 only once no root a reader may still hold names it: 16 flushes after the
 last root that named it, by default.
 
+**Garbage.** Blob numbers only grow, so a blob below the root's next number
+that the root does not name is dead for good. A sweep lists the keys (Restate's
+`getKeys()`), marks the dead blobs, and deletes those an earlier sweep marked
+16 flushes before; a flush sweeps every 16 versions, and anyone may sweep,
+beside the owner (`State::collect_garbage`).
+
 **Recovery.** There's none: every open reads the root, which names only
 blobs that are stored. A crashed flush's blobs are numbered past what the
-root names, and the next flush overwrites them.
+root names: the next flush overwrites them, or a sweep deletes them.
+
+**Blobs in S3.** `blobs::SplitStore` keeps the root in Restate and the blobs
+in an object store, where a former attempt's uploads are not fenced: the
+state claims its blob numbers in Restate (`v17/claim`) before it uploads, so
+no two attempts ever write the same key.
 
 **What a crash leaves.**
 
-| Interrupted             | Result                                      |
-| ----------------------- | ------------------------------------------- |
-| A flush                 | Either all of the transaction or none of it |
-| A deletion of old blobs | Repeated by the next flush                  |
+| Interrupted | Result                                      |
+| ----------- | ------------------------------------------- |
+| A flush     | Either all of the transaction or none of it |
+| A sweep     | Repeated by the next sweeps                 |
 
 **Why it is simple.** Blobs never change, so a cache keeps them by number and
 never invalidates them, and a reader (a shared handler beside the exclusive

@@ -16,14 +16,15 @@ hash.
 
 ## What Restate stores
 
-A state is one Restate object's state, in two kinds of key. Restate's own
+A state is one Restate object's state, in two kinds of key (and two more
+where its blobs are kept in S3, or swept). Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
 and the root plays that role.
 
 | Key            | What it holds                                                                                                                                             |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                              |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record, or a log entry |
+| `v17/root`     | The root: the directory of files, the small records, and the top of each file's chunk map. The only key whose write commits.                              |
+| `v17/blob/<n>` | One zstd frame, written once and never changed: a chunk of 4 pages (a base, or a delta against it), a chunk map's node, or a large record, or a log entry |
 
 Transactions change two kinds of state:
 
@@ -42,8 +43,9 @@ Transactions change two kinds of state:
 
 The contract it needs from Restate is small ([`kv.rs`](../src/kv.rs)): writes
 return at once and are kept in issue order, `sync()` waits until they are
-stored, and a crash keeps a prefix of the unsynced writes. There are no
-multi-key transactions, locks or compare-and-swap. One owner reads and writes a
+stored, a crash keeps a prefix of the unsynced writes, and `keys()` lists
+them (for a sweep). There are no multi-key transactions, locks or
+compare-and-swap. One owner reads and writes a
 state at a time, which a Restate virtual object guarantees.
 
 ## How a flush works
@@ -53,13 +55,17 @@ the mutation (and every entry appended) becomes durable at once, and dropping th
 itself shows only what was flushed. A flush queues its writes in this order,
 then syncs once:
 
-1. **Garbage:** deletes of blobs that no root names for the last 16 flushes.
-2. **Blobs:** each changed chunk's pages, compressed against the chunk's base
+1. **Blobs:** each changed chunk's pages, compressed against the chunk's base
    (a delta), or, once the delta grows, a new base; a new node on each path
    of a chunk map to a changed chunk, below its top; and large records and
    log entries.
-3. **The root:** naming them, with the small records. If this put is stored,
+2. **The root:** naming them, with the small records. If this put is stored,
    the transaction happened.
+
+A flush deletes nothing. Every 16 versions, after it synced, it sweeps: it
+lists the keys, finds the blobs below the root's next number that the root
+does not name (dead for good: numbers only grow), and deletes those the
+sweep before found dead, 16 flushes ago.
 
 The order makes a crash at any point safe. Restate keeps a prefix of the
 queued writes, and a blob is put before any root names it and never

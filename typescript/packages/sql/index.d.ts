@@ -91,8 +91,8 @@ export interface OpenOptions {
    * object's shared handler): from the blobs the owner cached, writing
    * nothing to the store or the cache; SQL changes stay in the session. It
    * reads the state as of open throughout, a snapshot, whatever the owner
-   * commits meanwhile. The owner deletes what it no longer needs 16 commits
-   * later, so a reader still reading after 16 of them may fail ("is gone"):
+   * commits meanwhile. The owner's sweeps delete what it no longer needs at
+   * least 16 commits later, so a reader still reading after 16 of them may fail ("is gone"):
    * open it again (a shared handler is retried).
    */
   reader?: boolean;

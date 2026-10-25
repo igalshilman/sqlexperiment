@@ -65,8 +65,8 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
     A ``reader`` reads the database beside the session that writes it (a
     shared handler's, beside the exclusive one's): it writes nothing to the
     store, and reads the state it opened on throughout, a snapshot, whatever
-    the writer commits meanwhile. The writer deletes what it no longer needs
-    16 commits later, so a reader still reading after 16 of them may fail
+    the writer commits meanwhile. The writer's sweeps delete what it no longer
+    needs at least 16 commits later, so a reader still reading after 16 of them may fail
     ("is gone"): open it again (a shared handler is retried).
     """
     loop = asyncio.get_running_loop()

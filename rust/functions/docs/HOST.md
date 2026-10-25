@@ -7,7 +7,7 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one flush that makes a turn's SQL, pages and records durable together:
-  the state's (v16) root, the memory's pages a file beside the SQL's;
+  the state's (v17) root, the memory's pages a file beside the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
 
@@ -181,8 +181,8 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v16/root = SR16
-  version, next_blob, chunk_pages, garbage
+v17/root = SR17
+  id, version, next_blob, chunk_pages, fanout
   directory: files by id and name
     run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
@@ -191,7 +191,8 @@ v16/root = SR16
     db:                paged file                        // SQL
     <name>/…:          each extension's records and files
   each paged file: per chunk of 4 pages, its base blob and delta blob
-v16/blob/<n>:  one zstd frame, written once
+v17/blob/<n>:  one zstd frame, written once
+v17/sweep:     the blobs the last sweep found dead (once one has)
 ```
 
 - **A turn is one root.** Its SQL pages and its memory's changed pages, from
@@ -204,8 +205,9 @@ v16/blob/<n>:  one zstd frame, written once
 
 ### Flush, recover
 
-- **Flush.** Garbage deletes, the blobs, the root: queued in that order,
-  then one sync. Then the
+- **Flush.** The blobs, the root: queued in that order, then one sync
+  (and every 16 versions, a sweep of what no root names, over the
+  object's state keys). Then the
   outbox: its Waits are made after the flush, and the next flush drops
   the ones already made.
 - **Recover.** Open reads the root and the large records' blobs, and the VM

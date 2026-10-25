@@ -53,7 +53,10 @@
 //! does not name are dead. Delete those the previous sweep found dead, once
 //! [`StateOptions::garbage_after`] versions have passed since, and keep the
 //! rest for the next sweep. A sweep writes no root: any state may sweep, an
-//! owner's or a reader's, as often as it likes, beside the owner's flushes.
+//! owner's or a reader's, as often as it likes, beside the owner's flushes;
+//! a flush sweeps every [`StateOptions::sweep_every`] versions. It lists the
+//! blobs with [`KvStore::keys`] (Restate's `getKeys()`): a store that cannot
+//! list is never swept.
 //!
 //! **Open.** Get the root (and, for an owner that claims, the claim beside
 //! it), and the blobs of its large records (and, cold, of a small file), in

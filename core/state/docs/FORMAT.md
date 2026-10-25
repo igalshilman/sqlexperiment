@@ -1,31 +1,32 @@
 # Storage format
 
-Only this format (v16) is implemented. Use a dedicated namespace. Constants
+Only this format (v17) is implemented. Use a dedicated namespace. Constants
 and keys live in `src/store.rs`; there is no migration or format discovery.
 Storage is assumed reliable (a value reads back as written); every zstd frame
 carries a checksum, and decoding checks structure and the bounds below.
 
 | Key                          | Value                                                                                                |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `v16/root`                   | The root; absent until the first flush                                                               |
-| `v16/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record, or a log entry; written once |
+| `v17/root`                   | The root; absent until the first flush                                                               |
+| `v17/blob/<lowercase hex n>` | One zstd frame: a chunk's base or delta, a map node, or a large record, or a log entry; written once |
+| `v17/claim`                  | The claim, where blobs are not fenced (beside the root, in Restate); absent until the first flush    |
+| `v17/sweep`                  | The sweep's record (beside the blobs); absent while no sweep found a blob dead                       |
 
 The root is the only key whose write commits. Integers are LEB128 varints
 unless stated otherwise.
 
 ## Root
 
-`SR16`, then one zstd frame of the body, which carries its size (at most
+`SR17`, then one zstd frame of the body, which carries its size (at most
 64 MiB) and a checksum:
 
 | Field       | Encoding                                                                                                                                                |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Id          | 8 bytes, little-endian: the database's random identity, drawn when its first root was made; the cache keys blobs by it                                  |
 | Version     | Flushes that changed something, ever; at most 2^62                                                                                                      |
-| Next blob   | The number the next blob gets; at most 2^62. Every blob named is below it                                                                               |
+| Next blob   | The number the next blob gets; at most 2^62. Every blob named is below it, and no later root names one below it that this root does not                 |
 | Chunk pages | Pages per chunk (1 to 256), set when the namespace was made                                                                                             |
 | Fanout      | Entries per map node (2 to 4096), set when the namespace was made                                                                                       |
-| Garbage     | Count, then ascending blob numbers, each as the gap from the one before, with the version it died at, as the gap below the root's: blobs to delete      |
 | Next file   | The id the next new file gets; at most 2^16; ids are never reused                                                                                       |
 | Directory   | Count, then per file: its id (ascending, as the gap after the previous id, less one), its name's length (at most 255) and UTF-8 bytes, its kind (below) |
 
@@ -85,5 +86,27 @@ The files are records, paged files and logs. The SQL database is the paged file
 emptied, and its id is never reused. A paged file with a base
 (`State::file_with_base`) is over a golden image the host holds, named by the
 base's id: its chunks decode only with that base.
+
+## Claim
+
+`SC17`, then a varint (at most 2^62): the first blob number no attempt of
+the owner has claimed. An owner whose blobs are not fenced
+(`KvStore::unfenced_blobs`) numbers its blobs from the larger of the root's
+next blob and the claim, and before it puts the first of them, puts a claim
+4096 past it and syncs. Nothing may follow.
+
+## Sweep record
+
+`SS17`, then:
+
+| Field    | Encoding                                                                                                  |
+| -------- | --------------------------------------------------------------------------------------------------------- |
+| Database | 8 bytes, little-endian: the id of the root it marked against; a record of another database is ignored     |
+| Marked   | The version of that root; at most 2^62                                                                    |
+| Dead     | Count (at most 2^24), then ascending blob numbers, each as the gap from the one before (the first from 0) |
+
+The blobs the root of version `marked` did not name, below its next blob:
+dead for good. A later sweep deletes those still listed once the root it
+reads is `garbage_after` versions past `marked`. Nothing may follow.
 
 See [DESIGN.md](DESIGN.md) for the flush, open and garbage rules.

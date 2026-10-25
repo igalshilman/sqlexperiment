@@ -19,25 +19,30 @@ crate, which keeps its engine's state private until it flushes into a mutation.
 
 - **The backend is a Restate object's state** ([`kv`](../src/kv.rs)):
   whole-value `get`, and `put` and `delete` of one key, atomic, queued in
-  issue order; `sync` returns once every write before it is stored. No
-  multi-key transactions, compare-and-swap or listing.
+  issue order; `sync` returns once every write before it is stored; `keys`
+  lists every key (Restate's `getKeys()`), for a sweep. No multi-key
+  transactions or compare-and-swap.
 - **A crash keeps a prefix.** Of the writes since the last sync, a crash (or
   a failed sync) keeps the first few and loses the rest: never a write
   without the ones before it. Values are never torn. Reads see every write
   this owner issued.
 - **One owner at a time.** Restate runs one exclusive handler per object key,
-  and fences a former attempt's writes. This crate does not fence.
+  and fences a former attempt's writes. This crate does not fence. Blobs
+  kept beside Restate, in S3 ([`SplitStore`](../src/blobs.rs)), are not
+  fenced: there the state claims its blob numbers (below).
 - **Round trips dominate.** A flush or open should cost one round trip in
   the steady state.
 
 ## The model
 
-A namespace holds two kinds of keys:
+A namespace holds these keys:
 
 | Key            | Holds                                                                                                                                        |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `v16/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
-| `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.              |
+| `v17/root`     | The root, the commit point: the version, the directory of records and paged files, the small records, and the top of every file's chunk map. |
+| `v17/blob/<n>` | One zstd frame, written once and never changed: a chunk's base or delta, a chunk map's node, or a large record, or a log entry.              |
+| `v17/claim`    | Where blobs are not fenced: the first blob number no attempt of the owner claimed.                                                           |
+| `v17/sweep`    | The blobs the last sweep found dead, for the next to delete.                                                                                 |
 
 **Chunks.** A paged file is a row of chunks of `chunk_pages` pages (4,
 16 KiB), as many as its size needs, at most `MAX_FILE_BYTES` (10 GiB). A
@@ -77,6 +82,11 @@ prefix of the writes, so whatever a crash keeps, the root stored names only
 blobs that are stored. Nothing is overwritten except the root, so there is
 no log to replay, nothing to checkpoint and nothing to repair after a crash.
 
+**Numbers only grow.** A flush numbers its blobs from the root's
+`next_blob` on, and its root moves `next_blob` past them. So a blob below a
+root's `next_blob` that the root does not name is dead for good: no later
+root names it again. That is all a sweep needs to know (below).
+
 Exact encodings are in [FORMAT.md](FORMAT.md).
 
 ## Flush
@@ -96,17 +106,19 @@ writes every file and record in it, and syncs once:
 2. **Map.** Each map node on a path to a changed chunk is written anew
    (below the root's top node, a blob), and the old one dies; so does a
    node a shrinking file no longer needs.
-3. **Garbage.** Delete the blobs that died `garbage_after` (16) flushes ago
-   or earlier. The root lists each dead blob with the version it died at,
-   so a crash between that root and the delete leaks nothing: the next flush
-   deletes it.
-4. **Blobs.** Put the flush's blobs, at numbers from the root's `next_blob`:
-   none at or past it is named, so a crashed flush's leftovers are simply
-   overwritten.
+3. **Claim**, where blobs are not fenced, when the flush's numbers pass
+   what this owner claimed (at its first flush that puts a blob, and every
+   4096 blobs after): put the claim 4096 numbers ahead, and sync, before
+   any blob. A sync that fails ends the state.
+4. **Blobs.** Put the flush's blobs, at numbers from the root's `next_blob`
+   (or the claim, if higher): none at or past it is named, so a crashed
+   flush's leftovers are overwritten where blobs are fenced, and never
+   reused where they are not.
 5. **Root.** Put the root, at the next version, naming them, with the
-   records and logs, and listing the blobs it names no more as garbage.
+   records and logs.
 6. **Sync.** One sync stores all of it: one round trip, whatever the flush
-   wrote.
+   wrote. A flush deletes nothing; every `sweep_every` (16) versions, it
+   sweeps after it synced (below).
 
 **Compression.** zstd does the work twice. A chunk compresses its 4 pages
 together, so a B-tree page compresses against its neighbours. And a delta
@@ -189,7 +201,42 @@ does not lose acknowledged work when a later step fails.
 
 There is nothing to confirm, replay or repair: the root read names only
 stored blobs, and whatever a crashed flush left (blobs no root names) is
-overwritten by the next flush.
+overwritten by the next flush, or swept.
+
+## Garbage
+
+A sweep (`State::collect_garbage`, and a flush every `sweep_every`
+versions) is mark and sweep, in two phases, and needs no help from the
+flushes:
+
+1. **List** the namespace's keys (`KvStore::keys`: Restate's `getKeys()`;
+   S3's list for blobs beside it). A store that cannot list is never swept.
+2. **Mark** against a durable root (got and synced; a flush's own, after
+   it synced): the listed blobs below its `next_blob` that it does not name
+   are dead.
+3. **Sweep.** Delete those the previous sweep's record also held dead, once
+   the root is `garbage_after` (16) versions past the one that record
+   marked against, and record the rest for the next sweep; then sync.
+
+A blob deleted was dead at two roots `garbage_after` versions apart, so no
+reader that opened on a root since may still need it. Sweeps may overlap,
+crash or run beside the owner, its readers' or a worker's: a dead blob stays
+dead, and a record from an older root stays true, so the worst is a delete
+of a blob already gone. A sweep that fails, or is dropped midway, ends its
+state. A crashed attempt's or a zombie's blobs, which no root names, are
+dead once the root's `next_blob` passes them, and the next sweeps delete
+them.
+
+## Blobs beside Restate
+
+Blobs in S3 are not fenced: a former attempt that Restate fenced from the
+root may still be putting them, and an upload may land after its attempt
+failed. So the owner claims its numbers in Restate, beside the root, before
+its first blob (flush, step 3), and every later attempt opens at the claim:
+no two attempts ever put the same key, and nothing a zombie puts is named
+by a committed root. [`SplitStore`](../src/blobs.rs) queues writes and, at
+a sync, uploads the blobs in parallel, then puts the root (or the claim)
+and syncs Restate: a root never lands before the blobs it names.
 
 ## Readers
 
@@ -199,20 +246,22 @@ one. It writes nothing to the store, nor to the cache: its SQL changes stay
 in the session, and its mutations refuse to flush. It reads the root it opened,
 and the blobs that root names never change, so it reads one consistent
 state, however the owner flushes meanwhile: snapshot isolation, with no
-check and no retry. The owner deletes a blob `garbage_after` (16) of its
-flushes after the last root that named it, so a reader that outlives that
-many flushes fails with "is gone", and its handler is retried. With the
+check and no retry. A sweep deletes a blob only `garbage_after` (16) of
+the owner's flushes after the last root that named it, so a reader that
+outlives that many flushes fails with "is gone", and its handler is
+retried. A reader may sweep too. With the
 cache, a reader reads the blobs the owner cached.
 
 ## Failures
 
 A crash anywhere keeps a prefix of the writes since the last sync.
 
-| Crash after               | State afterwards                            | Recovery                                |
-| ------------------------- | ------------------------------------------- | --------------------------------------- |
-| Some garbage deletes      | The root before, which no longer names them | The next flush deletes the rest         |
-| Some blobs, before a root | Blobs at numbers no root names              | Ignored; the next flush overwrites them |
-| The root                  | The new root, with every blob it names      | Open reads it                           |
+| Crash after               | State afterwards                         | Recovery                                |
+| ------------------------- | ---------------------------------------- | --------------------------------------- |
+| Some sweep deletes        | The root, which no longer names them     | The next sweeps delete the rest         |
+| A claim, before its sync  | The claim or the one before; no blob put | The next attempt claims past it         |
+| Some blobs, before a root | Blobs at numbers no root names           | Overwritten by the next flush, or swept |
+| The root                  | The new root, with every blob it names   | Open reads it                           |
 
 ## Engine integration
 
@@ -308,13 +357,13 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                                                                          | Mutations                                                                |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Flush, cached    | 1, the sync                                                                                                                          | A delta (or base) per changed chunk, the root, the old garbage's deletes |
-| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes                                                                                  | The same, plus a map node per changed path and level                     |
-| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                                   | None                                                                     |
-| Cold open        | 2: the root, then a small database whole and the large records; 1 more per map level past the second                                 | None                                                                     |
-| Cold page read   | 1 get of the chunk's base and delta (past 512 MiB, after 1 per map level not yet read); sequential reads fetch up to 16 chunks ahead | None                                                                     |
+| Operation        | Round trips                                                                                                                          | Mutations                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| Flush, cached    | 1, the sync; where blobs are not fenced, 1 more at an owner's first flush (the claim's sync), and every 4096 blobs                   | A delta (or base) per changed chunk, the root        |
+| Flush, cold      | 1, plus 1 to get the bases of the chunks it changes                                                                                  | The same, plus a map node per changed path and level |
+| Open, with cache | 1, plus 1 for large records' blobs the cache lacks                                                                                   | None                                                 |
+| Cold open        | 2: the root, then a small database whole and the large records; 1 more per map level past the second                                 | None                                                 |
+| Cold page read   | 1 get of the chunk's base and delta (past 512 MiB, after 1 per map level not yet read); sequential reads fetch up to 16 chunks ahead | None                                                 |
 
 Measurements: [copy-on-write](COW_EXPERIMENT.md),
 [cache](../../sql/benches/CACHE_RESULTS.md).
@@ -330,9 +379,11 @@ Measurements: [copy-on-write](COW_EXPERIMENT.md),
   small one, a leaf in the root, neither.
 - **Keys.** Every flush that changes pages puts at least two keys (a blob and
   the root), and a namespace holds a key per live blob, about two per
-  chunk, plus `garbage_after` flushes' garbage.
-- **Fencing.** Restate provides it: a former attempt's writes never land
-  after a newer owner's, so the state adds none.
+  chunk, plus the garbage of up to `sweep_every` + `garbage_after` flushes.
+  A sweep lists every key: a round trip per sweep, and its deletes.
+- **Fencing.** Restate provides it for the root: a former attempt's writes
+  never land after a newer owner's. Blobs beside Restate are not fenced;
+  claims keep attempts' numbers apart.
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. A state keeps at most 1,024 decoded chunk
@@ -341,15 +392,19 @@ Measurements: [copy-on-write](COW_EXPERIMENT.md),
   checks structure and bounds versions, blob numbers, sizes and counts, and
   every zstd frame carries a checksum, which also catches a delta decoded
   against the wrong base.
-- **Format.** Only v16, with no migration.
+- **Format.** Only v17, with no migration.
 - **Validation.** A monitor checks every write of the simulator's campaigns
   against the one rule, decoding every root and blob it sees: a blob put
-  below the root's next number (an overwrite of one a root may name), a root
-  that names a blob not stored or does not build on the root before, a
-  delete of a blob the root does not list as garbage, or a chunk or record
-  that does not decode. The campaigns' readers check the grace. A seeded random campaign over the public API (`tests/campaign.rs`;
+  below the root's next number (an overwrite of one a root may name) or past
+  the claim, a root that names a blob not stored or does not build on the
+  root before, a delete of a blob a root names, a sweep that leaves a dead
+  blob out of its record, or a chunk or record that does not decode. The campaigns' readers check the grace. A seeded random campaign over the public API (`tests/campaign.rs`;
   `STATE_SEEDS=<n>` runs more seeds) mixes changes to records and files,
   faults, cancellations, crashes, reopens, owners and readers, and compares
-  every reopen and every read with a model; other tests drop a flush after
-  every number of polls, corrupt every stored value, and fuzz the decoders.
+  every reopen and every read with a model; `tests/split_campaign.rs` runs
+  `SplitStore` over a blob store that fails as S3 does (uploads lost, done
+  with the response lost, or landing late) with fenced attempts and
+  zombies; other tests crash at every write of a flush and a sweep, drop a
+  flush after every number of polls, corrupt every stored value, and fuzz
+  the decoders.
   The Restate crash tests kill processes; there are no power-loss tests.
