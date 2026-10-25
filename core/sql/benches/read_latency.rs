@@ -14,7 +14,10 @@
 //! databases it names part of. Prints Markdown rows: milliseconds at the
 //! median, the 90th percentile and the worst sample, and the mean round
 //! trips each store adds to the critical path, and requests.
-use futures::future::BoxFuture;
+use futures::{
+    future::BoxFuture,
+    task::{ArcWake, waker},
+};
 use sql::{Sql, Value};
 use state::{
     Result, State,
@@ -25,7 +28,13 @@ use state::{
 use std::{
     io,
     ops::Range,
-    sync::{Arc, Mutex},
+    pin::pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, Waker},
+    thread::{self, Thread},
 };
 
 /// Lanes of the clock: microseconds, then the round trips to Restate and to
@@ -33,30 +42,100 @@ use std::{
 const LANES: usize = 3;
 type Lanes = [u64; LANES];
 
-/// A virtual clock: a request issued at `t` completes at `t + cost`, and the
-/// clock advances to the latest completion, lane by lane.
+/// A virtual clock: a request issued at `t` completes at `t + cost`, lane
+/// by lane. Time stands still while any task can run, so requests issued
+/// together overlap however their futures are polled; [`Clock::block_on`]
+/// moves it to the next completion once every task waits.
 #[derive(Clone, Default)]
-struct Clock(Arc<Mutex<Lanes>>);
+struct Clock(Arc<Mutex<Timeline>>);
+
+#[derive(Default)]
+struct Timeline {
+    now: Lanes,
+    pending: Vec<Timer>,
+}
+
+struct Timer {
+    end: Lanes,
+    done: Arc<AtomicBool>,
+    waker: Waker,
+}
 
 impl Clock {
     fn now(&self) -> Lanes {
-        *self.0.lock().unwrap()
+        self.0.lock().unwrap().now
     }
 
+    /// `request`, done once `cost` has passed since it was first polled.
     fn timed<'a, T: Send + 'a>(
         &'a self,
         cost: Lanes,
         request: BoxFuture<'a, io::Result<T>>,
     ) -> BoxFuture<'a, io::Result<T>> {
-        let start = self.now();
         Box::pin(async move {
-            let result = request.await;
-            let mut now = self.0.lock().unwrap();
-            for lane in 0..LANES {
-                now[lane] = now[lane].max(start[lane] + cost[lane]);
-            }
-            result
+            let done = Arc::new(AtomicBool::new(false));
+            let mut issued = false;
+            futures::future::poll_fn(|cx| {
+                if done.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                if !std::mem::replace(&mut issued, true) {
+                    let mut timeline = self.0.lock().unwrap();
+                    let end = std::array::from_fn(|lane| timeline.now[lane] + cost[lane]);
+                    timeline.pending.push(Timer {
+                        end,
+                        done: done.clone(),
+                        waker: cx.waker().clone(),
+                    });
+                }
+                Poll::Pending
+            })
+            .await;
+            request.await
         })
+    }
+
+    /// Complete the requests that end first; false if none is pending.
+    fn advance(&self) -> bool {
+        let mut timeline = self.0.lock().unwrap();
+        let Some(next) = timeline.pending.iter().map(|timer| timer.end[0]).min() else {
+            return false;
+        };
+        let (due, pending) = std::mem::take(&mut timeline.pending)
+            .into_iter()
+            .partition(|timer| timer.end[0] == next);
+        timeline.pending = pending;
+        for timer in due {
+            for lane in 0..LANES {
+                timeline.now[lane] = timeline.now[lane].max(timer.end[lane]);
+            }
+            timer.done.store(true, Ordering::Release);
+            timer.waker.wake();
+        }
+        true
+    }
+
+    /// Run `future` to completion, moving the clock whenever it waits on
+    /// requests only.
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        struct Wake(AtomicBool, Thread);
+        impl ArcWake for Wake {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.store(true, Ordering::Release);
+                this.1.unpark();
+            }
+        }
+        let woken = Arc::new(Wake(AtomicBool::new(false), thread::current()));
+        let waker = waker(woken.clone());
+        let mut future = pin!(future);
+        loop {
+            if let Poll::Ready(out) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
+                return out;
+            }
+            if !woken.0.swap(false, Ordering::AcqRel) && !self.advance() {
+                thread::park();
+            }
+        }
     }
 }
 
@@ -114,7 +193,7 @@ struct Stores {
 }
 
 impl Stores {
-    fn new() -> Self {
+    fn new(clock: &Clock) -> Self {
         let ms = |name: &str, default: f64| {
             let ms: f64 = std::env::var(name)
                 .ok()
@@ -122,7 +201,7 @@ impl Stores {
                 .unwrap_or(default);
             (ms * 1000.0) as u64
         };
-        let clock = Clock::default();
+        let clock = clock.clone();
         let memory = MemoryKv::default();
         let restate = Arc::new(Timed {
             inner: memory.clone(),
@@ -285,8 +364,8 @@ impl Step {
 
 const SAMPLES: i64 = 64;
 
-async fn run(database: &str, rows: i64) -> Result<()> {
-    let stores = Stores::new();
+async fn run(clock: &Clock, database: &str, rows: i64) -> Result<()> {
+    let stores = Stores::new(clock);
     load(&stores, rows, 64).await?;
     let now = || (stores.clock.now(), stores.requests());
     for query in &QUERIES {
@@ -326,7 +405,8 @@ fn main() -> Result<()> {
     }
     println!("{header} |\n{rule}|");
     let only = std::env::var("WORKLOAD").ok();
-    futures::executor::block_on(async {
+    let clock = Clock::default();
+    clock.block_on(async {
         for (database, rows) in [
             ("100 rows", 100),
             ("10k rows", 10_000),
@@ -339,7 +419,7 @@ fn main() -> Result<()> {
             {
                 continue;
             }
-            run(database, rows).await?;
+            run(&clock, database, rows).await?;
         }
         Ok(())
     })
