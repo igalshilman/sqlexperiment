@@ -1,7 +1,7 @@
 //! In-memory model of a Restate object's state, as [`crate::kv`] describes
 //! it, with exact logical traffic counters.
 use crate::{
-    blobs::{KV_PART, KV_PREFIX},
+    blobs::{KV_PART, KV_PREFIX, MANIFEST_PREFIX},
     format::{HEAD_KEY, Head, Manifest, PackId, TAIL_PREFIX, parse_tail_key},
     kv::KvStore,
     simulation::yield_now,
@@ -32,7 +32,8 @@ pub struct Traffic {
 }
 
 /// Class of a key, used to split traffic counters: `head`, `tail`, `pack`
-/// (a part of a checkpoint's pack, kept in the store) or `other`.
+/// (a part of a checkpoint's pack, kept in the store), `manifest` (a part of
+/// a checkpoint's manifest) or `other`.
 pub fn object_kind(key: &str) -> &'static str {
     if key == HEAD_KEY {
         "head"
@@ -40,6 +41,8 @@ pub fn object_kind(key: &str) -> &'static str {
         "tail"
     } else if key.starts_with(KV_PREFIX) {
         "pack"
+    } else if key.starts_with(MANIFEST_PREFIX) {
+        "manifest"
     } else {
         "other"
     }
@@ -147,42 +150,37 @@ impl MemoryKv {
             .collect()
     }
     /// Every key and its value as two stores that hold the same state hold
-    /// them: the head's random database identity zeroed, and each pack named
-    /// by its version, without its random nonce, here and in the head and
-    /// manifests that name it.
+    /// them: the head's random database identity zeroed, and each pack and
+    /// manifest named by its version, without its random nonce, here and in
+    /// the head and manifests that name it.
     pub fn contents(&self) -> BTreeMap<String, Bytes> {
         let canonical = |pack: PackId| PackId { nonce: 0, ..pack };
         let mut contents = BTreeMap::new();
-        let mut parts: BTreeMap<PackId, BTreeMap<u64, Bytes>> = BTreeMap::new();
+        // Packs and manifests, whole, by prefix and name.
+        let mut blobs: BTreeMap<(&str, PackId), BTreeMap<u64, Bytes>> = BTreeMap::new();
         for (key, value) in self.values() {
-            match key
-                .strip_prefix(KV_PREFIX)
-                .and_then(|key| key.rsplit_once('/'))
-            {
-                Some((pack, part)) => {
-                    let pack = PackId::parse(pack).expect("a stored pack's key parses");
-                    let part = part.parse().expect("a stored pack's part parses");
-                    parts.entry(pack).or_default().insert(part, value);
+            let blob = [KV_PREFIX, MANIFEST_PREFIX].into_iter().find_map(|prefix| {
+                let (name, part) = key.strip_prefix(prefix)?.rsplit_once('/')?;
+                let name = PackId::parse(name).or_else(|| PackId::parse_name(name));
+                Some((
+                    prefix,
+                    name.expect("a stored blob's name parses"),
+                    part.parse().ok()?,
+                ))
+            });
+            match blob {
+                Some((prefix, id, part)) => {
+                    blobs.entry((prefix, id)).or_default().insert(part, value);
                 }
                 None => drop(contents.insert(key, value)),
             }
         }
-        let mut packs: BTreeMap<PackId, Vec<u8>> = (parts.into_iter())
-            .map(|(pack, parts)| (pack, parts.into_values().flatten().collect()))
-            .collect();
-        if let Some(bytes) = contents.get_mut(HEAD_KEY) {
-            let mut head = Head::decode(bytes).expect("a stored head decodes");
-            head.id = 0;
-            for checkpoint in [&mut head.checkpoint, &mut head.previous]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(pack) = packs.get_mut(&checkpoint.pack) {
-                    let range = checkpoint.range();
-                    let at = range.start as usize;
-                    let mut manifest =
-                        Manifest::decode(&pack[range.start as usize..range.end as usize])
-                            .expect("a stored manifest decodes");
+        let mut manifests = BTreeMap::new();
+        for ((prefix, id), parts) in blobs {
+            let mut bytes: Vec<u8> = parts.into_values().flatten().collect();
+            let name = match prefix == MANIFEST_PREFIX {
+                true => {
+                    let mut manifest = Manifest::decode(&bytes).expect("a stored manifest decodes");
                     for at in manifest.locations_mut() {
                         at.pack = canonical(at.pack);
                     }
@@ -190,22 +188,33 @@ impl MemoryKv {
                     manifest.sizes = (sizes.into_iter())
                         .map(|(pack, size)| (canonical(pack), size))
                         .collect();
-                    let encoded = manifest.encode();
-                    pack.truncate(at);
-                    pack.extend_from_slice(&encoded);
-                    checkpoint.manifest = (at as u64, encoded.len() as u64);
+                    bytes = manifest.encode().to_vec();
+                    manifests.insert(id, bytes.len() as u64);
+                    canonical(id).name()
+                }
+                false => canonical(id).key(),
+            };
+            for (part, bytes) in bytes.chunks(KV_PART as usize).enumerate() {
+                let kept = contents.insert(
+                    format!("{prefix}{name}/{part}"),
+                    Bytes::copy_from_slice(bytes),
+                );
+                assert!(kept.is_none(), "two checkpoints of version {}", id.version);
+            }
+        }
+        if let Some(bytes) = contents.get_mut(HEAD_KEY) {
+            let mut head = Head::decode(bytes).expect("a stored head decodes");
+            head.id = 0;
+            for checkpoint in [&mut head.checkpoint, &mut head.previous]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(&len) = manifests.get(&checkpoint.pack) {
+                    checkpoint.manifest = len;
                 }
                 checkpoint.pack = canonical(checkpoint.pack);
             }
             *bytes = head.encode();
-        }
-        for (pack, bytes) in packs {
-            let key = canonical(pack).key();
-            for (part, bytes) in bytes.chunks(KV_PART as usize).enumerate() {
-                let key = format!("{KV_PREFIX}{key}/{part}");
-                let kept = contents.insert(key, Bytes::copy_from_slice(bytes));
-                assert!(kept.is_none(), "two packs of version {}", pack.version);
-            }
         }
         contents
     }
@@ -233,9 +242,18 @@ impl MemoryKv {
     /// The checkpoints' packs stored here (rather than in a blob store),
     /// by name.
     pub fn packs(&self) -> BTreeSet<String> {
+        self.blobs(KV_PREFIX)
+    }
+
+    /// The names (`<version>-<nonce>`) of the checkpoints' manifests stored.
+    pub fn manifests(&self) -> BTreeSet<String> {
+        self.blobs(MANIFEST_PREFIX)
+    }
+
+    fn blobs(&self, prefix: &str) -> BTreeSet<String> {
         let inner = self.inner.lock().unwrap();
         (inner.values.keys())
-            .filter_map(|key| Some(key.strip_prefix(KV_PREFIX)?.rsplit_once('/')?.0.to_owned()))
+            .filter_map(|key| Some(key.strip_prefix(prefix)?.rsplit_once('/')?.0.to_owned()))
             .collect()
     }
 

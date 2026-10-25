@@ -29,7 +29,10 @@
 //! Namespace states are kept for a bounded number of namespaces, and parked
 //! values within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
-use crate::{format::Location, store::Durable};
+use crate::{
+    format::{Location, PackId},
+    store::Durable,
+};
 use bytes::Bytes;
 use foyer::{
     BlockEngineConfig, Cache, CacheBuilder, Code, DeviceBuilder, FileDeviceBuilder, HybridCache,
@@ -396,6 +399,17 @@ impl NamespaceCache {
     pub(crate) fn insert(&self, at: Location, value: Bytes) {
         self.shared.ranges.insert(self.key(at), owned(&value));
     }
+
+    /// The manifest of the checkpoint whose pack is `pack`, from memory or
+    /// disk: it never changes either.
+    pub(crate) async fn manifest(&self, pack: PackId) -> Option<Bytes> {
+        self.get(manifest_at(pack)).await
+    }
+
+    /// Keep the manifest of the checkpoint whose pack is `pack`.
+    pub(crate) fn insert_manifest(&self, pack: PackId, manifest: Bytes) {
+        self.insert(manifest_at(pack), manifest);
+    }
 }
 
 impl Owner {
@@ -418,6 +432,16 @@ impl Owner {
 /// whole, uncounted, for as long as it keeps the value.
 fn owned(value: &Bytes) -> Bytes {
     Bytes::copy_from_slice(value)
+}
+
+/// Where the cache keeps the manifest named like `pack`: past the end of
+/// the pack, where none of its ranges are.
+fn manifest_at(pack: PackId) -> Location {
+    Location {
+        pack,
+        offset: u64::MAX,
+        len: 0,
+    }
 }
 
 /// A random number, for identities.

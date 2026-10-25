@@ -9,9 +9,9 @@
 //! **Checkpoint.** Now and then, a flush first writes the durable state as a
 //! checkpoint: each frame the overlay changed, rebuilt from its frame in the
 //! last checkpoint and the overlay's pages, the records set and the log
-//! entries appended since, into one new pack, with a manifest that names
-//! those, and every other frame and value where the checkpoints before put
-//! them. The live frames and values of packs mostly dead move into it too
+//! entries appended since, into one new pack, and a manifest, in Restate,
+//! that names those, and every other frame and value where the checkpoints
+//! before put them. The live frames and values of packs mostly dead move into it too
 //! (compaction). The flush's head then names it, and the overlay empties.
 //!
 //! **Open.** Get the head; then, together, the checkpoint's manifest and the
@@ -156,9 +156,9 @@ pub struct Checkpointed {
     pub patched: usize,
     /// Large records and log entries it wrote.
     pub values: usize,
-    /// Bytes of its pack, the manifest included.
+    /// Bytes of its pack: none if it stored nothing outside its manifest.
     pub pack_bytes: usize,
-    /// Bytes of its manifest.
+    /// Bytes of its manifest, in Restate.
     pub manifest_bytes: usize,
     /// Packs mostly dead, whose live frames and values it moved into its own.
     pub compacted: usize,
@@ -479,14 +479,7 @@ impl Snapshot {
     async fn load(&self, head: Head) -> io::Result<Durable> {
         let manifest = async {
             match &head.checkpoint {
-                Some(checkpoint) => {
-                    let at = Location {
-                        pack: checkpoint.pack,
-                        offset: checkpoint.manifest.0,
-                        len: checkpoint.manifest.1,
-                    };
-                    Manifest::decode(&self.raw(at).await?)
-                }
+                Some(checkpoint) => self.manifest(checkpoint).await,
                 None => Ok(Manifest::default()),
             }
         };
@@ -733,6 +726,20 @@ impl Snapshot {
     }
 
     /// The bytes at `at`, in a pack: from the cache, or the pack store.
+    /// The manifest of `checkpoint`, from the cache or Restate.
+    async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
+        if let Some(cache) = &self.cache
+            && let Some(encoded) = cache.manifest(checkpoint.pack).await
+        {
+            return Manifest::decode(&encoded);
+        }
+        let encoded = self.tiered.encoded_manifest(checkpoint).await?;
+        if let Some(cache) = &self.cache {
+            cache.insert_manifest(checkpoint.pack, encoded.clone());
+        }
+        Manifest::decode(&encoded)
+    }
+
     async fn raw(&self, at: Location) -> io::Result<Bytes> {
         let cache = self.cache.clone();
         if let Some(cache) = &cache
@@ -1218,13 +1225,16 @@ impl Snapshot {
                     .insert(held, old.sizes.get(&held).copied().unwrap_or(0));
             }
         }
-        manifest.sizes.insert(pack, body.len() as u64);
+        // A checkpoint that stores nothing outside its manifest (the values
+        // it set are inline) puts no pack.
+        if !body.is_empty() {
+            manifest.sizes.insert(pack, body.len() as u64);
+        }
         let encoded = manifest.encode();
         let checkpoint = Checkpoint {
             pack,
-            manifest: (body.len() as u64, encoded.len() as u64),
+            manifest: encoded.len() as u64,
         };
-        body.extend_from_slice(&encoded);
         let report = Checkpointed {
             version: head.version,
             frames,
@@ -1235,17 +1245,15 @@ impl Snapshot {
             compacted: sparse.len(),
             deleted: 0,
         };
-        self.tiered.put_pack(pack, body.into()).await?;
+        if !body.is_empty() {
+            self.tiered.put_pack(pack, body.into()).await?;
+        }
+        self.tiered.put_manifest(pack, encoded.clone()).await?;
         // The pack's name is never reused, and no head names it before it is
         // durable: what it holds may be kept, its manifest too (the next
         // writer's open reads it).
         if let Some(cache) = &self.cache {
-            let at = Location {
-                pack,
-                offset: checkpoint.manifest.0,
-                len: checkpoint.manifest.1,
-            };
-            cache.insert(at, encoded);
+            cache.insert_manifest(pack, encoded);
         }
         let mut images = HashMap::new();
         for (at, raw, image) in written {

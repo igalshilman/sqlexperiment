@@ -111,7 +111,7 @@ fn storage_errors_end_the_session() -> Result<()> {
     futures::executor::block_on(async {
         for (operation, prefix) in [
             (Operation::Get, state::blobs::KV_PREFIX),
-            (Operation::Put, "v19/head"),
+            (Operation::Put, "v20/head"),
         ] {
             let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
             let mut db = Db::open(store.clone(), options(Durability::Commit)).await?;

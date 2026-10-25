@@ -20,7 +20,12 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{FlushReport, Mutation, PageCache, Result, StateOptions, kv::KvStore, simulation::*};
+use state::{
+    FlushReport, HEAD_KEY, Mutation, PageCache, Result, StateOptions, TAIL_PREFIX,
+    blobs::{KV_PREFIX, MANIFEST_PREFIX},
+    kv::KvStore,
+    simulation::*,
+};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -580,7 +585,7 @@ impl World {
 
     /// Collect all garbage, as a fresh owner that checkpoints at every
     /// flush, once every write sent to S3 landed: then only the packs the
-    /// head needs are stored.
+    /// head needs are stored, and the manifests it names.
     async fn collect_all(&mut self) -> std::result::Result<(), String> {
         if let Some(packs) = &self.packs {
             packs.land_late();
@@ -603,6 +608,11 @@ impl World {
             Some(packs) => packs.keys().into_iter().collect(),
             None => self.memory.packs(),
         };
+        let manifests = self.memory.manifests();
+        let named = session.state.needed_manifests();
+        if manifests != named {
+            return Err(format!("manifests left: {manifests:#?}, named {named:#?}"));
+        }
         if stored != needed {
             return Err(format!("garbage left: {stored:#?}, needed {needed:#?}"));
         }
@@ -610,22 +620,25 @@ impl World {
     }
 
     /// A random failpoint, at any request to the store a flush or a garbage
-    /// collection makes: of the head, the tail, the packs kept there, or the
-    /// listing. It may match nothing.
+    /// collection makes: of the head, the tail, the manifests, the packs kept
+    /// there, or the listing. It may match nothing.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
         let (operation, key_prefix) = rng.pick(&[
             (Operation::Put, ""),
-            (Operation::Put, "v19/tail/"),
-            (Operation::Put, "v19/head"),
-            (Operation::Put, "v19/pack/"),
+            (Operation::Put, TAIL_PREFIX),
+            (Operation::Put, HEAD_KEY),
+            (Operation::Put, KV_PREFIX),
+            (Operation::Put, MANIFEST_PREFIX),
             (Operation::Delete, ""),
-            (Operation::Delete, "v19/tail/"),
-            (Operation::Delete, "v19/pack/"),
+            (Operation::Delete, TAIL_PREFIX),
+            (Operation::Delete, KV_PREFIX),
+            (Operation::Delete, MANIFEST_PREFIX),
             (Operation::Get, ""),
-            (Operation::Get, "v19/tail/"),
-            (Operation::Get, "v19/head"),
-            (Operation::Get, "v19/pack/"),
+            (Operation::Get, TAIL_PREFIX),
+            (Operation::Get, HEAD_KEY),
+            (Operation::Get, KV_PREFIX),
+            (Operation::Get, MANIFEST_PREFIX),
             (Operation::Sync, ""),
             (Operation::Sync, ""),
             (Operation::Keys, ""),

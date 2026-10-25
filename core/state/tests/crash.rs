@@ -81,6 +81,8 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
         kinds,
         [
             "head put",
+            "manifest delete",
+            "manifest put",
             "pack delete",
             "pack put",
             "tail delete",
@@ -95,7 +97,16 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
 fn a_flush_with_checkpoints_in_s3_is_atomic_at_every_write() -> Result<()> {
     let packs = MemoryBlobs::default();
     let kinds = futures::executor::block_on(crash_every_flush(Some(packs)))?;
-    assert_eq!(kinds, ["head put", "tail delete", "tail put"]);
+    assert_eq!(
+        kinds,
+        [
+            "head put",
+            "manifest delete",
+            "manifest put",
+            "tail delete",
+            "tail put"
+        ]
+    );
     Ok(())
 }
 

@@ -1,17 +1,19 @@
-//! What is stored, and how it is encoded: the head and the tail entries in
-//! Restate, and the packs of checkpoints.
+//! What is stored, and how it is encoded: the head, the tail entries and
+//! the checkpoints' manifests in Restate, and the checkpoints' packs.
 //!
-//! | Store   | Key                            | Holds                                                                                   |
-//! | ------- | ------------------------------ | --------------------------------------------------------------------------------------- |
-//! | Restate | `v19/head`                     | The commit point: the version, the checkpoint and the one before, the tail's extent     |
-//! | Restate | `v19/tail/<version>/<part>`    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB            |
-//! | Packs   | `checkpoint/<version>-<nonce>` | A checkpoint: frames of pages and values it wrote, then its [`Manifest`]                |
+//! | Store   | Key                                   | Holds                                                                               |
+//! | ------- | ------------------------------------- | ----------------------------------------------------------------------------------- |
+//! | Restate | `v20/head`                            | The commit point: the version, the checkpoint and the one before, the tail's extent |
+//! | Restate | `v20/tail/<version>/<part>`           | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB        |
+//! | Restate | `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's [`Manifest`], in parts of 64 KiB                                      |
+//! | Packs   | `checkpoint/<version>-<nonce>`        | A checkpoint's pack: the frames of pages and the values it wrote                    |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
 //! pages, each a zstd frame of its own (against its file's [`crate::Base`]
 //! pages, if it has one), so that a page is read with one ranged get of its
 //! frame. A checkpoint's manifest says where each frame, large record and
-//! log entry is: in its own pack, or in an older one.
+//! log entry is: in its own pack, or in an older one. It is in Restate
+//! wherever the packs are, so that an open reads it with the tail.
 use crate::{PAGE, zstd};
 use bytes::Bytes;
 use std::{
@@ -23,11 +25,11 @@ use std::{
 /// The head's key: the commit point. An open reads it first, so a host whose
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
-pub const HEAD_KEY: &str = "v19/head";
-pub const TAIL_PREFIX: &str = "v19/tail/";
+pub const HEAD_KEY: &str = "v20/head";
+pub const TAIL_PREFIX: &str = "v20/tail/";
 /// Where packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "checkpoint/";
-const HEAD_MAGIC: &[u8; 4] = b"SH19";
+const HEAD_MAGIC: &[u8; 4] = b"SH20";
 const ENTRY_MAGIC: &[u8; 4] = b"SE19";
 const MANIFEST_MAGIC: &[u8; 4] = b"SM19";
 /// Bytes of a tail entry's part.
@@ -162,25 +164,37 @@ pub(crate) struct PackId {
 }
 
 impl PackId {
-    pub fn key(self) -> String {
-        format!("{PACK_PREFIX}{:016x}-{:016x}", self.version, self.nonce)
+    /// Its name: `<version>-<nonce>`, its pack's and its manifest's.
+    pub fn name(self) -> String {
+        format!("{:016x}-{:016x}", self.version, self.nonce)
     }
 
-    pub fn parse(key: &str) -> Option<Self> {
-        let (version, nonce) = key.strip_prefix(PACK_PREFIX)?.split_once('-')?;
+    /// Its pack's key, in the pack store.
+    pub fn key(self) -> String {
+        format!("{PACK_PREFIX}{}", self.name())
+    }
+
+    /// The pack id named `name`.
+    pub fn parse_name(name: &str) -> Option<Self> {
+        let (version, nonce) = name.split_once('-')?;
         Some(Self {
             version: u64::from_str_radix(version, 16).ok()?,
             nonce: u64::from_str_radix(nonce, 16).ok()?,
         })
     }
+
+    /// The pack id whose pack's key is `key`.
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::parse_name(key.strip_prefix(PACK_PREFIX)?)
+    }
 }
 
-/// A checkpoint, as a head names it: its pack, and where in it its manifest
-/// is.
+/// A checkpoint, as a head names it: its pack, and the bytes of its
+/// manifest, which is in Restate under the pack's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Checkpoint {
     pub pack: PackId,
-    pub manifest: (u64, u64),
+    pub manifest: u64,
 }
 
 impl Checkpoint {
@@ -189,21 +203,12 @@ impl Checkpoint {
         self.pack.version
     }
 
-    pub fn range(&self) -> Range<u64> {
-        self.manifest.0..self.manifest.0 + self.manifest.1
-    }
-
     fn encode(this: Option<&Self>, out: &mut Vec<u8>) {
         let Some(this) = this else {
             return out.push(0);
         };
         out.push(1);
-        for n in [
-            this.pack.version,
-            this.pack.nonce,
-            this.manifest.0,
-            this.manifest.1,
-        ] {
+        for n in [this.pack.version, this.pack.nonce, this.manifest] {
             put_varint(out, n);
         }
     }
@@ -216,7 +221,7 @@ impl Checkpoint {
                     version: r.varint()?,
                     nonce: r.varint()?,
                 },
-                manifest: (r.varint()?, r.varint()?),
+                manifest: r.varint()?,
             })),
             _ => Err(r.invalid()),
         }

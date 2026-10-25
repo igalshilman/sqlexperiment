@@ -357,13 +357,13 @@ test('a statement that commits resolves once its writes are stored, however many
     'INSERT INTO t(b) SELECT randomblob(3000) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)',
   );
   assert.equal(backend.unconfirmed.length, 0);
-  const tail = [...backend.stored.keys()].filter((key) => key.startsWith('v19/tail/')).length;
+  const tail = [...backend.stored.keys()].filter((key) => key.startsWith('v20/tail/')).length;
   assert.ok(tail > 8, `${tail} tail parts stored`);
   await db.save();
 });
 
 /** How many pack parts `backend` stores. */
-const packs = (backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v19/pack/')).length;
+const packs = (backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v20/pack/')).length;
 
 /** The pack parts left after 100 commits that each replace a row, with a store that lists its keys or not. */
 const packsAfterCommits = async (listing) => {

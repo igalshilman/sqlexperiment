@@ -539,19 +539,29 @@ fn records_flush_at_save() -> Result<()> {
         assert!(db.state().record("large").get().is_empty());
         db.execute("CREATE TABLE t(n)").await?;
         let (large, small) = (db.state().record("large"), db.state().record("small"));
-        db.mutation().set(&large, Bytes::from(vec![7; 5000]))?;
+        // Bytes that do not compress: most of the pack they are put in.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let noise: Vec<u8> = (0..5000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        db.mutation().set(&large, Bytes::from(noise.clone()))?;
         db.mutation().set(&small, Bytes::from_static(b"s"))?;
         db.save().await?;
 
         let mut db = Db::open(store.clone(), options()).await?;
-        assert_eq!(db.state().record("large").get(), vec![7; 5000]);
+        assert_eq!(db.state().record("large").get(), noise);
         assert_eq!(db.state().record("small").get(), &b"s"[..]);
         let large = db.state().record("large");
         db.mutation().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
         // The replaced value is garbage once no checkpoint the head names
-        // holds it: two checkpoints later, the flush's collection deletes
-        // its pack.
+        // holds it: its pack, mostly dead, moves what lives in it into the
+        // next, and two checkpoints later the flush's collection deletes it.
         let mut db = Db::open(store.clone(), options()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
         let small = db.state().record("small");

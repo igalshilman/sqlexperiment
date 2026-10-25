@@ -1,5 +1,5 @@
-//! The requests a state makes: the head and the tail in Restate, the packs
-//! in a [`BlobStore`] (S3, or Restate too).
+//! The requests a state makes: the head, the tail and the checkpoints'
+//! manifests in Restate, the packs in a [`BlobStore`] (S3, or Restate too).
 //!
 //! **A flush** puts its tail entry and the head, then syncs: one round trip,
 //! which Restate fences. A flush that adopts a checkpoint deletes, in the
@@ -12,7 +12,8 @@
 //! attempt's.
 //!
 //! **Garbage** ([`Tiered::collect_garbage`]): a pack older than the head's
-//! previous checkpoint that neither of its checkpoints names is deleted. Any
+//! previous checkpoint that neither of its checkpoints names is deleted, and
+//! so is the manifest of a checkpoint older than the previous one. Any
 //! state may collect, an owner's or a reader's, and so may a zombie:
 //! whatever head it holds, every pack a later head names is either named by
 //! its head's checkpoints or newer than the previous one.
@@ -29,6 +30,7 @@ use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 pub(crate) struct Tiered {
     pub restate: Arc<dyn KvStore>,
     packs: Arc<dyn BlobStore>,
+    manifests: KvBlobs,
     /// Whether the packs are kept in Restate too, without `packs`.
     pub packs_in_restate: bool,
 }
@@ -38,6 +40,7 @@ impl Tiered {
         Self {
             packs_in_restate: packs.is_none(),
             packs: packs.unwrap_or_else(|| Arc::new(KvBlobs::new(restate.clone()))),
+            manifests: KvBlobs::manifests(restate.clone()),
             restate,
         }
     }
@@ -72,7 +75,27 @@ impl Tiered {
     }
 
     pub async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
-        Manifest::decode(&self.get(checkpoint.pack, checkpoint.range()).await?)
+        Manifest::decode(&self.encoded_manifest(checkpoint).await?)
+    }
+
+    /// The manifest of `checkpoint`, as stored.
+    pub async fn encoded_manifest(&self, checkpoint: &Checkpoint) -> io::Result<Bytes> {
+        let name = checkpoint.pack.name();
+        let bytes = self
+            .manifests
+            .get_range(&name, 0..checkpoint.manifest)
+            .await?;
+        bytes.ok_or_else(|| {
+            io::Error::other(format!(
+                "manifest {name} is gone: the owner collected it since this state opened"
+            ))
+        })
+    }
+
+    /// Queue the manifest of the checkpoint whose pack is `pack`: like the
+    /// tail entry, it is durable with the head that names it.
+    pub async fn put_manifest(&self, pack: PackId, manifest: Bytes) -> io::Result<()> {
+        self.manifests.put(&pack.name(), manifest).await
     }
 
     pub async fn put_pack(&self, pack: PackId, body: Bytes) -> io::Result<()> {
@@ -97,7 +120,7 @@ impl Tiered {
         self.restate.sync().await
     }
 
-    /// The packs `head`'s checkpoints need.
+    /// The packs `head`'s checkpoints need: those their manifests name.
     pub async fn needed(&self, head: &Head) -> io::Result<BTreeSet<PackId>> {
         let checkpoints: Vec<Checkpoint> = [head.checkpoint, head.previous]
             .into_iter()
@@ -110,37 +133,46 @@ impl Tiered {
                 .map(|c| async move { self.manifest(&c).await }),
         )
         .await?;
-        let mut needed: BTreeSet<PackId> = checkpoints.iter().map(|c| c.pack).collect();
-        for manifest in manifests {
-            needed.extend(manifest.packs());
-        }
-        Ok(needed)
+        // A checkpoint's own pack, if it put one, holds what its manifest
+        // names.
+        Ok(manifests.iter().flat_map(Manifest::packs).collect())
     }
 
-    /// Delete the packs no checkpoint `head` names needs: see the module
-    /// documentation. How many.
+    /// Delete the packs no checkpoint `head` names needs, and the manifests
+    /// of checkpoints older than its previous one: see the module
+    /// documentation. How many packs.
     pub async fn collect_garbage(&self, head: &Head) -> io::Result<usize> {
         let Some(previous) = head.previous else {
             return Ok(0);
         };
         // A store that cannot list keeps its garbage.
-        let listed = match self.packs.list(PACK_PREFIX).await {
+        let listed = futures::try_join!(self.packs.list(PACK_PREFIX), self.manifests.list(""));
+        let (packs, manifests) = match listed {
             Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(0),
             listed => listed?,
         };
-        let older: Vec<(PackId, String)> = (listed.into_iter())
+        let older = |id: &PackId| id.version < previous.version();
+        let manifests: Vec<String> = (manifests.into_iter())
+            .filter(|name| PackId::parse_name(name).is_some_and(|id| older(&id)))
+            .collect();
+        let older: Vec<(PackId, String)> = (packs.into_iter())
             .filter_map(|key| Some((PackId::parse(&key)?, key)))
-            .filter(|(id, _)| id.version < previous.version())
+            .filter(|(id, _)| older(id))
             .collect();
-        if older.is_empty() {
-            return Ok(0);
-        }
-        let keep = self.needed(head).await?;
-        let garbage: Vec<String> = (older.into_iter())
-            .filter(|(id, _)| !keep.contains(id))
-            .map(|(_, key)| key)
-            .collect();
-        self.packs.delete(&garbage).await?;
+        let garbage: Vec<String> = match older.is_empty() {
+            true => Vec::new(),
+            false => {
+                let keep = self.needed(head).await?;
+                (older.into_iter())
+                    .filter(|(id, _)| !keep.contains(id))
+                    .map(|(_, key)| key)
+                    .collect()
+            }
+        };
+        futures::try_join!(
+            self.packs.delete(&garbage),
+            self.manifests.delete(&manifests)
+        )?;
         Ok(garbage.len())
     }
 }

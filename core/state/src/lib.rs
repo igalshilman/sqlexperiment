@@ -26,17 +26,18 @@
 //! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as
 //! a *checkpoint*: the frames of pages the tail changed, and the values it
 //! set, into one *pack* in a [`blobs::BlobStore`] (S3, through
-//! [`Open::checkpoints`], or Restate's state itself by default), with a
-//! manifest of where every frame and value is. Its head then names the
+//! [`Open::checkpoints`], or Restate's state itself by default), and a
+//! manifest of where every frame and value is, in Restate. Its head then names the
 //! checkpoint, and drops the tail it covered. Pack names are unique, and
 //! packs never change, so S3 needs no fencing, nor conditional puts.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Head | `v19/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
-//! | Tail | `v19/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (a zstd frame each) | Yes, until a checkpoint after the next one |
-//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values, a manifest | Yes, until no checkpoint the head names needs it |
+//! | Head | `v20/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
+//! | Tail | `v20/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (a zstd frame each) | Yes, until a checkpoint after the next one |
+//! | Manifests | `v20/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
+//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -519,6 +520,16 @@ impl State {
         let head = self.shared.snapshot().head().clone();
         let needed = self.shared.tail.needed(&head).await?;
         Ok(needed.iter().map(|pack| pack.key()).collect())
+    }
+
+    /// The manifests the head names, by name: its checkpoint's and the one
+    /// before's. Others are garbage.
+    #[cfg(feature = "simulation")]
+    pub fn needed_manifests(&self) -> std::collections::BTreeSet<String> {
+        let head = self.shared.snapshot().head().clone();
+        (head.checkpoint.iter().chain(&head.previous))
+            .map(|checkpoint| checkpoint.pack.name())
+            .collect()
     }
 }
 

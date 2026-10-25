@@ -21,17 +21,17 @@
 //!    identity and frame size, and a tail that starts no earlier; a new
 //!    checkpoint is newer than the one held, which becomes its previous.
 //! 3. **Never overwrite**: a tail entry is put only for the version after
-//!    the head's, and a pack's part only once.
+//!    the head's, and a part of a pack or of a manifest only once.
 //! 4. **Drop only what no head needs**: a tail entry is deleted only once
-//!    the head's checkpoint covers it, and a pack in the store only if
-//!    older than the head's previous checkpoint, and neither checkpoint
-//!    names it.
+//!    the head's checkpoint covers it, a pack in the store only if older
+//!    than the head's previous checkpoint, and neither checkpoint names it,
+//!    and a manifest only if older than the previous checkpoint.
 //! 5. **Decodable**: every head, tail entry and manifest decodes, and so
 //!    does every page, frame and value they name: a file's pages and frames
 //!    against its golden base (given [`MonitorKv::with_base`]).
 use crate::{
     Base, PAGE,
-    blobs::KV_PREFIX,
+    blobs::{KV_PREFIX, MANIFEST_PREFIX},
     format::{
         Checkpoint, Entry, HEAD_KEY, Head, Location, Manifest, PackId, Value, parse_tail_key,
     },
@@ -74,6 +74,8 @@ struct Known {
     head_unknown: bool,
     /// Packs in the store: their parts, by key.
     packs: BTreeMap<String, BTreeMap<u64, Bytes>>,
+    /// Manifests: their parts, by name.
+    manifest_parts: BTreeMap<String, BTreeMap<u64, Bytes>>,
     /// Packs elsewhere ([`MonitorKv::packs`]).
     external: Option<MemoryBlobs>,
     manifests: HashMap<PackId, Option<Manifest>>,
@@ -92,6 +94,7 @@ enum Key {
     Head,
     Tail(u64),
     Pack(String, u64),
+    Manifest(String, u64),
     Other,
 }
 
@@ -102,10 +105,49 @@ fn key(key: &str) -> Key {
     if let Some((version, _)) = parse_tail_key(key) {
         return Key::Tail(version);
     }
-    let pack = (key.strip_prefix(KV_PREFIX)).and_then(|rest| rest.rsplit_once('/'));
-    match pack.and_then(|(pack, part)| Some((pack.to_owned(), part.parse().ok()?))) {
-        Some((pack, part)) => Key::Pack(pack, part),
+    let part = |prefix: &str| {
+        let (name, part) = key.strip_prefix(prefix)?.rsplit_once('/')?;
+        Some((name.to_owned(), part.parse().ok()?))
+    };
+    if let Some((pack, part)) = part(KV_PREFIX) {
+        return Key::Pack(pack, part);
+    }
+    match part(MANIFEST_PREFIX) {
+        Some((name, part)) => Key::Manifest(name, part),
         None => Key::Other,
+    }
+}
+
+/// `parts` whole, if none is missing.
+fn whole(parts: &BTreeMap<u64, Bytes>) -> Option<Vec<u8>> {
+    let mut whole = Vec::new();
+    for (expected, (&part, bytes)) in parts.iter().enumerate() {
+        if part != expected as u64 {
+            return None;
+        }
+        whole.extend_from_slice(bytes);
+    }
+    Some(whole)
+}
+
+/// Learn that part `part` of the blob `name` among `blobs` is `value`.
+fn learn_part(
+    blobs: &mut BTreeMap<String, BTreeMap<u64, Bytes>>,
+    name: String,
+    part: u64,
+    value: Option<Bytes>,
+) {
+    let parts = blobs.entry(name.clone()).or_default();
+    match value {
+        Some(value) => {
+            parts.insert(part, value);
+        }
+        None => {
+            parts.remove(&part);
+            if parts.is_empty() {
+                blobs.remove(&name);
+            }
+        }
     }
 }
 
@@ -135,20 +177,8 @@ impl Known {
                     None => self.tail.remove(at),
                 };
             }
-            Key::Pack(pack, part) => {
-                let parts = self.packs.entry(pack.clone()).or_default();
-                match value {
-                    Some(value) => {
-                        parts.insert(part, value);
-                    }
-                    None => {
-                        parts.remove(&part);
-                        if parts.is_empty() {
-                            self.packs.remove(&pack);
-                        }
-                    }
-                }
-            }
+            Key::Pack(name, part) => learn_part(&mut self.packs, name, part, value),
+            Key::Manifest(name, part) => learn_part(&mut self.manifest_parts, name, part, value),
             Key::Other => {}
         }
     }
@@ -160,7 +190,7 @@ impl Known {
                 self.tail.remove(at);
                 self.unknown.insert(at.to_owned());
             }
-            Key::Pack(..) | Key::Other => {}
+            Key::Pack(..) | Key::Manifest(..) | Key::Other => {}
         }
     }
 
@@ -175,14 +205,7 @@ impl Known {
         if let Some(external) = &self.external {
             return external.peek(&key, range);
         }
-        let parts = self.packs.get(&key)?;
-        let mut whole = Vec::new();
-        for (expected, (&part, bytes)) in parts.iter().enumerate() {
-            if part != expected as u64 {
-                return None;
-            }
-            whole.extend_from_slice(bytes);
-        }
+        let whole = whole(self.packs.get(&key)?)?;
         let range = range.start as usize..range.end as usize;
         whole.get(range).map(Bytes::copy_from_slice)
     }
@@ -190,7 +213,9 @@ impl Known {
     /// The manifest of `checkpoint`, if the monitor sees it.
     fn manifest(&mut self, checkpoint: &Checkpoint) -> Option<&Manifest> {
         if !self.manifests.contains_key(&checkpoint.pack) {
-            let manifest = (self.pack_range(checkpoint.pack, checkpoint.range()))
+            let parts = self.manifest_parts.get(&checkpoint.pack.name());
+            let manifest = (parts.and_then(whole))
+                .filter(|bytes| bytes.len() as u64 == checkpoint.manifest)
                 .and_then(|bytes| Manifest::decode(&bytes).ok());
             self.manifests.insert(checkpoint.pack, manifest);
         }
@@ -217,6 +242,11 @@ impl Known {
                     .is_some_and(|parts| parts.contains_key(&part))
                 {
                     self.violation(format!("part {part} of pack {pack} put again"));
+                }
+            }
+            Key::Manifest(name, part) => {
+                if (self.manifest_parts.get(&name)).is_some_and(|parts| parts.contains_key(&part)) {
+                    self.violation(format!("part {part} of manifest {name} put again"));
                 }
             }
             Key::Other => self.violation(format!("a put of {at:?}")),
@@ -470,6 +500,14 @@ impl Known {
                 let older = head.previous.is_some_and(|p| id.version < p.version());
                 if !older || needed.contains(&id) {
                     self.violation(format!("pack {pack} deleted, still needed"));
+                }
+            }
+            Key::Manifest(name, _) => {
+                let Some(id) = PackId::parse_name(&name) else {
+                    return self.violation(format!("a delete of {at:?}"));
+                };
+                if head.previous.is_none_or(|p| id.version >= p.version()) {
+                    self.violation(format!("manifest {name} deleted, still needed"));
                 }
             }
             Key::Head | Key::Other => self.violation(format!("a delete of {at:?}")),

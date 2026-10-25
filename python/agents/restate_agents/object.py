@@ -44,11 +44,11 @@ from restate_agents.signals import resolve as resolve_signal
 from restate_agents.signals import steer as steer_signal
 
 # Restate's UI hides the SQL storage from the journal view: the database's
-# head, tail and packs in the object's state (v19/...), and the `sync` runs
+# head, tail, manifests and packs in the object's state (v20/...), and the `sync` runs
 # after its writes.
 METADATA = {
     "dev.restate.tooling.journal.hidden.names": "sync",
-    "dev.restate.tooling.journal.hidden.name.prefix": "v19/",
+    "dev.restate.tooling.journal.hidden.name.prefix": "v20/",
 }
 
 # Each attempt resumes from the database, so a failed one is retried for weeks: soon after a crash, then twice as

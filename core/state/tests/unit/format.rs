@@ -6,7 +6,7 @@ fn checkpoint(version: u64) -> Checkpoint {
             version,
             nonce: u64::MAX - version,
         },
-        manifest: (1 << 20, 77),
+        manifest: 77,
     }
 }
 
