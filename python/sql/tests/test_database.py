@@ -469,10 +469,11 @@ async def test_a_listing_that_fails_fails_the_commit_that_collects_which_landed(
     store.keys = keys
     db = await restate_sql.open(ns, store)
     await db.execute("CREATE TABLE t(b BLOB)")
-    committed = 1
+    committed = 0
     # A commit that checkpoints collects: once the tail holds a few rows.
     with pytest.raises(Exception, match="listing failed"):
-        for committed in range(1, 40):
+        for _ in range(40):
+            committed += 1
             await db.execute("INSERT INTO t VALUES (randomblob(3000))")
     reopened = await restate_sql.open(ns, backend.request())
     assert await reopened.query("SELECT count(*) FROM t") == [[committed]]
