@@ -1103,7 +1103,7 @@ state's frame packs (v20: a tail in Restate, checkpoints now and then):
   requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in
   1.1–1.6 ms, reading the checkpoint's frames and replaying the tail. About
-  one in six takes 10–13 ms instead, with the packs in Restate or in S3
+  one in eight takes 10–13 ms instead, with the packs in Restate or in S3
   alike; why is not known yet.
 - **With the packs in S3** (`cargo bench --bench agent -- s3`, an S3 in
   memory, without its latency): a checkpoint is due once the tail holds 1
