@@ -734,9 +734,8 @@ impl KvIo {
         // its largest root page), which `tidied` may take for b-tree pages.
         let first = database.get(&(DB, 0)).cloned().flatten();
         let first = first.or_else(|| private.header.first().cloned());
-        let tidy = first.is_some_and(|first| {
-            page_size(&first) == BLOCK_SIZE && first[52..56] == [0; 4]
-        });
+        let tidy =
+            first.is_some_and(|first| page_size(&first) == BLOCK_SIZE && first[52..56] == [0; 4]);
         for ((_, block), page) in database {
             let page = match page {
                 Some(page) if tidy => Some(tidied(&page, block == 0).unwrap_or(page)),

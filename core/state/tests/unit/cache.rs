@@ -156,8 +156,12 @@ fn namespaces_are_kept_by_the_bytes_of_their_states() {
     });
     for n in 0..64 {
         let mut state = Durable::empty(Head::new(n, 16));
-        state.records.insert("value".into(), Bytes::from(vec![0; 16 << 10]));
-        cache.namespace(&n.to_string()).record(None, Some(1), Arc::new(state));
+        state
+            .records
+            .insert("value".into(), Bytes::from(vec![0; 16 << 10]));
+        cache
+            .namespace(&n.to_string())
+            .record(None, Some(1), Arc::new(state));
     }
     let kept = (0..64)
         .filter(|n| cache.namespace(&n.to_string()).durable().is_some())
