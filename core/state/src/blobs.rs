@@ -27,8 +27,8 @@ pub trait BlobStore: Send + Sync {
     ) -> BoxFuture<'a, io::Result<Option<Bytes>>>;
     /// Store `value` at `key`.
     fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>>;
-    /// Remove `key`; a missing key succeeds.
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>>;
+    /// Remove `keys`; a missing key succeeds.
+    fn delete<'a>(&'a self, keys: &'a [String]) -> BoxFuture<'a, io::Result<()>>;
     /// Every key under `prefix`.
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>>;
 }
@@ -116,10 +116,20 @@ impl BlobStore for KvBlobs {
         })
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+    /// One listing and one sync for all of `keys`.
+    fn delete<'a>(&'a self, keys: &'a [String]) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
-            for part in self.parts(&format!("{key}/")).await? {
-                self.store.delete(&part)?;
+            if keys.is_empty() {
+                return Ok(());
+            }
+            let keys: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+            for part in self.parts("").await? {
+                let key = part
+                    .strip_prefix(KV_PREFIX)
+                    .and_then(|p| p.rsplit_once('/'));
+                if key.is_some_and(|(key, _)| keys.contains(key)) {
+                    self.store.delete(&part)?;
+                }
             }
             self.store.sync().await
         })
@@ -144,7 +154,10 @@ pub use object::ObjectStoreBlobs;
 mod object {
     use super::BlobStore;
     use bytes::Bytes;
-    use futures::{TryStreamExt, future::BoxFuture};
+    use futures::{
+        TryStreamExt,
+        future::{BoxFuture, try_join_all},
+    };
     use object_store::{Error, ObjectStore, ObjectStoreExt, path::Path};
     use std::{io, ops::Range, sync::Arc};
 
@@ -167,6 +180,13 @@ mod object {
 
         fn path(&self, key: &str) -> Path {
             Path::from(format!("{}/{key}", self.prefix))
+        }
+
+        async fn delete_one(&self, key: &str) -> io::Result<()> {
+            match self.store.delete(&self.path(key)).await {
+                Ok(()) | Err(Error::NotFound { .. }) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
     }
 
@@ -192,12 +212,10 @@ mod object {
             })
         }
 
-        fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
+        fn delete<'a>(&'a self, keys: &'a [String]) -> BoxFuture<'a, io::Result<()>> {
             Box::pin(async move {
-                match self.store.delete(&self.path(key)).await {
-                    Ok(()) | Err(Error::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(error.into()),
-                }
+                try_join_all(keys.iter().map(|key| self.delete_one(key))).await?;
+                Ok(())
             })
         }
 

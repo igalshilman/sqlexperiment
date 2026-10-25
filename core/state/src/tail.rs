@@ -22,11 +22,8 @@ use crate::{
     kv::KvStore,
 };
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, future::try_join_all, stream};
+use futures::future::try_join_all;
 use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
-
-/// Requests in flight to the pack store.
-const PARALLEL: usize = 32;
 
 /// The stores of a state: see the module documentation.
 pub(crate) struct Tiered {
@@ -143,15 +140,7 @@ impl Tiered {
             .filter(|(id, _)| !keep.contains(id))
             .map(|(_, key)| key)
             .collect();
-        let deleted = garbage.len();
-        stream::iter(
-            garbage
-                .into_iter()
-                .map(|key| async move { self.packs.delete(&key).await }),
-        )
-        .buffer_unordered(PARALLEL)
-        .try_collect::<()>()
-        .await?;
-        Ok(deleted)
+        self.packs.delete(&garbage).await?;
+        Ok(garbage.len())
     }
 }

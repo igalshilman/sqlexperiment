@@ -298,8 +298,13 @@ impl BlobStore for MemoryBlobs {
         self.write((key.to_owned(), Some(value)))
     }
 
-    fn delete<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<()>> {
-        self.write((key.to_owned(), None))
+    fn delete<'a>(&'a self, keys: &'a [String]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            for key in keys {
+                self.write((key.clone(), None)).await?;
+            }
+            Ok(())
+        })
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
