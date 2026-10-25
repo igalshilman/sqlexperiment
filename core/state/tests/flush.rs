@@ -31,6 +31,24 @@ impl KvStore for Stalled {
     }
 }
 
+/// A store that cannot list its keys (the default [`KvStore::keys`]).
+struct Unlisted(Arc<MemoryKv>);
+
+impl KvStore for Unlisted {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.0.put(key, value)
+    }
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.0.delete(key)
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        self.0.sync()
+    }
+}
+
 /// The state reads as last flushed, whatever a mutation holds, until that mutation
 /// flushes; a second mutation flushes on top of the first.
 #[test]
@@ -383,6 +401,32 @@ fn opening_flushing_and_collecting_are_send() -> Result<()> {
             send(mutation.flush()).await?;
             send(state.collect_garbage()).await?;
         }
+        Ok(())
+    })
+}
+
+/// A store that cannot list its keys keeps its garbage: its checkpoints
+/// collect nothing, and its flushes go on.
+#[test]
+fn a_store_that_cannot_list_keeps_its_packs() -> Result<()> {
+    futures::executor::block_on(async {
+        let memory = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let state = State::open(Arc::new(Unlisted(memory.clone())))
+            .options(options)
+            .await?;
+        let file = state.file("db")?;
+        for n in 0..6 {
+            let mut mutation = state.mutation();
+            mutation.write(&file, 0, Some(page(n)))?;
+            let report = mutation.flush().await?;
+            assert_eq!(report.checkpoint.map_or(0, |c| c.deleted), 0);
+        }
+        assert_eq!(file.read(0).await?, Some(page(5)));
+        assert!(memory.packs().len() > state.needed_packs().await?.len());
         Ok(())
     })
 }

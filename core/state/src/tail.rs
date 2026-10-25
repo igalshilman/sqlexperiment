@@ -126,13 +126,22 @@ impl Tiered {
         let Some(previous) = head.previous else {
             return Ok(0);
         };
+        // A store that cannot list keeps its garbage.
+        let listed = match self.packs.list(PACK_PREFIX).await {
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(0),
+            listed => listed?,
+        };
+        let older: Vec<(PackId, String)> = (listed.into_iter())
+            .filter_map(|key| Some((PackId::parse(&key)?, key)))
+            .filter(|(id, _)| id.version < previous.version())
+            .collect();
+        if older.is_empty() {
+            return Ok(0);
+        }
         let keep = self.needed(head).await?;
-        let listed = self.packs.list(PACK_PREFIX).await?;
-        let garbage: Vec<String> = (listed.into_iter())
-            .filter(|key| {
-                PackId::parse(key)
-                    .is_some_and(|id| id.version < previous.version() && !keep.contains(&id))
-            })
+        let garbage: Vec<String> = (older.into_iter())
+            .filter(|(id, _)| !keep.contains(id))
+            .map(|(_, key)| key)
             .collect();
         let deleted = garbage.len();
         stream::iter(
