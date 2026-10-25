@@ -45,8 +45,9 @@ class Store(Protocol):
     first runs.
 
     A store may also return its ``keys()`` (every key, as the object's
-    ``ctx.state_keys()``), or an awaitable of them: then a commit now and then
-    sweeps the database's garbage. One that cannot is never swept.
+    ``ctx.state_keys()``), or an awaitable of them: then a commit that
+    checkpoints deletes the checkpoints' packs no checkpoint needs any more.
+    One that cannot keeps them.
     """
 
     def get(self, key: str) -> bytes | None | Awaitable[bytes | None]: ...
@@ -65,9 +66,9 @@ async def open(namespace: str, store: Store, *, reader: bool = False) -> Databas
     A ``reader`` reads the database beside the session that writes it (a
     shared handler's, beside the exclusive one's): it writes nothing to the
     store, and reads the state it opened on throughout, a snapshot, whatever
-    the writer commits meanwhile. The writer's sweeps delete what it no longer
-    needs at least 16 commits later, so a reader still reading after 16 of them may fail
-    ("is gone"): open it again (a shared handler is retried).
+    the writer commits meanwhile, until the writer's second checkpoint after
+    it: a reader still reading then may fail ("is gone"): open it again (a
+    shared handler is retried).
     """
     loop = asyncio.get_running_loop()
     # A failed write cannot fail its caller, which has moved on: the next sync

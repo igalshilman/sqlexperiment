@@ -3,8 +3,9 @@
 //! The host passes its asyncio event loop and one dispatcher function,
 //! `dispatch(op, key, value, reply)`, which `restate_sql/__init__.py` builds from
 //! a store object (`get`, `set`, `clear`, `sync`, and `keys` if it lists its
-//! keys: then it is swept now and then, see [`state::StateOptions::sweep_every`]). Every request is scheduled
-//! on the loop with `call_soon_threadsafe`, which runs callbacks in the order
+//! keys: then a checkpoint deletes the packs no checkpoint needs, see
+//! [`state::State::collect_garbage`]). Every request is scheduled on the loop
+//! with `call_soon_threadsafe`, which runs callbacks in the order
 //! they were scheduled, so a read sees the writes before it.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it

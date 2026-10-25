@@ -361,13 +361,14 @@ async def test_a_statement_that_commits_completes_once_its_writes_are_stored_how
     backend = Backend()
     db = await restate_sql.open(fresh(), backend.request())
     await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)")
-    # Thousands of page writes, hundreds of blobs, each scheduled on the loop.
+    # Thousands of page writes: a tail entry of megabytes, in parts, each
+    # scheduled on the loop.
     await db.execute(
         "INSERT INTO t(b) SELECT randomblob(3000) FROM "
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)"
     )
     assert backend.unconfirmed == []
-    assert len(backend.stored) > 500
+    assert sum(key.startswith("v19/tail/") for key in backend.stored) > 8
     await db.save()
 
 
@@ -433,8 +434,8 @@ def listing(backend):
     return lambda: [*backend.stored, *(key for key, _ in backend.unconfirmed)]
 
 
-async def blobs_after_commits(keys):
-    """The blobs left after 100 commits that each replace a row."""
+async def packs_after_commits(keys):
+    """The pack parts left after 100 commits that each replace a row."""
     backend = Backend()
     store = backend.request()
     if keys:
@@ -444,12 +445,12 @@ async def blobs_after_commits(keys):
     for _ in range(100):
         await db.execute("INSERT OR REPLACE INTO t VALUES(1, randomblob(3000))")
     await db.save()
-    return sum(key.startswith("v17/blob/") for key in backend.stored)
+    return sum(key.startswith("v19/pack/") for key in backend.stored)
 
 
-async def test_a_store_that_lists_its_keys_is_swept_and_one_that_cannot_keeps_its_garbage():
-    swept, kept = await blobs_after_commits(True), await blobs_after_commits(False)
-    assert swept < 60 and kept > 100, (swept, kept)
+async def test_a_store_that_lists_its_keys_is_collected_and_one_that_cannot_keeps_its_packs():
+    swept, kept = await packs_after_commits(True), await packs_after_commits(False)
+    assert swept < 10 and kept > 40, (swept, kept)
 
 
 def raises():
@@ -461,7 +462,7 @@ async def rejects():
 
 
 @pytest.mark.parametrize("keys", [raises, rejects])
-async def test_a_listing_that_fails_fails_the_commit_that_sweeps_which_landed(keys):
+async def test_a_listing_that_fails_fails_the_commit_that_collects_which_landed(keys):
     backend = Backend()
     ns = fresh()
     store = backend.request()
@@ -469,7 +470,7 @@ async def test_a_listing_that_fails_fails_the_commit_that_sweeps_which_landed(ke
     db = await restate_sql.open(ns, store)
     await db.execute("CREATE TABLE t(n INTEGER)")
     committed = 1
-    # A commit sweeps every 16 versions.
+    # A commit that checkpoints collects.
     with pytest.raises(Exception, match="listing failed"):
         for committed in range(1, 40):
             await db.execute(f"INSERT INTO t VALUES ({committed})")

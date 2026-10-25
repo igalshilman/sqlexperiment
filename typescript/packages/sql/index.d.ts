@@ -17,8 +17,9 @@ export interface Store {
   clear(key: string): void;
   sync(): Promise<void> | void;
   /**
-   * Every key, as the object's `ctx.stateKeys()`: for a sweep that deletes
-   * the database's garbage now and then. A store without it is never swept.
+   * Every key, as the object's `ctx.stateKeys()`: then a commit that
+   * checkpoints deletes the checkpoints' packs no checkpoint needs any more.
+   * A store without it keeps them.
    */
   keys?(): Promise<string[]> | string[];
 }
@@ -88,12 +89,12 @@ export declare function open(namespace: string, store: Store, options?: OpenOpti
 export interface OpenOptions {
   /**
    * Read the namespace beside its owner, which writes meanwhile (a virtual
-   * object's shared handler): from the blobs the owner cached, writing
+   * object's shared handler): from the packs the owner cached, writing
    * nothing to the store or the cache; SQL changes stay in the session. It
-   * reads the state as of open throughout, a snapshot, whatever the owner
-   * commits meanwhile. The owner's sweeps delete what it no longer needs at
-   * least 16 commits later, so a reader still reading after 16 of them may fail ("is gone"):
-   * open it again (a shared handler is retried).
+   * reads the state as of open, a snapshot, whatever the owner commits
+   * meanwhile, until the owner's second checkpoint after it: a reader still
+   * reading then may fail ("is gone"): open it again (a shared handler is
+   * retried).
    */
   reader?: boolean;
 }

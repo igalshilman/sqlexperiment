@@ -3,8 +3,9 @@
 //! The host passes one dispatcher function, `([op, key, value])`, which `index.js`
 //! builds from a store object `{ get, set, clear, sync, keys? }`. Every request
 //! goes through it in the order it was issued, so a read sees the writes
-//! before it. A store with `keys` is swept now and then (see
-//! [`state::StateOptions::sweep_every`]); one without keeps its garbage.
+//! before it. With `keys`, a checkpoint deletes the packs no checkpoint
+//! needs (see [`state::State::collect_garbage`]); a store without keeps its
+//! garbage.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
