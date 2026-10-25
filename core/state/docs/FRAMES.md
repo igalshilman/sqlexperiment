@@ -139,23 +139,32 @@ What brought the bytes down from the first frame packs:
   writes it, as SQLite's `secure_delete` does: a cached insert puts 1879
   bytes rather than 3136.
 
-**Packs in S3** (`S3=1`): dollars per million flushes at S3 Standard's
-price uncached and Express One Zone's cached; tail+checkpoints → frame packs.
+**Packs in S3** (`S3=1`): what frame packs cost on S3 Standard, in
+dollars per million flushes. Uncached is a process that reads the pages a
+flush needs from S3; cached, one whose page cache holds them.
 
-| Workload        | Restate B   | S3 GETs, uncached | S3 upload B | Cold S3 GETs | Standard $/M, uncached | Express $/M, cached |
-| --------------- | ----------- | ----------------- | ----------- | ------------ | ---------------------- | ------------------- |
-| chat+effects    | 1724 → 1937 | 1.20 → 3.07       | 185 → 176   | 4 → 4        | 0.54 → 1.29            | 0.02 → 0.02         |
-| small: update 1 | 1059 → 1737 | 0.46 → 2.02       | 54 → 35     | 4 → 3        | 0.25 → 0.87            | 0.02 → 0.02         |
-| 10k: update 1   | 756 → 429   | 7.64 → 7.64       | 300 → 214   | 10 → 4       | 3.13 → 3.13            | 0.02 → 0.02         |
-| 10k: update 10  | 3854 → 1808 | 26.5 → 39.4       | 164 → 229   | 7 → 5        | 10.68 → 15.83          | 0.02 → 0.02         |
-| 10k: insert 1   | 1603 → 1750 | 5.18 → 6.44       | 141 → 130   | 9 → 6        | 2.15 → 2.66            | 0.02 → 0.02         |
-| 100k: update 1  | 522 → 400   | 13.8 → 8.2        | 331 → 234   | 58 → 4       | 5.61 → 3.34            | 0.03 → 0.02         |
-| 200k: update 1  | 564 → 409   | 22.5 → 11.7       | 444 → 259   | 60 → 6       | 9.08 → 4.76            | 0.03 → 0.02         |
-| 200k: update 10 | 2251 → 812  | 44.5 → 59.3       | 892 → 546   | 52 → 6       | 17.89 → 23.78          | 0.03 → 0.02         |
-| 1M: update 1    | 632 → 411   | 234.1 → 10.5      | 1352 → 470  | 286 → 4      | 93.70 → 4.27           | 0.06 → 0.02         |
-| 1M: update 10   | 2258 → 789  | 128.7 → 72.6      | 2102 → 876  | 534 → 4      | 51.57 → 29.11          | 0.09 → 0.02         |
+| Workload             | Uncached $/M flushes | Cached $/M flushes | Stored in S3 | Storage $/month |
+| -------------------- | -------------------- | ------------------ | ------------ | --------------- |
+| chat+effects         | $1.29                | $0.07              | 0.06 MiB     | ~$0             |
+| small: update 1      | $0.87                | $0.07              | 0.01 MiB     | ~$0             |
+| 10k rows: update 1   | $3.13                | $0.09              | 1.2 MiB      | $0.00003        |
+| 10k rows: update 10  | $15.83               | $0.09              | 1.1 MiB      | $0.00003        |
+| 10k rows: insert 1   | $2.66                | $0.09              | 1.1 MiB      | $0.00003        |
+| 100k rows: update 1  | $3.34                | $0.09              | 10.8 MiB     | $0.00024        |
+| 200k rows: update 1  | $4.76                | $0.09              | 21.6 MiB     | $0.00048        |
+| 200k rows: update 10 | $23.78               | $0.09              | 21.6 MiB     | $0.00049        |
+| 1M rows: update 1    | $4.27                | $0.09              | 108 MiB      | $0.0024         |
+| 1M rows: update 10   | $29.11               | $0.09              | 108 MiB      | $0.0024         |
 
-A cached flush is two round trips here too, and a checkpoint one PUT.
+- **Cached:** the checkpoints, nearly all of it: a PUT and a LIST each,
+  about once in 128 flushes, at $5 a million requests.
+- **Uncached:** the GETs, at $0.40 a million: a flush reads the frames
+  its pages are in, so the cost follows the rows it touches more than the
+  database's size.
+- **Storage:** a rounding error at any size.
+
+Against tail+checkpoints, with a cached flush two round trips in both and
+a checkpoint one PUT:
 
 - **Restate bytes:** about half on the larger databases, in both modes:
   a tail page costs what changed since the checkpoint. With packs in S3 a
@@ -169,8 +178,7 @@ A cached flush is two round trips here too, and a checkpoint one PUT.
 - **Uncached flushes** read the checkpoint's frames their pages are in,
   not chunk deltas: more GETs on small databases and ten-row updates (up
   to 4× for a small one, $0.87 rather than $0.25 a million on Standard),
-  far fewer on large ones (1M update 1: $4.27 rather than $93.70). With a
-  cache every workload costs $0.02 a million on Express.
+  far fewer on large ones (1M update 1: $4.27 rather than $93.70).
 - **Code:** 3,017 lines in the state crate, without comments and blanks,
   against 3,492 for tail+checkpoints and 3,051 for blob-claims; the SQL
   crate's page tidying is 50 more.
