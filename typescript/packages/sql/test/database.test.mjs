@@ -380,7 +380,7 @@ const packsAfterCommits = async (listing) => {
 
 test('a store that lists its keys is collected; one that cannot keeps its packs', async () => {
   const [collected, kept] = [await packsAfterCommits(true), await packsAfterCommits(false)];
-  assert.ok(collected < 10 && kept > 40, `${collected} pack parts left collected, ${kept} kept`);
+  assert.ok(collected < 5 && kept > 10, `${collected} pack parts left collected, ${kept} kept`);
 });
 
 for (const { how, keys } of [
@@ -398,11 +398,11 @@ for (const { how, keys } of [
     const store = backend.request();
     store.keys = keys;
     const db = await open(ns, store);
-    await db.execute('CREATE TABLE t(n INTEGER)');
+    await db.execute('CREATE TABLE t(b BLOB)');
     let committed = 1;
-    // A commit that checkpoints collects.
+    // A commit that checkpoints collects: once the tail holds a few rows.
     await assert.rejects(async () => {
-      for (; committed < 40; committed++) await db.execute('INSERT INTO t VALUES (?)', [committed]);
+      for (; committed < 40; committed++) await db.execute('INSERT INTO t VALUES (randomblob(3000))');
     }, /listing failed/);
     const reopened = await open(ns, backend.request());
     assert.deepEqual(await reopened.query('SELECT count(*) FROM t'), [[committed]]);
