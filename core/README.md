@@ -58,9 +58,9 @@ in what else rides along, and how often.
 | `binding::Session`: the Node.js addon and the Python extension, under `restate-fns` | After each call that leaves no SQL transaction open | The record `effects`: the sends committed with the rows, an outbox, opaque to the storage                       |
 | The [durable functions runtime](../rust/functions/README.md)                        | Once per turn: the seal                             | The run (record `run`), the VM's memory (record `memory`, a file and a log), each extension's records and files |
 
-Deeper: the state's [README](state/README.md), [overview](state/docs/OVERVIEW.md),
-[design](state/docs/DESIGN.md) and [format](state/docs/FORMAT.md); SQL's
-[README](sql/README.md).
+Deeper: the state's [README](state/README.md),
+[architecture](state/docs/ARCHITECTURE.md), [design](state/docs/DESIGN.md) and
+[format](state/docs/FORMAT.md); SQL's [README](sql/README.md).
 
 ## Build and test
 

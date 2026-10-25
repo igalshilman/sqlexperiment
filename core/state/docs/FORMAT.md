@@ -116,5 +116,5 @@ record is set, a file cut, a log truncated. A paged file with a base
 (`State::file_with_base`) is over a golden image the host holds, named by
 the base's id: its pages and frames decode only with that base.
 
-See [DESIGN.md](DESIGN.md) for the flush, checkpoint, open and garbage
-rules.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the flush, checkpoint, open and
+garbage rules.
