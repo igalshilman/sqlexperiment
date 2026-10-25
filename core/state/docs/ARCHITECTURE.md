@@ -208,7 +208,10 @@ checkpoint, and the collection after it, costs a round trip or two.
 Then the records set and log entries appended since: inline in the
 manifest if up to 1 KiB, else into the pack. And **compaction**: any older
 pack the new manifest needs less than half of has its live ranges copied,
-as they are, into the new pack, so that pack can go.
+as they are, into the new pack, so that pack can go. Ranges of a pack
+close together are fetched as one read, and one checkpoint moves at most
+64 MiB, the cheapest packs first; the rest move at the checkpoints after
+it.
 
 All of that is one pack and one manifest. The flush's head then names the
 new checkpoint, the one before becomes the previous checkpoint, and the
@@ -321,9 +324,9 @@ P16                           ●━━━━━━━━━▶
   page reads from at most a frame and one patch.
 - **Compaction:** once the latest manifest needs less than half of a
   pack's bytes, the checkpoint copies the live ranges, as they are, into
-  its own pack (P8 at C12, P4 at C16). Every pack a manifest names stays
-  at least half live, so what is stored stays within about twice the
-  state.
+  its own pack (P8 at C12, P4 at C16), up to 64 MiB a checkpoint. Every
+  pack a manifest names is soon at least half live, so what is stored
+  stays within about twice the state.
 - **Size:** a checkpoint's pack follows what the tail changed, plus what
   compaction moves; the manifest is the part that grows with the
   database, at about 1.7 bytes per frame.
