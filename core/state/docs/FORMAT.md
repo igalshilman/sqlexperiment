@@ -61,7 +61,7 @@ at `v19/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
 | Files   | Count, then per paged file changed: its name, its size after in 512-byte units (at most 10 GiB), its base's id plus one (`0` for none), a count, then per page written, ascending: its number as the gap from the page after the one before (the first from 0), and a byte string: empty for a hole, else the page |
 
 An entry appended and dropped by the same flush is not stored. A page is a
-zstd frame of its 4096 bytes, compressed with its *reference* as a raw
+zstd frame of its 4096 bytes, compressed with its _reference_ as a raw
 prefix: the page as the head's checkpoint holds it (its patch, else its
 frame's page), else its file's base's page, else nothing. Every entry of a
 tail compresses against the same checkpoint, so each decodes alone. A

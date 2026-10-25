@@ -58,17 +58,17 @@ hole.
 **The tail.** A flush stores what its mutation changed, as it changed it:
 the records set, the log entries appended and truncations, the files'
 sizes, and each page written, a zstd frame of its own compressed against
-its *reference*: the page as the head's checkpoint holds it (its patch,
+its _reference_: the page as the head's checkpoint holds it (its patch,
 else its frame), else its base's page. The reference stays the same for
 the whole tail, so an entry decodes alone, and a small change to a page
 costs bytes in proportion to what changed since the checkpoint. Applied in
-memory, the tail is the *overlay*: the pages written since the checkpoint,
+memory, the tail is the _overlay_: the pages written since the checkpoint,
 the records and logs as they are, and, for a file that shrank, where it was
 cut.
 
 **Checkpoints.** A checkpoint is the state as of a version, in one pack,
-with a *manifest* that says where every frame, patch, large record and log
-entry is: in this pack, or in an older one. A *patch* is one page changed
+with a _manifest_ that says where every frame, patch, large record and log
+entry is: in this pack, or in an older one. A _patch_ is one page changed
 since its frame was written, compressed against the frame's page. A head
 names its checkpoint and the one before (for readers that opened on it),
 and keeps the tail since the one before.
@@ -148,7 +148,7 @@ fewer, so a small database's tail stays short. A mutation marked with
 writes the state as of the head, into one new pack:
 
 1. **Frames.** A frame the overlay changed only a few pages of is
-   *patched*: each page it changed is put as a patch, compressed against
+   _patched_: each page it changed is put as a patch, compressed against
    the frame's page, while the frame's patches stay within half its stored
    bytes. Any other frame the overlay touched (or a cut reached) is rebuilt
    from its old frame and patches (fetched, in parallel) and the overlay's

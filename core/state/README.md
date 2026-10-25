@@ -70,7 +70,7 @@ A namespace holds:
   change costs about what changed. An entry past 1 MiB is cut into parts.
 - **Packs** (`checkpoint/<version>-<nonce>`): one per checkpoint, put once
   and never changed: the frames it wrote, large records and log entries,
-  then the *manifest*, which says where every file's frames, every record
+  then the _manifest_, which says where every file's frames, every record
   and every log entry are, in this pack or an older one.
 
 **Frames.** A paged file is a row of frames of `frame_pages` pages (4,
@@ -89,7 +89,7 @@ stays short), a flush first writes a checkpoint, as does any flush of a
 mutation marked `mutation.checkpoint()`. It rewrites each frame the tail
 changed, from the old frame and the tail's pages; or, where the tail changed
 only a few of a frame's pages (their patches stay within half the frame's
-stored bytes), it *patches* the frame: it puts those pages, each compressed
+stored bytes), it _patches_ the frame: it puts those pages, each compressed
 against the frame's. It puts the records set and log entries appended
 since, inline in the manifest if small, and copies the live ranges of packs
 it needs less than half of (compaction): one pack, one put. The flush's head names it,
@@ -170,10 +170,10 @@ layout, with measurements against the ones before.
 
 ## Layout
 
-| Path             | What                                                       |
-| ---------------- | ---------------------------------------------------------- |
-| `src/`, `tests/` | The crate and its tests                                    |
-| [`docs/`](docs)  | Overview, design, storage format, experiment reports       |
+| Path             | What                                                 |
+| ---------------- | ---------------------------------------------------- |
+| `src/`, `tests/` | The crate and its tests                              |
+| [`docs/`](docs)  | Overview, design, storage format, experiment reports |
 
 ## Build and test
 
