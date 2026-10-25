@@ -440,8 +440,8 @@ fn turns_are_logged_folded_and_replayed() -> Result<()> {
     Ok(())
 }
 
-/// A big image and small turns: each turn writes the chunks it changed, as
-/// deltas against their base, not the image.
+/// A big image and small turns: each turn writes the pages it changed, each
+/// against the checkpoint's, not the image.
 #[test]
 fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
     let source = "export async function main(){const words=new Uint32Array(8*1024);for(let i=0;i<words.length;i++)words[i]=Math.random()*2**32;for(let i=0;i<40;i++){words[i]=i;await durable.call('tick');}return words[39];}";
@@ -451,10 +451,11 @@ fn small_turns_do_not_rewrite_a_big_image() -> Result<()> {
         step(&mut run)?;
     }
     assert!(store.memory_pages() >= 8, "{} pages", store.memory_pages());
-    // The first turn writes 32 KiB of noise; the others a delta of a word
-    // each, and a root: ~150 KiB in all.
+    // The first turn writes 32 KiB of noise, and so does each of the two
+    // checkpoints; the others ~2 KiB each, and a head: ~200 KiB in all,
+    // against 1.3 MiB for the image every turn.
     let written = store.bytes_written();
-    assert!(written < 160 * 1024, "{written} bytes");
+    assert!(written < 220 * 1024, "{written} bytes");
     let mut run = start(&store, source, Value::Null, 1)?;
     assert_eq!(value(&finish(&mut run)?), json!(39));
     Ok(())

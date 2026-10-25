@@ -530,6 +530,24 @@ impl Manifest {
         frames.chain(values)
     }
 
+    /// Every location it names, to change.
+    #[cfg(feature = "simulation")]
+    pub fn locations_mut(&mut self) -> impl Iterator<Item = &mut Location> {
+        let frames = (self.files.values_mut()).flat_map(|file| {
+            file.frames
+                .iter_mut()
+                .flatten()
+                .chain(file.patches.values_mut())
+        });
+        let values = (self.records.values_mut())
+            .chain(self.logs.values_mut().flat_map(|log| &mut log.values))
+            .filter_map(|value| match value {
+                Value::Stored(at) => Some(at),
+                Value::Inline(_) => None,
+            });
+        frames.chain(values)
+    }
+
     /// Point what it names at `moved` to where it moved.
     pub fn relocate(&mut self, moved: &HashMap<Location, Location>) {
         let mut relocate = |at: &mut Location| {

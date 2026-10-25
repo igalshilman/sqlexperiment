@@ -1,8 +1,8 @@
 //! In-memory model of a Restate object's state, as [`crate::kv`] describes
 //! it, with exact logical traffic counters.
 use crate::{
-    blobs::KV_PREFIX,
-    format::{HEAD_KEY, Head, TAIL_PREFIX, parse_tail_key},
+    blobs::{KV_PART, KV_PREFIX},
+    format::{HEAD_KEY, Head, Manifest, PackId, TAIL_PREFIX, parse_tail_key},
     kv::KvStore,
     simulation::yield_now,
 };
@@ -146,14 +146,66 @@ impl MemoryKv {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
-    /// Every key and its value, with the head's random database identity
-    /// zeroed: two stores that hold the same state compare equal.
+    /// Every key and its value as two stores that hold the same state hold
+    /// them: the head's random database identity zeroed, and each pack named
+    /// by its version, without its random nonce, here and in the head and
+    /// manifests that name it.
     pub fn contents(&self) -> BTreeMap<String, Bytes> {
-        let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
+        let canonical = |pack: PackId| PackId { nonce: 0, ..pack };
+        let mut contents = BTreeMap::new();
+        let mut parts: BTreeMap<PackId, BTreeMap<u64, Bytes>> = BTreeMap::new();
+        for (key, value) in self.values() {
+            match key
+                .strip_prefix(KV_PREFIX)
+                .and_then(|key| key.rsplit_once('/'))
+            {
+                Some((pack, part)) => {
+                    let pack = PackId::parse(pack).expect("a stored pack's key parses");
+                    let part = part.parse().expect("a stored pack's part parses");
+                    parts.entry(pack).or_default().insert(part, value);
+                }
+                None => drop(contents.insert(key, value)),
+            }
+        }
+        let mut packs: BTreeMap<PackId, Vec<u8>> = (parts.into_iter())
+            .map(|(pack, parts)| (pack, parts.into_values().flatten().collect()))
+            .collect();
         if let Some(bytes) = contents.get_mut(HEAD_KEY) {
             let mut head = Head::decode(bytes).expect("a stored head decodes");
             head.id = 0;
+            for checkpoint in [&mut head.checkpoint, &mut head.previous]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(pack) = packs.get_mut(&checkpoint.pack) {
+                    let range = checkpoint.range();
+                    let at = range.start as usize;
+                    let mut manifest =
+                        Manifest::decode(&pack[range.start as usize..range.end as usize])
+                            .expect("a stored manifest decodes");
+                    for at in manifest.locations_mut() {
+                        at.pack = canonical(at.pack);
+                    }
+                    let sizes = std::mem::take(&mut manifest.sizes);
+                    manifest.sizes = (sizes.into_iter())
+                        .map(|(pack, size)| (canonical(pack), size))
+                        .collect();
+                    let encoded = manifest.encode();
+                    pack.truncate(at);
+                    pack.extend_from_slice(&encoded);
+                    checkpoint.manifest = (at as u64, encoded.len() as u64);
+                }
+                checkpoint.pack = canonical(checkpoint.pack);
+            }
             *bytes = head.encode();
+        }
+        for (pack, bytes) in packs {
+            let key = canonical(pack).key();
+            for (part, bytes) in bytes.chunks(KV_PART as usize).enumerate() {
+                let key = format!("{KV_PREFIX}{key}/{part}");
+                let kept = contents.insert(key, Bytes::copy_from_slice(bytes));
+                assert!(kept.is_none(), "two packs of version {}", pack.version);
+            }
         }
         contents
     }

@@ -37,7 +37,7 @@ pub trait BlobStore: Send + Sync {
 pub const KV_PREFIX: &str = "v19/pack/";
 /// Bytes of a part of a blob in [`KvBlobs`]: a range read gets the parts it
 /// overlaps.
-const KV_PART: u64 = 64 << 10;
+pub(crate) const KV_PART: u64 = 64 << 10;
 
 /// Blobs in a [`KvStore`] (Restate's state, beside the head and the tail),
 /// each in parts of 64 KiB: `v19/pack/<key>/<part>`.
