@@ -37,7 +37,7 @@ use crate::{
     },
     kv::KvStore,
     simulation::MemoryBlobs,
-    store::{decode_page, decode_value, implicit},
+    store::{base_page, decode_page, decode_value, implicit},
     zstd,
 };
 use bytes::Bytes;
@@ -79,6 +79,8 @@ struct Known {
     manifests: HashMap<PackId, Option<Manifest>>,
     /// Ranges of packs already decoded.
     decoded: HashSet<Location>,
+    /// Frames decoded, by location: `None` if they do not decode.
+    frames: HashMap<Location, Option<Bytes>>,
     violations: Vec<String>,
     /// The bases of files made with one, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
@@ -275,13 +277,69 @@ impl Known {
                 continue;
             };
             for (page, frame) in &file.pages {
-                let decoded = frame.as_ref().map(|f| decode_page(f, base.as_ref(), *page));
-                if let Some(Err(error)) = decoded {
+                let Some(frame) = frame else {
+                    continue;
+                };
+                let Some(reference) = self.reference(head, name, *page, base.as_ref()) else {
+                    continue;
+                };
+                if let Err(error) = decode_page(frame, &reference) {
                     let error = format!("tail entry {version}: page {page} of {name}: {error}");
                     return self.violation(error);
                 }
             }
         }
+    }
+
+    /// What a tail entry of `head` compresses page `page` of the file
+    /// `name` against: the page in its checkpoint's frame, else its base's
+    /// page; `None` where the monitor does not see the checkpoint.
+    fn reference(
+        &mut self,
+        head: &Head,
+        name: &str,
+        page: u64,
+        base: Option<&Arc<dyn Base>>,
+    ) -> Option<Bytes> {
+        let based = || Bytes::copy_from_slice(base_page(base, page));
+        let Some(checkpoint) = head.checkpoint else {
+            return Some(based());
+        };
+        let index = page / head.frame_pages;
+        let stored = (self.manifest(&checkpoint)?.files.get(name))
+            .and_then(|file| file.frames.get(index as usize).copied().flatten());
+        let Some(at) = stored else {
+            return Some(based());
+        };
+        let frame = self.frame(head.frame_pages, at, base, index)?;
+        let at = ((page % head.frame_pages) * PAGE) as usize;
+        Some(frame.slice(at..at + PAGE as usize))
+    }
+
+    /// Frame `index` of a file with `base`, stored at `at`, decoded; `None`
+    /// if it is not stored or does not decode.
+    fn frame(
+        &mut self,
+        frame_pages: u64,
+        at: Location,
+        base: Option<&Arc<dyn Base>>,
+        index: u64,
+    ) -> Option<Bytes> {
+        if let Some(frame) = self.frames.get(&at) {
+            return frame.clone();
+        }
+        let size = (frame_pages * PAGE) as usize;
+        let frame = self.pack_range(at.pack, at.range()).and_then(|raw| {
+            let prefix = match base {
+                Some(_) => implicit(base, frame_pages, index),
+                None => Vec::new(),
+            };
+            let mut image = Vec::with_capacity(size);
+            zstd::decompress(&mut image, &raw, &prefix).ok()?;
+            (image.len() == size).then(|| Bytes::from(image))
+        });
+        self.frames.insert(at, frame.clone());
+        frame
     }
 
     /// The base the file `name` is made with, if the monitor knows it:
@@ -312,16 +370,13 @@ impl Known {
                 let (Some(at), Some(base)) = (at, &base) else {
                     continue;
                 };
-                let Some(raw) = self.stored(v, *at, &what) else {
+                if self.stored(v, *at, &what).is_none() {
                     continue;
-                };
-                let prefix = match base {
-                    Some(_) => implicit(base.as_ref(), frame_pages, index as u64),
-                    None => Vec::new(),
-                };
-                let mut image = Vec::with_capacity((frame_pages * PAGE) as usize);
-                let decoded = zstd::decompress(&mut image, &raw, &prefix);
-                if decoded.is_err() || image.len() as u64 != frame_pages * PAGE {
+                }
+                if self
+                    .frame(frame_pages, *at, base.as_ref(), index as u64)
+                    .is_none()
+                {
                     self.violation(format!("head {v}: {what} does not decode"));
                 }
             }

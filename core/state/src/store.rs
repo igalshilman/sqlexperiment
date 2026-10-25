@@ -169,6 +169,8 @@ pub(crate) struct Staged {
     pub checkpoint: Checkpoint,
     pub manifest: Arc<Manifest>,
     pub report: Checkpointed,
+    /// The frames it rebuilt, decoded.
+    pub images: HashMap<Location, Arc<Bytes>>,
 }
 
 /// A paged file as of a head: its size, its base's id, and the pages written
@@ -370,24 +372,19 @@ pub(crate) fn implicit(base: Option<&Arc<dyn Base>>, frame_pages: u64, index: u6
     pages
 }
 
-/// The base's page `page`, which a page of its file is compressed against;
-/// nothing without a base.
-fn base_page(base: Option<&Arc<dyn Base>>, page: u64) -> &[u8] {
+/// The base's page `page`; nothing without a base.
+pub(crate) fn base_page(base: Option<&Arc<dyn Base>>, page: u64) -> &[u8] {
     base.and_then(|base| base.page(page)).unwrap_or_default()
 }
 
-/// A page written, as a tail entry keeps it: a zstd frame, against its base
-/// page.
-fn encode_page(image: &[u8], base: Option<&Arc<dyn Base>>, page: u64) -> io::Result<Bytes> {
-    zstd::compress(image, base_page(base, page), Bytes::copy_from_slice)
+/// A page written, as a tail entry keeps it: a zstd frame, against its
+/// `reference` (see [`Snapshot::reference`]).
+fn encode_page(image: &[u8], reference: &[u8]) -> io::Result<Bytes> {
+    zstd::compress(image, reference, Bytes::copy_from_slice)
 }
 
-pub(crate) fn decode_page(
-    frame: &[u8],
-    base: Option<&Arc<dyn Base>>,
-    page: u64,
-) -> io::Result<Page> {
-    let image = zstd::decompress_sized(frame, base_page(base, page), PAGE as usize)?;
+pub(crate) fn decode_page(frame: &[u8], reference: &[u8]) -> io::Result<Page> {
+    let image = zstd::decompress_sized(frame, reference, PAGE as usize)?;
     match image.len() == PAGE as usize {
         true => Ok(image.into()),
         false => Err(invalid("page")),
@@ -570,7 +567,10 @@ impl Snapshot {
         let base = self.base_of(name)?;
         let image = match file.pages.get(&page) {
             Some(None) => None,
-            Some(Some(frame)) => Some(decode_page(frame, base, page)?),
+            Some(Some(frame)) => {
+                let reference = self.reference(&self.durable.manifest, None, name, page);
+                Some(decode_page(frame, &reference.await?)?)
+            }
             None if file.cut(page) => None,
             None => {
                 let frame_pages = self.durable.head.frame_pages;
@@ -607,6 +607,34 @@ impl Snapshot {
         let base = self.base_of(name)?;
         let raw = self.raw(at).await?;
         self.decode_frame(&raw, base, self.durable.head.frame_pages, index, at)
+    }
+
+    /// What the tail compresses page `page` of the file `name` against,
+    /// under the checkpoint `manifest`: the page as its frame holds it, else
+    /// its base's page, else nothing. It stays the same for every entry of
+    /// the tail, so an entry decodes alone. `images` are frames the
+    /// checkpoint just rebuilt.
+    async fn reference(
+        &self,
+        manifest: &Manifest,
+        images: Option<&HashMap<Location, Arc<Bytes>>>,
+        name: &str,
+        page: u64,
+    ) -> io::Result<Bytes> {
+        let frame_pages = self.durable.head.frame_pages;
+        let index = page / frame_pages;
+        let stored = (manifest.files.get(name))
+            .and_then(|file| file.frames.get(index as usize).copied().flatten());
+        let Some(at) = stored else {
+            let base = self.base_of(name)?;
+            return Ok(Bytes::copy_from_slice(base_page(base, page)));
+        };
+        let frame = match images.and_then(|images| images.get(&at)) {
+            Some(image) => image.clone(),
+            None => self.frame(name, index, at).await?,
+        };
+        let at = ((page % frame_pages) * PAGE) as usize;
+        Ok(frame.slice(at..at + PAGE as usize))
     }
 
     /// Decode frame `index` of a file with `base`, as stored at `at`, and
@@ -796,15 +824,33 @@ impl Snapshot {
             return Ok((FlushReport::default(), self.continued(self.durable.clone())));
         }
         let mut entry = Entry::default();
+        // The entry builds on the checkpoint its head names.
+        let (manifest, images) = match &staged {
+            Some(staged) => (&staged.manifest, Some(&staged.images)),
+            None => (&self.durable.manifest, None),
+        };
         for (name, written) in writes {
             let held = self.durable.files.get(&name);
             let base = self.bases.get(&name);
             let size = written.size_after(held.map_or(0, |file| file.size));
-            let mut pages = Vec::with_capacity(written.pages.len());
-            for (page, image) in written.pages {
-                // A page past the end is a hole.
-                let frame = match image.filter(|_| page * PAGE < size) {
-                    Some(image) => Some(encode_page(&image, base, page)?),
+            // A page past the end is a hole.
+            let written: Vec<(u64, Option<Page>)> = (written.pages.into_iter())
+                .map(|(page, image)| (page, image.filter(|_| page * PAGE < size)))
+                .collect();
+            let references = try_join_all(
+                (written.iter())
+                    .filter(|(_, image)| image.is_some())
+                    .map(|&(page, _)| self.reference(manifest, images, &name, page)),
+            )
+            .await?;
+            let mut references = references.into_iter();
+            let mut pages = Vec::with_capacity(written.len());
+            for (page, image) in written {
+                let frame = match image {
+                    Some(image) => {
+                        let reference = references.next().expect("one a page");
+                        Some(encode_page(&image, &reference)?)
+                    }
                     None => None,
                 };
                 pages.push((page, frame));
@@ -961,14 +1007,20 @@ impl Snapshot {
         for ((name, file, index, _), old) in rebuilt.into_iter().zip(olds) {
             let base = self.base_of(name)?;
             let hole = implicit(base, frame_pages, index);
-            let mut image = old.map_or_else(|| hole.clone(), |old| old.to_vec());
+            let mut image = old
+                .as_ref()
+                .map_or_else(|| hole.clone(), |old| old.to_vec());
             let first = index * frame_pages;
             let end = file.size.div_ceil(PAGE);
             for page in first..first + frame_pages {
                 let at = ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
                 match file.pages.get(&page) {
                     Some(Some(frame)) if page < end => {
-                        image[at].copy_from_slice(&decode_page(frame, base, page)?)
+                        let reference = match &old {
+                            Some(old) => &old[at.clone()],
+                            None => base_page(base, page),
+                        };
+                        image[at].copy_from_slice(&decode_page(frame, reference)?)
                     }
                     None if page < end && !file.cut(page) => {}
                     _ => image[at.clone()].copy_from_slice(&hole[at]),
@@ -1071,18 +1123,21 @@ impl Snapshot {
         self.tiered.put_pack(pack, body.into()).await?;
         // The pack is durable, and its name never reused: what it holds may
         // be kept.
+        let mut images = HashMap::new();
         for (at, raw, image) in written {
             if let Some(cache) = &self.cache {
                 cache.insert(at, raw);
             }
             if let Some(image) = image {
-                self.keep(at, image);
+                self.keep(at, image.clone());
+                images.insert(at, image);
             }
         }
         Ok(Staged {
             checkpoint,
             manifest: Arc::new(manifest),
             report,
+            images,
         })
     }
 
