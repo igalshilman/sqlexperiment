@@ -487,8 +487,8 @@ Per flush, with a warm cache:
 | Small, update 1    | 20 KiB   | 675 (489 + 90 + 3 + 93)                              | 34 KiB            | 61    | 3 round trips, 26 gets     |
 | 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
 | 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
-| 100k rows, aged    | 27 MiB   | 1172 (225 + 470 + 235 + 242)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
 | 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |
+| 100k rows, aged    | 27 MiB   | 1172 (225 + 470 + 235 + 242)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
 
 The pack and manifest columns are spread over the flushes: a 1M-row
 database's checkpoint, every 128 flushes, writes about 28 KB of patches
@@ -517,8 +517,8 @@ Cold reads, at 2 ms a round trip:
 | Small, update 1    | 1735                           | 150 KiB           | 0.01 MiB     | $0.07 / $0.60                                  |
 | 10k rows, update 1 | 436                            | 34 KiB            | 1.15 MiB     | $0.08 / $2.73                                  |
 | 1M rows, update 1  | 653                            | 93 KiB            | 108 MiB      | $0.08 / $3.86                                  |
-| 100k rows, aged    | 702                            | 108 KiB           | 14 MiB       | $0.08 / $4.35                                  |
 | 1M rows, update 10 | 1078                           | 153 KiB           | 108 MiB      | $0.08 / $28.70                                 |
+| 100k rows, aged    | 702                            | 108 KiB           | 14 MiB       | $0.08 / $4.35                                  |
 
 Warm, the cost is the checkpoints' PUT and LIST, once in 128 flushes; cold,
 it is the GETs of the frames a flush reads, which follow the rows it
