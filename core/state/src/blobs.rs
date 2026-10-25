@@ -39,7 +39,7 @@ pub(crate) const KV_PREFIX: &str = "v19/pack/";
 const KV_PART: u64 = 64 << 10;
 
 /// Blobs in a [`KvStore`] (Restate's state, beside the head and the tail),
-/// each in parts of 64 KiB: `v18/pack/<key>/<part>`. A put syncs.
+/// each in parts of 64 KiB: `v19/pack/<key>/<part>`. A put syncs.
 pub struct KvBlobs {
     store: Arc<dyn KvStore>,
 }

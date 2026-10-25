@@ -178,6 +178,16 @@ pub(crate) struct FileState {
     pub size: u64,
     pub base: Option<u64>,
     pub pages: BTreeMap<u64, Option<Bytes>>,
+    /// The fewest pages the file had since the checkpoint, if it shrank:
+    /// the checkpoint's pages from there on are cut, holes.
+    pub cut: Option<u64>,
+}
+
+impl FileState {
+    /// Whether the checkpoint's page `page` is cut.
+    fn cut(&self, page: u64) -> bool {
+        self.cut.is_some_and(|cut| page >= cut)
+    }
 }
 
 /// The state as of a head: its checkpoint's manifest, and its tail entries,
@@ -237,7 +247,7 @@ impl Durable {
             let state = FileState {
                 size: file.size,
                 base: file.base,
-                pages: BTreeMap::new(),
+                ..FileState::default()
             };
             files.insert(name.clone(), state);
         }
@@ -288,13 +298,13 @@ impl Durable {
         for (name, change) in &entry.logs {
             kind(self, name, Is::Log)?;
             let held = self.logs.entry(name.clone()).or_default();
+            let dropped = (change.before.saturating_sub(held.first)).min(held.values.len() as u64);
+            held.values.drain(..dropped as usize);
+            held.first = held.first.max(change.before);
             if !change.values.is_empty() && change.from != held.next() {
                 return Err(invalid("tail entry: an append out of order"));
             }
             held.values.extend(change.values.iter().cloned());
-            let dropped = (change.before.saturating_sub(held.first)).min(held.values.len() as u64);
-            held.values.drain(..dropped as usize);
-            held.first += dropped;
             if held.values.len() as u64 > MAX_LOG_ENTRIES {
                 return Err(invalid("tail entry: a log too long"));
             }
@@ -307,6 +317,11 @@ impl Durable {
             });
             if file.base != change.base {
                 return Err(invalid("tail entry: a file's base changed"));
+            }
+            if change.size < file.size {
+                let end = change.size.div_ceil(PAGE);
+                file.pages.retain(|&page, _| page < end);
+                file.cut = Some(file.cut.map_or(end, |cut| cut.min(end)));
             }
             file.size = change.size;
             file.pages.extend(change.pages.iter().cloned());
@@ -323,6 +338,7 @@ impl Durable {
         let mut files = self.files.clone();
         for file in files.values_mut() {
             file.pages.clear();
+            file.cut = None;
         }
         Self {
             head: self.head.clone(),
@@ -555,6 +571,7 @@ impl Snapshot {
         let image = match file.pages.get(&page) {
             Some(None) => None,
             Some(Some(frame)) => Some(decode_page(frame, base, page)?),
+            None if file.cut(page) => None,
             None => {
                 let frame_pages = self.durable.head.frame_pages;
                 let index = page / frame_pages;
@@ -719,9 +736,9 @@ impl Snapshot {
             if (written.pages.keys()).any(|&page| page >= MAX_FILE_BYTES / PAGE) {
                 return refuse(format!("{name:?}: a page past the largest file"));
             }
-            // Without its base, a file made with one can only make holes.
-            if self.base_of(name).is_err() && written.pages.values().any(Option::is_some) {
-                return refuse(format!("{name:?} has a base: open it with it"));
+            // A checkpoint rebuilds its frames against its base.
+            if let Err(error) = self.base_of(name) {
+                return Err(error);
             }
         }
         let new = (records.keys().chain(writes.keys()).chain(logs.keys()))
@@ -802,13 +819,17 @@ impl Snapshot {
         }
         entry.records = records.into_iter().collect();
         for (name, appended) in logs {
-            let from = match appended.values.is_empty() {
-                true => self.log(&name).next(),
-                false => appended.from,
-            };
+            let (mut from, mut values) = (appended.from, appended.values);
+            if values.is_empty() {
+                from = self.log(&name).next();
+            }
+            // Appended and truncated at once: never stored.
+            let dropped = (appended.before.saturating_sub(from)).min(values.len() as u64);
+            values.drain(..dropped as usize);
+            from += dropped;
             let change = LogChange {
                 from,
-                values: appended.values,
+                values,
                 before: appended.before,
             };
             entry.logs.push((name, change));
@@ -903,9 +924,12 @@ impl Snapshot {
                 .map(|page| page / frame_pages)
                 .filter(|&index| index < count)
                 .collect();
-            // A shrunk file's last frame drops the pages past its end.
-            if held.is_some_and(|held| held.size > file.size) && count > 0 {
-                dirty.insert(count - 1);
+            // The frames it held past a cut.
+            if let (Some(cut), Some(held)) = (file.cut, held) {
+                let stored = (held.frames.iter().enumerate())
+                    .filter(|&(index, at)| at.is_some() && (index as u64 + 1) * frame_pages > cut)
+                    .map(|(index, _)| index as u64);
+                dirty.extend(stored.filter(|&index| index < count));
             }
             for index in dirty {
                 let stored =
@@ -943,12 +967,11 @@ impl Snapshot {
             for page in first..first + frame_pages {
                 let at = ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
                 match file.pages.get(&page) {
-                    _ if page >= end => image[at.clone()].copy_from_slice(&hole[at]),
-                    Some(None) => image[at.clone()].copy_from_slice(&hole[at]),
-                    Some(Some(frame)) => {
+                    Some(Some(frame)) if page < end => {
                         image[at].copy_from_slice(&decode_page(frame, base, page)?)
                     }
-                    None => {}
+                    None if page < end && !file.cut(page) => {}
+                    _ => image[at.clone()].copy_from_slice(&hole[at]),
                 }
             }
             let stored = match image == hole {

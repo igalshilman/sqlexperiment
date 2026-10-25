@@ -97,7 +97,7 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
     let bytes = manifest.encode();
     assert_eq!(Manifest::decode(&bytes).unwrap(), manifest);
     assert_eq!(manifest.packs(), BTreeSet::from([old, new]));
-    assert_eq!(manifest.locations().count(), 5);
+    assert_eq!(manifest.locations().count(), 4);
     for len in 0..bytes.len() {
         assert!(
             Manifest::decode(&bytes[..len]).is_err(),

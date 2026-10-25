@@ -61,9 +61,8 @@ impl state::Base for Zeros {
     }
 }
 
-/// A file with a base decodes its chunks only once opened with it, and
-/// reads what was flushed through later flushes of other files; without it,
-/// whole chunks of it can be made holes.
+/// A file with a base decodes its pages only once opened with it, and
+/// reads what was flushed through later flushes of other files.
 #[test]
 fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
     futures::executor::block_on(async {
@@ -86,18 +85,6 @@ fn a_based_file_reads_its_deltas_once_opened_with_its_base() -> Result<()> {
         mutation.write(&state.file("db")?, 0, Some(page(9)))?;
         mutation.flush().await?;
         assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
-
-        // Without its base, a whole chunk of it can still be made holes:
-        // its base pages again.
-        let state = State::open(store.clone()).await?;
-        let mut mutation = state.mutation();
-        for n in 0..4 {
-            mutation.write(&state.file("vm")?, n, None)?;
-        }
-        mutation.flush().await?;
-        let state = State::open(store).await?;
-        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
-        assert_eq!(byte(&vm, 1).await?, Some(0), "its base page");
         Ok(())
     })
 }

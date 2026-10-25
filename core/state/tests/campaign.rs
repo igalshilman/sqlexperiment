@@ -598,7 +598,7 @@ impl World {
         let stored: std::collections::BTreeSet<String> = match &self.packs {
             Some(packs) => packs.keys().into_iter().collect(),
             None => (self.memory.keys().iter())
-                .filter_map(|key| Some(key.strip_prefix("v18/pack/")?.rsplit_once('/')?.0.into()))
+                .filter_map(|key| Some(key.strip_prefix("v19/pack/")?.rsplit_once('/')?.0.into()))
                 .collect(),
         };
         if stored != needed {
@@ -614,16 +614,16 @@ impl World {
         let rng = &mut self.rng;
         let (operation, key_prefix) = rng.pick(&[
             (Operation::Put, ""),
-            (Operation::Put, "v18/tail/"),
-            (Operation::Put, "v18/head"),
-            (Operation::Put, "v18/pack/"),
+            (Operation::Put, "v19/tail/"),
+            (Operation::Put, "v19/head"),
+            (Operation::Put, "v19/pack/"),
             (Operation::Delete, ""),
-            (Operation::Delete, "v18/tail/"),
-            (Operation::Delete, "v18/pack/"),
+            (Operation::Delete, "v19/tail/"),
+            (Operation::Delete, "v19/pack/"),
             (Operation::Get, ""),
-            (Operation::Get, "v18/tail/"),
-            (Operation::Get, "v18/head"),
-            (Operation::Get, "v18/pack/"),
+            (Operation::Get, "v19/tail/"),
+            (Operation::Get, "v19/head"),
+            (Operation::Get, "v19/pack/"),
             (Operation::Sync, ""),
             (Operation::Sync, ""),
             (Operation::Keys, ""),

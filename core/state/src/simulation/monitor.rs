@@ -11,8 +11,10 @@
 //! of the head makes the tail entries past it unknown, which a crash may
 //! have lost. Each write is checked when it is issued:
 //!
-//! 1. **Name only what is stored**: a head's tail entries are stored in
-//!    full, and so is a new checkpoint: its manifest, and every range the
+//! 1. **Name only what is stored**: a head's tail entries past its
+//!    checkpoint are stored in full (those before, kept for readers that
+//!    opened on the checkpoint before, a crashed flush may have deleted),
+//!    and so is a new checkpoint: its manifest, and every range the
 //!    manifest names (where the monitor sees the packs: in the store, or
 //!    given [`MonitorKv::packs`]).
 //! 2. **Build on the head**: a head is the next version, with the same
@@ -244,7 +246,7 @@ impl Known {
                 ));
             }
         }
-        for version in head.tail_first..=head.version {
+        for version in head.checkpointed() + 1..=head.version {
             self.check_entry(&head, version);
         }
         let new = held.is_none_or(|held| head.checkpoint != held.checkpoint);
@@ -317,7 +319,7 @@ impl Known {
                     Some(_) => implicit(base.as_ref(), frame_pages, index as u64),
                     None => Vec::new(),
                 };
-                let mut image = Vec::new();
+                let mut image = Vec::with_capacity((frame_pages * PAGE) as usize);
                 let decoded = zstd::decompress(&mut image, &raw, &prefix);
                 if decoded.is_err() || image.len() as u64 != frame_pages * PAGE {
                     self.violation(format!("head {v}: {what} does not decode"));
