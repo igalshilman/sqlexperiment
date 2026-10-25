@@ -52,6 +52,10 @@ pub struct Stats {
     pub puts: u64,
     pub deletes: u64,
     pub syncs: u64,
+    /// Listings of the keys, and the pages an object store would answer
+    /// them in (1,000 keys a page, as S3's `ListObjectsV2`).
+    pub lists: u64,
+    pub list_pages: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
     pub read_keys: BTreeSet<String>,
@@ -274,7 +278,11 @@ impl KvStore for MemoryKv {
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
             yield_now().await;
-            Ok(self.inner.lock().unwrap().values.keys().cloned().collect())
+            let mut inner = self.inner.lock().unwrap();
+            let keys: Vec<String> = inner.values.keys().cloned().collect();
+            inner.stats.lists += 1;
+            inner.stats.list_pages += keys.len().div_ceil(1000).max(1) as u64;
+            Ok(keys)
         })
     }
     fn unfenced_blobs(&self) -> bool {

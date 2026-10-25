@@ -11,11 +11,16 @@
 //! `SWEEP_EVERY` set the state's options; `WORKLOAD` runs only the workloads it names part of,
 //! `FLUSHES` that many flushes each (an aged database); `LABEL` names the run
 //! in its rows. Prints Markdown rows.
+//!
+//! With `S3=1`, the blobs are kept as beside Restate, in an object store (so
+//! each session claims its numbers first), and the rows are what S3 would
+//! bill: requests and bytes per flush, and dollars per million flushes and
+//! per month stored, at S3 Standard's and S3 Express One Zone's prices.
 use sql::{Sql, Value};
 use state::{
     Result, State, StateOptions,
     kv::KvStore,
-    simulation::{LatencyKv, MemoryKv, Namespace, cache_config, open_cache},
+    simulation::{LatencyKv, MemoryKv, Namespace, cache_config, object_kind, open_cache},
 };
 use std::sync::Arc;
 
@@ -277,8 +282,21 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
     }
 }
 
+/// Prices in US East, in dollars: S3 Standard, then S3 Express One Zone.
+const PUT: [f64; 2] = [0.005 / 1000.0, 0.00113 / 1000.0];
+const UPLOAD_GB: [f64; 2] = [0.0, 0.0032];
+const STORED_GB_MONTH: [f64; 2] = [0.023, 0.11];
+const GB: f64 = (1u64 << 30) as f64;
+
+fn s3() -> bool {
+    std::env::var_os("S3").is_some()
+}
+
 async fn run(w: Workload, cached: bool) -> Result<()> {
-    let memory = MemoryKv::default();
+    let memory = match s3() {
+        true => MemoryKv::unfenced(),
+        false => MemoryKv::default(),
+    };
     let store: Store = Arc::new(LatencyKv::new(memory.clone()));
     let mut words = Words::new();
     load(&store, w, &mut words).await?;
@@ -321,6 +339,38 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         .unwrap_or(0);
     drop(db);
     let label = std::env::var("LABEL").unwrap_or_else(|_| "cow".into());
+    if s3() {
+        // What goes to S3: blobs and the sweep's record; deletes are free.
+        let (blob, sweep) = (s.kind("blob"), s.kind("sweep"));
+        let puts = (blob.puts + sweep.puts) as f64 / n;
+        let pages = s.list_pages as f64 / n;
+        let upload = (blob.bytes_written + sweep.bytes_written) as f64 / n;
+        let restate = s.kind("root").bytes_written + s.kind("claim").bytes_written;
+        let blobs_stored: usize = (memory.contents().iter())
+            .filter(|(key, _)| !matches!(object_kind(key), "root" | "claim"))
+            .map(|(_, value)| value.len())
+            .sum();
+        let per_million =
+            |tier: usize| 1e6 * ((puts + pages) * PUT[tier] + upload / GB * UPLOAD_GB[tier]);
+        let cold_gets = cold.kind("blob").gets;
+        println!(
+            "| {} | {label} | {} | {:.2} | {:.2} | {:.3} | {:.0} | {:.0} | {:.2} | {:.1} | {cold_gets} | {:.2} | {:.2} | {:.4} | {:.4} |",
+            w.name,
+            if cached { "yes" } else { "no" },
+            rts as f64 / n,
+            puts,
+            pages,
+            upload,
+            restate as f64 / n,
+            s.kind("claim").puts as f64 / n,
+            blobs_stored as f64 / 1024.0 / 1024.0,
+            per_million(0),
+            per_million(1),
+            blobs_stored as f64 / GB * STORED_GB_MONTH[0],
+            blobs_stored as f64 / GB * STORED_GB_MONTH[1],
+        );
+        return Ok(());
+    }
     println!(
         "| {} | {label} | {} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.2} | {:.1} | {:.0} | {keys} | {} | {} | {} | {:.0} |",
         w.name,
@@ -342,10 +392,17 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    println!(
-        "| Workload | Run | Cache | RT/flush | Puts/flush | Put B/flush | Root B | Blob B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
-    );
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    if s3() {
+        println!(
+            "| Workload | Run | Cache | RT/flush | S3 PUTs/flush | S3 LIST pages/flush | S3 upload B/flush | Restate B/flush | Claims/flush | S3 stored MiB | Cold S3 GETs | Standard $/M flushes | Express $/M flushes | Standard $/month stored | Express $/month stored |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    } else {
+        println!(
+            "| Workload | Run | Cache | RT/flush | Puts/flush | Put B/flush | Root B | Blob B | Deletes/flush | Gets/flush | Stored KiB | Keys | DB KiB | Cold RT | Cold gets | Cold read KiB |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    }
     let only = std::env::var("WORKLOAD").ok();
     let flushes = std::env::var("FLUSHES").ok().and_then(|v| v.parse().ok());
     futures::executor::block_on(async {
