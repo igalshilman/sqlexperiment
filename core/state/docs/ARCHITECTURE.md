@@ -96,7 +96,10 @@ state(n) = checkpoint(c) + mutation(c + 1) + … + mutation(n)
   were. A flush appends one.
 - **A checkpoint**: the whole state as of version `c`, written now and
   then by folding the tail into the checkpoint before it. Once a
-  checkpoint is written, the tail before it can go.
+  checkpoint is written, the tail before it can go. It describes the
+  whole state but stores only what changed: its index is complete, its
+  data is spread over its own pack and older ones (see
+  [What a checkpoint holds](#what-a-checkpoint-holds)).
 
 Everything below is how those two layers are laid out, written and read.
 
@@ -118,7 +121,7 @@ Restate (the object's state)                           Restate, or S3
 | **Head**               | The commit point, one key (`v20/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                             |
 | **Tail entry**         | One flush's mutation, as it was (`v20/tail/<version>/<part>`).                                                                                                                                                           |
 | **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                              |
-| **Checkpoint**         | The whole state as of a version: a pack and a manifest. Written by a flush, when the tail is long enough, before its own tail entry.                                                                                     |
+| **Checkpoint**         | The whole state as of a version: a manifest that indexes all of it, and a pack of only what changed since the checkpoint before. Written by a flush, when the tail is long enough, before its own tail entry.            |
 | **Frame**              | The unit a file is stored in: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                              |
 | **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                      |
 | **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `checkpoint/<version>-<nonce>`, with a random nonce, so no two puts share one. |
@@ -235,6 +238,47 @@ any pack forever, with nothing to invalidate. A pack lives as long as some
 manifest the head names points into it. A frame no flush touches stays in
 the pack that first wrote it, across any number of checkpoints, until
 compaction moves it.
+
+### What a checkpoint holds
+
+A checkpoint is **not a self-contained copy** of the state, and **not a
+delta** to apply to the one before. It is two things that differ in kind:
+
+- **Its manifest is complete.** It names every file, record and log, and
+  a location (pack, offset, length) for every frame, patch and stored
+  value. Nothing in it refers to an earlier manifest, so an open reads one
+  manifest, never a chain of them.
+- **Its pack holds only what changed** since the checkpoint before: the
+  frames it rebuilt, the patches it added, the values set since, and what
+  compaction moved. Everything else, the manifest points to where it
+  already is, in older packs.
+
+So the state of a checkpoint is its manifest plus every pack it points
+into. Say `db` has 6 frames (0–5, 4 pages each), with a checkpoint every
+4 flushes:
+
+| Checkpoint | What the tail since the one before changed | Its pack holds                                                   | Its manifest points                                                         |
+| ---------- | ------------------------------------------ | ---------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| C4         | Every frame (the database was made)        | P4: frames 0–5                                                   | Frames 0–5 → P4                                                             |
+| C8         | Page 9 (in frame 2); all of frame 5        | P8: a patch for page 9; frame 5, rebuilt                         | Frames 0–4 → P4, page 9 → P8, frame 5 → P8                                  |
+| C12        | Most of frame 0; frame 5 again             | P12: frame 0 and frame 5, rebuilt; page 9's patch, moved from P8 | Frames 1–4 → P4, page 9 → P12, frames 0 and 5 → P12; P8 is no longer needed |
+
+- **C8** rewrites one frame and one page, not the database. Frame 2
+  stays in P4 as C4 wrote it; reading page 9 takes P8's patch, which
+  decodes against that frame's page 9.
+- **C12** leaves P8's frame 5 dead, so M12 would need only the small
+  patch of P8, less than half its bytes: compaction copies the patch,
+  as it is, into P12. P4 is still mostly live (frames 1–4), so it stays.
+- **Rebuilding a frame** folds its patches in and drops them, so a page
+  is at most a frame plus one patch, however many checkpoints changed it.
+- **Garbage collection** deletes P8 once neither kept manifest points
+  into it: after the next checkpoint, when M8 is no longer the previous
+  one.
+
+What a checkpoint costs is in proportion to what the tail changed, not to
+the database's size; the manifest is the one part that grows with the
+size, at about 1.7 bytes per frame. What it stores in all stays bounded,
+as compaction keeps every pack a manifest names at least half live.
 
 ### A timeline
 
