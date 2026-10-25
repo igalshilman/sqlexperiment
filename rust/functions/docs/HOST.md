@@ -7,7 +7,7 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one flush that makes a turn's SQL, pages and records durable together:
-  the state's (v19) tail entry and head, the memory's pages a file beside
+  the state's (v20) tail entry and head, the memory's pages a file beside
   the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
@@ -182,17 +182,18 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v19/head = the commit point
+v20/head = the commit point
   id, frame size, version, the checkpoint and the one before, the tail
-v19/tail/<version>/<part>: one turn's mutation
+v20/tail/<version>/<part>: one turn's mutation
     run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
     memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
     db:                paged file                        // SQL
     <name>/…:          each extension's records and files
-v19/pack/<checkpoint>/<part>: a checkpoint: frames of 4 pages, values,
-  and its manifest (each file's frames, every record)
+v20/manifest/<checkpoint>/<part>: a checkpoint's manifest (each file's
+  frames, every record)
+v20/pack/<checkpoint>/<part>: a checkpoint's pack: frames of 4 pages, values
 ```
 
 - **A turn is one tail entry.** Its SQL pages and its memory's changed
@@ -206,8 +207,8 @@ v19/pack/<checkpoint>/<part>: a checkpoint: frames of 4 pages, values,
 
 - **Flush.** The tail entry, the head: queued in that order, then one sync.
   Once the tail is long enough, the flush first checkpoints: a pack of the
-  frames the tail changed (patches of the pages, when few changed), and
-  deletes the packs no checkpoint needs, over the object's state keys.
+  frames the tail changed (patches of the pages, when few changed) and its
+  manifest, and deletes the packs and manifests no checkpoint needs, over the object's state keys.
   Then the outbox: its Waits are made after the flush, and the next flush
   drops the ones already made.
 - **Recover.** Open reads the head, then the manifest and the tail, and

@@ -1,25 +1,29 @@
 # Storage format
 
-Only this format (v19) is implemented. Use a dedicated namespace. Keys,
+Only this format (v20) is implemented. Use a dedicated namespace. Keys,
 encodings and bounds live in `src/format.rs`; there is no migration or
 format discovery. Storage is assumed reliable (a value reads back as
 written); every zstd frame carries a checksum, and decoding checks
 structure and the bounds below.
 
-| Store                           | Key                            | Value                                                                       |
-| ------------------------------- | ------------------------------ | --------------------------------------------------------------------------- |
-| Restate                         | `v19/head`                     | The head, the commit point; absent until the first flush                    |
-| Restate                         | `v19/tail/<version>/<part>`    | A part of the tail entry of the flush that made `version`                   |
-| Packs (`BlobStore`)             | `checkpoint/<version>-<nonce>` | A pack: what a checkpoint wrote, then its manifest; put once, never changed |
-| Restate, by default (`KvBlobs`) | `v19/pack/<pack key>/<part>`   | A part of a pack, where packs are kept in Restate                           |
+| Store                           | Key                                     | Value                                                      |
+| ------------------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| Restate                         | `v20/head`                              | The head, the commit point; absent until the first flush   |
+| Restate                         | `v20/tail/<version>/<part>`             | A part of the tail entry of the flush that made `version`  |
+| Restate                         | `v20/manifest/<version>-<nonce>/<part>` | A part of a checkpoint's manifest; put once, never changed |
+| Packs (`BlobStore`)             | `checkpoint/<version>-<nonce>`          | A pack: what a checkpoint wrote; put once, never changed   |
+| Restate, by default (`KvBlobs`) | `v20/pack/<pack key>/<part>`            | A part of a pack, where packs are kept in Restate          |
 
 The head is the only key whose write commits. `<version>` and `<part>` in a
 tail entry's key are decimal. A pack's `<version>` is the head version
 whose state it holds, and `<nonce>` a random number, each 16 lowercase hex
-digits: no two puts ever use one name. Where packs are kept in Restate
+digits: no two puts ever use one name. A checkpoint's manifest is in
+Restate wherever its pack is, under the same `<version>-<nonce>`, cut into
+parts of 64 KiB (the last shorter), numbered in decimal from 0; a
+checkpoint that stores nothing outside its manifest puts no pack. Where packs are kept in Restate
 (`blobs::KvBlobs`), a pack is cut into parts of 64 KiB (the last shorter),
-numbered in decimal from 0, under `v19/pack/` and its key
-(`v19/pack/checkpoint/<version>-<nonce>/<part>`); in S3
+numbered in decimal from 0, under `v20/pack/` and its key
+(`v20/pack/checkpoint/<version>-<nonce>/<part>`); in S3
 (`blobs::ObjectStoreBlobs`), it is one object, under the namespace's prefix
 and its key.
 
@@ -30,18 +34,18 @@ manifest.
 
 ## Head
 
-`SH19`, then, uncompressed:
+`SH20`, then, uncompressed:
 
-| Field       | Encoding                                                                                              |
-| ----------- | ----------------------------------------------------------------------------------------------------- |
-| Id          | 8 bytes, little-endian: the database's random identity, drawn when it was made                        |
-| Frame pages | Pages per frame (1 to 256), set when the database was made                                            |
-| Version     | Flushes that changed something, ever: 1 to 2^62                                                       |
-| Checkpoint  | `0` for none, or `1`, the pack's version and nonce, then the manifest's offset and length in the pack |
-| Previous    | The checkpoint before, which readers that opened on it may still read; as above                       |
-| Tail first  | The first version whose tail entry is kept; at least 1                                                |
-| Tail bytes  | Bytes of the tail entries since the checkpoint                                                        |
-| Parts       | Per version from tail first to the version, the number of parts of its tail entry                     |
+| Field       | Encoding                                                                          |
+| ----------- | --------------------------------------------------------------------------------- |
+| Id          | 8 bytes, little-endian: the database's random identity, drawn when it was made    |
+| Frame pages | Pages per frame (1 to 256), set when the database was made                        |
+| Version     | Flushes that changed something, ever: 1 to 2^62                                   |
+| Checkpoint  | `0` for none, or `1`, the pack's version and nonce, then the manifest's length    |
+| Previous    | The checkpoint before, which readers that opened on it may still read; as above   |
+| Tail first  | The first version whose tail entry is kept; at least 1                            |
+| Tail bytes  | Bytes of the tail entries since the checkpoint                                    |
+| Parts       | Per version from tail first to the version, the number of parts of its tail entry |
 
 The previous checkpoint is older than the checkpoint, or the same version,
 and the checkpoint no newer than the version; there is no previous without
@@ -50,9 +54,9 @@ size of the options that open it.
 
 ## Tail entry
 
-What one flush changed, as it changed it: `SE19`, then, uncompressed (its
+What one flush changed, as it changed it: `SE20`, then, uncompressed (its
 pages are zstd frames of their own), cut into parts of at most 1 MiB, put
-at `v19/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
+at `v20/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
 
 | Field   | Encoding                                                                                                                                                                                                                                                                                                           |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -70,8 +74,8 @@ page's number is below 2,621,440 (10 GiB).
 ## Pack
 
 What one checkpoint wrote, back to back: the frames it rebuilt, the
-patches, the values, the ranges it copied from older packs; then its
-manifest, which the head locates.
+patches, the values, the ranges it copied from older packs. Its manifest,
+which says where they are, is in Restate.
 
 | Range  | A zstd frame of                                                                                                                                               |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -86,11 +90,11 @@ no base page reads as a hole.
 
 ## Manifest
 
-`SM19`, then one zstd frame of the body (at most 1 GiB decoded):
+`SM20`, then one zstd frame of the body (at most 1 GiB decoded):
 
 | Field   | Encoding                                                                                                                                                                                                                                                                                                                                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packs   | Count, then per pack the manifest names, its own included, ascending: its version, its nonce, and the bytes it stored, before its manifest (for compaction)                                                                                                                                                                                           |
+| Packs   | Count, then per pack the manifest names, its own included if it put one, ascending: its version, its nonce, and the bytes it stored (for compaction)                                                                                                                                                                                                  |
 | Records | Count, then per record: its name, its value (below)                                                                                                                                                                                                                                                                                                   |
 | Logs    | Count, then per log: its name, the index of its first entry (at most 2^62), a count (at most 4096), then each entry, a value                                                                                                                                                                                                                          |
 | Files   | Count, then per paged file: its name, its size in 512-byte units (at most 10 GiB), its base's id plus one (`0` for none), a count, then a location per frame (`0` for none: its base's pages, or zeros); then a count of patches, and per patch, ascending: its page as the gap from the page after the one before (the first from 0), and a location |

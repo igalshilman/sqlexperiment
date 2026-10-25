@@ -61,17 +61,21 @@ checkpoint: the commit point.
 
 A namespace holds:
 
-- **The head** (`v19/head`): the version, the frame size, the checkpoint
+- **The head** (`v20/head`): the version, the frame size, the checkpoint
   and the one before, and which tail entries are kept.
-- **The tail** (`v19/tail/<version>/<part>`): one entry per flush, the
+- **The tail** (`v20/tail/<version>/<part>`): one entry per flush, the
   mutation as it was: the records set, the log entries appended and
   truncations, the files' sizes, and each page written, a zstd frame of its
   own, compressed against the page as the checkpoint holds it, so a small
   change costs about what changed. An entry past 1 MiB is cut into parts.
-- **Packs** (`checkpoint/<version>-<nonce>`): one per checkpoint, put once
-  and never changed: the frames it wrote, large records and log entries,
-  then the _manifest_, which says where every file's frames, every record
-  and every log entry are, in this pack or an older one.
+- **Manifests** (`v20/manifest/<version>-<nonce>/<part>`): one per
+  checkpoint, put once and never changed, in Restate wherever the packs
+  are: where every file's frames, every record and every log entry are, in
+  its pack or an older one. About 1.7 bytes per frame: 3 KiB for a
+  database of 100k rows.
+- **Packs** (`checkpoint/<version>-<nonce>`): one per checkpoint that
+  stores anything outside its manifest, put once and never changed: the
+  frames it wrote, and large records and log entries.
 
 **Frames.** A paged file is a row of frames of `frame_pages` pages (4,
 16 KiB), each compressed with zstd on its own (against its file's base, if
@@ -92,17 +96,19 @@ only a few of a frame's pages (their patches stay within half the frame's
 stored bytes), it _patches_ the frame: it puts those pages, each compressed
 against the frame's. It puts the records set and log entries appended
 since, inline in the manifest if small, and copies the live ranges of packs
-it needs less than half of (compaction): one pack, one put. The flush's head names it,
+it needs less than half of (compaction): one pack, one put, and its
+manifest, queued before the head. The flush's head names it,
 the one before becomes the previous checkpoint, and the tail that one
 covered is deleted. A checkpoint that fails fails nothing: the tail grows,
 and the next flush tries again.
 
 **Garbage.** A pack older than the head's previous checkpoint that neither
-of its checkpoints names is garbage: no later head names it. A flush that
-checkpoints then collects it, and anyone may, beside the owner
-(`State::collect_garbage`). Collecting lists the packs: in Restate, the
-store's keys (`KvStore::keys`, Restate's `getKeys()`); a store that cannot
-list keeps its garbage.
+of its checkpoints' manifests names is garbage: no later head names it; so
+is a manifest older than the previous checkpoint. A flush that checkpoints
+then collects them, and anyone may, beside the owner
+(`State::collect_garbage`). Collecting lists the packs and the manifests: in
+Restate, the store's keys (`KvStore::keys`, Restate's `getKeys()`); a store
+that cannot list keeps its garbage.
 
 **Readers.** A reader (a shared handler beside the exclusive one) reads the
 state it opened, a consistent snapshot, while the owner flushes: packs never
@@ -110,13 +116,15 @@ change, and the packs and tail a head names stay until the owner's second
 checkpoint after it. A reader that outlives that fails with "is gone".
 
 **Recovery.** There's none: every open reads the head, which names only a
-tail and packs that are stored, then the checkpoint's manifest and the tail
+tail, manifests and packs that are stored, then the checkpoint's manifest and the tail
 past it, together. A crashed flush's tail entry is past the head's version,
-and the next flush overwrites it; its pack, if it checkpointed, is garbage.
+and the next flush overwrites it; its pack and manifest, if it checkpointed, are garbage.
 
 **Packs in Restate or S3.** By default, packs are kept in Restate beside the
-head (`blobs::KvBlobs`), in parts of 64 KiB (`v19/pack/<key>/<part>`): the
-flush's sync stores them, before the head that names them. With
+head (`blobs::KvBlobs`), in parts of 64 KiB (`v20/pack/<key>/<part>`): the
+flush's sync stores them, before the head that names them, and nothing is
+in S3. The manifests are in Restate either way, so a cold open reads the
+head, then the manifest and the tail, from Restate alone. With
 `State::open(store).checkpoints(packs)`, they are in an object store (S3,
 `blobs::ObjectStoreBlobs`), uploaded before the flush puts its head. A
 pack's name is unique, so a former attempt that Restate fenced may still

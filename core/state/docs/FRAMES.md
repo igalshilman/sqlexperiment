@@ -12,17 +12,19 @@ changed in them.
 
 ## Layout
 
-| Store   | Key                            | Holds                                                                                                           |
-| ------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| Restate | `v19/head`                     | The commit point: identity, frame size, version, the checkpoint and the one before, the tail's extent and parts |
-| Restate | `v19/tail/<version>/<part>`    | One flush's mutation: records set, log appends and truncations, sizes, pages (a zstd frame each, or a hole)     |
-| S3      | `checkpoint/<version>-<nonce>` | A pack: frames, large values, then the manifest                                                                 |
+| Store   | Key                                     | Holds                                                                                                           |
+| ------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Restate | `v20/head`                              | The commit point: identity, frame size, version, the checkpoint and the one before, the tail's extent and parts |
+| Restate | `v20/tail/<version>/<part>`             | One flush's mutation: records set, log appends and truncations, sizes, pages (a zstd frame each, or a hole)     |
+| Restate | `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's manifest: where every frame, record and log entry is                                             |
+| S3      | `checkpoint/<version>-<nonce>`          | A pack: frames and large values                                                                                 |
 
 Without S3, packs are kept in Restate in parts of 64 KiB
-(`v19/pack/<key>/<part>`). A tail entry over 1 MiB is split into parts.
+(`v20/pack/<key>/<part>`). A tail entry over 1 MiB, and a manifest over 64
+KiB, are split into parts.
 
-**The manifest** is flat, compressed with zstd, at the end of the pack (the
-head says where). It lists:
+**The manifest** is flat, compressed with zstd, in Restate beside the head
+(which gives its length), wherever the packs are. It lists:
 
 - every file: its size, its base's id, where each of its frames is (pack, offset, length), or nothing for a hole, and where its patches are (below);
 - every record: inline if small, else where its frame is;
@@ -62,7 +64,9 @@ hold, so the tail of a small database stays short.
    in the manifest if small, else a frame of their own.
 3. **Compaction.** A pack that the manifest needs less than half of has
    its live ranges copied, raw, into the new pack.
-4. **Put** the pack: frames, values, manifest. One PUT.
+4. **Put** the pack: frames, values. One PUT (none if it stores nothing
+   outside its manifest), and the manifest, queued in Restate before the
+   head.
 
 The flush's head names the checkpoint, and its sync deletes the tail that
 the checkpoint before it covered. The tail since then stays for readers that

@@ -1,7 +1,7 @@
 # Benchmarks
 
 These are standalone Cargo bench targets (`harness = false`), separate from
-tests and examples. All use the current (v19) storage format, a tail in
+tests and examples. All use the current (v20) storage format, a tail in
 Restate and checkpoints in packs, and require the opt-in `simulation`
 feature. They count logical KV operations and bytes in MemoryKv; they do
 not model a real remote backend.

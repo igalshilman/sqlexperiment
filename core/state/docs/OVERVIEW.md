@@ -17,19 +17,22 @@ hash.
 
 ## What Restate stores
 
-A state is one Restate object's state, in two kinds of key, and the packs
+A state is one Restate object's state, in three kinds of key, and the packs
 of its checkpoints: in Restate too by default, or in S3. Restate's own
 invocation journal is not used: these handlers run with `journalReplay: false`,
 and the head and its tail play that role.
 
-| Key                            | What it holds                                                                                                                   |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `v19/head`                     | The head: the version, the checkpoint and the one before, and the tail entries kept. The only key whose write commits.          |
-| `v19/tail/<version>/<part>`    | One flush's mutation, as it made it: the records set, the log entries, and each page written, a zstd frame of its own           |
-| `checkpoint/<version>-<nonce>` | A pack, written once and never changed: frames of 4 pages, large records and log entries, and a manifest of where everything is |
+| Key                                     | What it holds                                                                                                         |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `v20/head`                              | The head: the version, the checkpoint and the one before, and the tail entries kept. The only key whose write commits |
+| `v20/tail/<version>/<part>`             | One flush's mutation, as it made it: the records set, the log entries, and each page written, a zstd frame of its own |
+| `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's manifest, written once and never changed: where every frame, record and log entry is                   |
+| `checkpoint/<version>-<nonce>`          | A pack, written once and never changed: frames of 4 pages, and large records and log entries                          |
 
 Without S3, a pack is kept in Restate in parts of 64 KiB
-(`v19/pack/<key>/<part>`).
+(`v20/pack/<key>/<part>`), and the whole state is in Restate. With S3, only
+the packs are there: a cold open reads the head, the manifest and the tail
+from Restate, and then only the frames it reads from S3.
 
 Transactions change three kinds of state:
 
@@ -77,9 +80,10 @@ repair.
 Restate, at most the bytes the checkpoint holds), a flush first writes a
 checkpoint: the frames the tail changed, rewritten (or, for a few pages,
 patched), and the records set and log entries appended since, in one new pack, with
-a manifest. Its head names it, and drops the tail the checkpoint before
-covered. It then collects garbage: it lists the packs and deletes those
-older than the checkpoint before that neither checkpoint needs. A store
+a manifest in Restate. Its head names it, and drops the tail the checkpoint before
+covered. It then collects garbage: it lists the packs and manifests and
+deletes those older than the checkpoint before that neither checkpoint
+needs. A store
 that cannot list its keys keeps its garbage.
 
 - **Cost:** one sync, and two puts: the tail entry and the head. A

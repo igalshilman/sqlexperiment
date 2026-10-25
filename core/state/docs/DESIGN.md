@@ -37,14 +37,19 @@ crate, which keeps its engine's state private until it flushes into a mutation.
 
 A namespace holds these keys:
 
-| Key                            | Holds                                                                                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `v19/head`                     | The head, the commit point: the version, the frame size, the checkpoint and the one before, and the tail entries kept.    |
-| `v19/tail/<version>/<part>`    | The tail: one entry per flush, the mutation it made, in parts of at most 1 MiB.                                           |
-| `checkpoint/<version>-<nonce>` | A pack, put once and never changed: a checkpoint's frames, patches and large values, then its manifest. In a `BlobStore`. |
+| Key                                     | Holds                                                                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `v20/head`                              | The head, the commit point: the version, the frame size, the checkpoint and the one before, and the tail entries kept. |
+| `v20/tail/<version>/<part>`             | The tail: one entry per flush, the mutation it made, in parts of at most 1 MiB.                                        |
+| `v20/manifest/<version>-<nonce>/<part>` | A checkpoint's manifest, put once and never changed, in parts of 64 KiB.                                               |
+| `checkpoint/<version>-<nonce>`          | A pack, put once and never changed: a checkpoint's frames, patches and large values. In a `BlobStore`.                 |
 
 Packs are kept in Restate by default ([`KvBlobs`](../src/blobs.rs), in
-parts of 64 KiB under `v19/pack/`), or in S3.
+parts of 64 KiB under `v20/pack/`), or in S3. Manifests are in Restate
+either way: an open reads the manifest with the tail, from Restate, and
+goes to S3 only for the frames and values it reads. A manifest takes about
+1.7 bytes per frame (3 KiB for 100k rows, 30 KiB for 1M), and is written
+whole by each checkpoint.
 
 **Frames.** A paged file is a row of frames of `frame_pages` pages (4,
 16 KiB; set when the namespace is made, and kept in the head), as many as
@@ -67,7 +72,7 @@ the records and logs as they are, and, for a file that shrank, where it was
 cut.
 
 **Checkpoints.** A checkpoint is the state as of a version, in one pack,
-with a _manifest_ that says where every frame, patch, large record and log
+with a _manifest_ (in Restate, under the pack's name) that says where every frame, patch, large record and log
 entry is: in this pack, or in an older one. A _patch_ is one page changed
 since its frame was written, compressed against the frame's page. A head
 names its checkpoint and the one before (for readers that opened on it),
@@ -157,8 +162,10 @@ writes the state as of the head, into one new pack:
    in the manifest if small, else a zstd frame of their own.
 3. **Compaction.** A pack that the manifest needs less than half of has
    its live ranges copied, raw, into the new pack.
-4. **Put** the pack: frames, patches, values, copies, then the manifest.
-   One put.
+4. **Put** the pack: frames, patches, values, copies. One put, and none if
+   the checkpoint stores nothing outside its manifest.
+5. **Queue** the manifest in Restate, before the head, so the head's sync
+   stores both, in order.
 
 The flush's head then names it, and the head's checkpoint becomes the
 previous one. A checkpoint that fails fails nothing: the flush goes on
@@ -225,7 +232,7 @@ does not lose acknowledged work when a later step fails.
 
 There is nothing to confirm, replay against the store or repair: the head
 read names only what is stored, and whatever a crashed flush left (a tail
-entry past the head's version, a pack no head names) is overwritten by the
+entry past the head's version, a pack or manifest no head names) is overwritten by the
 next flush, or collected.
 
 ## Garbage
@@ -234,16 +241,16 @@ The tail goes with the checkpoints: a flush that adopts a checkpoint deletes
 the tail entries the checkpoint before covered, in its own sync. Those since
 then stay for readers that opened on that one.
 
-Packs are collected (`State::collect_garbage`, and after every flush that
-checkpoints):
+Packs and manifests are collected (`State::collect_garbage`, and after
+every flush that checkpoints):
 
-1. **List** the packs: S3's list, or, in Restate, the store's keys
-   (`KvStore::keys`: Restate's `getKeys()`). A store that cannot list
-   keeps its garbage.
+1. **List** the packs and the manifests, together: S3's list, or, in
+   Restate, the store's keys (`KvStore::keys`: Restate's `getKeys()`). A
+   store that cannot list keeps its garbage.
 2. **Keep** what the head's checkpoints need: the packs its checkpoint's and
    previous checkpoint's manifests name.
 3. **Delete** every listed pack older than the head's previous checkpoint
-   that neither names.
+   that neither names, and every manifest older than it.
 
 A later head names only packs its head's checkpoints name, or newer than
 its previous checkpoint, so whatever head a collection read (a reader's, a
@@ -390,10 +397,10 @@ one-thread runtime of its own. It is the only background work.
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
 | Flush, cached    | 1, the sync                                                                                                              | A tail entry (its parts), the head |
 | Flush, cold      | 1, plus 1 to get the frames (or patches) of the pages it writes, where the state lacks them                              | The same                           |
-| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; in S3, 1 PUT before the flush | A pack                             |
-| Collection       | 1 to list the packs; if any is older than the previous checkpoint, 1 for both manifests, then the deletes                | The deletes                        |
+| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; in S3, 1 PUT before the flush | A pack, a manifest                 |
+| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes  | The deletes                        |
 | Open, with cache | 1, the head, when nothing changed since this owner's flush                                                               | None                               |
-| Cold open        | Up to 3: the head; the manifest and the tail; the large records and log entries, and a small database whole              | None                               |
+| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                | None                               |
 | Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                         | None                               |
 
 Measurements: [frame packs](FRAMES.md),
@@ -410,8 +417,9 @@ Measurements: [frame packs](FRAMES.md),
   delta of what changed would; compaction at half live stores up to twice
   what is live ([FRAMES.md](FRAMES.md) measures it).
 - **Keys.** Every flush puts at least two keys (a tail entry and the head);
-  a namespace holds a key per part of each tail entry kept, and, with packs
-  in Restate, a key per 64 KiB of each pack. A collection lists every key:
+  a namespace holds a key per part of each tail entry kept, a key per 64
+  KiB of each manifest kept (two checkpoints'), and, with packs in Restate,
+  a key per 64 KiB of each pack. A collection lists every key:
   a round trip, and its deletes.
 - **Fencing.** Restate provides it for the head and the tail: a former
   attempt's writes never land after a newer owner's. Packs beside Restate
@@ -425,15 +433,16 @@ Measurements: [frame packs](FRAMES.md),
   checks structure and bounds versions, sizes, counts and names, and every
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
-- **Format.** Only v19, with no migration.
+- **Format.** Only v20, with no migration.
 - **Validation.** A monitor checks every request of the simulator's
   campaigns against the one rule, decoding every head, tail entry and
   manifest it sees, and every page, frame and value they name: a head that
   names a tail entry or a checkpoint (its manifest and every range it
   names) not stored, or does not build on the head before; a tail entry
-  put for any version but the next, or a pack's part put twice; a delete of
-  a tail entry the head's checkpoint does not cover, or of a pack a head
-  may need. A seeded random campaign over the public API
+  put for any version but the next, or a pack's or manifest's part put
+  twice; a delete of a tail entry the head's checkpoint does not cover, of
+  a pack a head may need, or of a manifest of a checkpoint not older than
+  the previous one. A seeded random campaign over the public API
   (`tests/campaign.rs`; `STATE_SEEDS=<n>` runs more seeds) mixes changes to
   records, files and logs, random checkpoint thresholds, faults,
   cancellations, crashes, reopens, owners and readers, with packs in
