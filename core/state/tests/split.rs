@@ -1,8 +1,9 @@
-//! The root in a key/value store, the blobs in a blob store ([`SplitStore`]):
-//! only the root goes to the key/value store; an earlier attempt fenced from
-//! the root (a zombie) never replaces a blob a root names, even when it draws
-//! the same numbers; a flush that fails midway leaves the last root and
-//! orphans that [`orphans`] finds.
+//! The root in Restate, the blobs in a blob store ([`SplitStore`]): only
+//! the root and the claim go to Restate; no two attempts ever put the same
+//! blob key, a retry after a crash included; an earlier attempt that
+//! Restate fenced (a zombie) never touches a blob a root names, whether it
+//! claimed before it was fenced or tries after; what they leave, a sweep
+//! deletes.
 //!
 //! ```sh
 //! cargo test --features simulation --test split
@@ -13,11 +14,17 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use state::{
     ROOT_KEY, Result, State, StateOptions,
-    blobs::{BlobStore, SplitStore, orphans},
+    blobs::{BlobStore, SplitStore},
     kv::KvStore,
     simulation::*,
 };
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 fn page(n: u8) -> Bytes {
     vec![n; 4096].into()
@@ -28,26 +35,78 @@ fn large(n: u8) -> Bytes {
     vec![n; 3000].into()
 }
 
-/// Restate's view of an attempt it has fenced: reads work, writes fail.
-struct Fenced(Arc<dyn KvStore>);
+/// Restate's state of one object, as the attempts of its handler see it:
+/// each new attempt fences those before it, whose writes Restate refuses.
+#[derive(Clone, Default)]
+struct Restate {
+    store: MemoryKv,
+    attempts: Arc<AtomicU64>,
+}
 
-impl KvStore for Fenced {
-    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        self.0.get(key)
-    }
-    fn put(&self, _: &str, _: Bytes) -> io::Result<()> {
-        Err(io::Error::other("fenced"))
-    }
-    fn delete(&self, _: &str) -> io::Result<()> {
-        Err(io::Error::other("fenced"))
-    }
-    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async { Ok(()) })
+impl Restate {
+    /// A new attempt, which fences every earlier one.
+    fn attempt(&self) -> Arc<dyn KvStore> {
+        let epoch = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        Arc::new(Attempt {
+            restate: self.clone(),
+            epoch,
+            queued: Mutex::default(),
+        })
     }
 }
 
-fn split(root: Arc<dyn KvStore>, blobs: Arc<dyn BlobStore>) -> Arc<dyn KvStore> {
-    Arc::new(SplitStore::new(root, blobs))
+/// An attempt's view of Restate: its writes wait for its sync, which fails
+/// once a later attempt fenced it.
+struct Attempt {
+    restate: Restate,
+    epoch: u64,
+    queued: Mutex<Vec<(String, Option<Bytes>)>>,
+}
+
+impl Attempt {
+    fn fenced(&self) -> io::Result<()> {
+        match self.restate.attempts.load(Ordering::SeqCst) == self.epoch {
+            true => Ok(()),
+            false => Err(io::Error::other("fenced: a later attempt runs")),
+        }
+    }
+}
+
+impl KvStore for Attempt {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
+        Box::pin(async move {
+            let queued = (self.queued.lock().unwrap().iter().rev())
+                .find(|(queued, _)| queued == key)
+                .map(|(_, value)| value.clone());
+            match queued {
+                Some(value) => Ok(value),
+                None => self.restate.store.get(key).await,
+            }
+        })
+    }
+    fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
+        self.fenced()?;
+        self.queued.lock().unwrap().push((key.into(), Some(value)));
+        Ok(())
+    }
+    fn delete(&self, key: &str) -> io::Result<()> {
+        self.fenced()?;
+        self.queued.lock().unwrap().push((key.into(), None));
+        Ok(())
+    }
+    fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async move {
+            let queued = std::mem::take(&mut *self.queued.lock().unwrap());
+            self.fenced()?;
+            for (key, value) in queued {
+                match value {
+                    Some(value) => self.restate.store.put(&key, value)?,
+                    None => self.restate.store.delete(&key)?,
+                }
+            }
+            self.restate.store.sync().await
+        })
+    }
 }
 
 /// The blob stores the tests run on: in memory, and `object_store`'s.
@@ -66,42 +125,77 @@ fn blob_stores() -> Vec<(&'static str, Arc<dyn BlobStore>)> {
     stores
 }
 
+/// An attempt's store: its view of Restate, beside `blobs`.
+fn split(attempt: Arc<dyn KvStore>, blobs: &Arc<dyn BlobStore>) -> Arc<dyn KvStore> {
+    Arc::new(SplitStore::new(attempt, blobs.clone()))
+}
+
+fn options() -> StateOptions {
+    StateOptions {
+        garbage_after: 1,
+        ..StateOptions::default()
+    }
+}
+
+/// Write page 0 of `f` and the record `big`.
+async fn change(state: &State, n: u8) -> Result<()> {
+    let mut mutation = state.mutation();
+    mutation.write(&state.file("f")?, 0, Some(page(n)))?;
+    mutation.set(&state.record("big"), large(n))?;
+    mutation.flush().await?;
+    Ok(())
+}
+
 async fn read(store: Arc<dyn KvStore>) -> Result<(Bytes, Bytes)> {
-    let state = State::open(store).await?;
+    let state = State::open(store).reader().await?;
     let page = state.file("f")?.read(0).await?.unwrap_or_default();
     Ok((page, state.record("big").get()))
 }
 
-/// Flushes of files, records and logs, under the protocol monitor: the
-/// key/value store holds the root alone, the blob store every blob, and a
-/// reopen reads it all, garbage deleted from the blob store as it goes.
+/// Sweep everything dead: a sweep that marks, a flush that makes no
+/// garbage, and a sweep that deletes. Then only what the root names is
+/// stored.
+async fn collect_all(state: &State) -> Result<()> {
+    state.collect_garbage().await?;
+    let mut tick = state.mutation();
+    tick.set(&state.record("tick"), state.version().to_string().into())?;
+    tick.flush().await?;
+    let swept = state.collect_garbage().await?;
+    assert_eq!(swept.listed - swept.deleted, swept.named, "{swept:?}");
+    Ok(())
+}
+
+/// Flushes of files, records and logs, under the protocol monitor: Restate
+/// holds the root and the claim alone, the blob store every blob; a reopen
+/// reads it all, and sweeps leave only what the root names.
 #[test]
-fn the_root_stays_in_the_kv_and_the_blobs_go_to_the_blob_store() -> Result<()> {
+fn the_root_and_the_claim_stay_in_restate_and_the_blobs_go_to_the_blob_store() -> Result<()> {
     futures::executor::block_on(async {
         for (name, blobs) in blob_stores() {
-            let kv = Arc::new(MemoryKv::default());
-            let store = Arc::new(MonitorKv::new(SplitStore::new(kv.clone(), blobs.clone())));
-            let options = StateOptions {
-                garbage_after: 2,
-                ..Default::default()
-            };
-            let state = State::open(store.clone()).options(options).await?;
+            let restate = Restate::default();
+            let store = Arc::new(MonitorKv::new(SplitStore::new(
+                restate.attempt(),
+                blobs.clone(),
+            )));
+            let state = State::open(store.clone()).options(options()).await?;
             for n in 0..10u8 {
                 let mut mutation = state.mutation();
                 mutation.write(&state.file("f")?, 0, Some(page(n)))?;
                 mutation.set(&state.record("big"), large(n))?;
                 mutation.append(&state.log("turns"), large(n))?;
                 mutation.flush().await?;
+                if n % 3 == 2 {
+                    state.collect_garbage().await?;
+                }
             }
-            assert_eq!(
-                kv.keys().into_iter().collect::<Vec<_>>(),
-                [ROOT_KEY],
-                "{name}"
-            );
-            let listed = blobs.list("v16/blob/").await?;
-            // Named: a chunk, the record, 10 entries; then 2 flushes' garbage.
-            assert_eq!(listed.len(), 16, "{name}: garbage deleted: {listed:?}");
-            let reopened = split(kv, blobs);
+            collect_all(&state).await?;
+            assert_eq!(store.violations(), Vec::<String>::new(), "{name}");
+            let keys: Vec<String> = restate.store.keys().into_iter().collect();
+            assert_eq!(keys, [CLAIM_KEY, ROOT_KEY], "{name}");
+            let listed = blobs.list("v17/blob/").await?;
+            // A chunk, the record, and 10 log entries.
+            assert_eq!(listed.len(), 12, "{name}: {listed:?}");
+            let reopened = split(restate.attempt(), &blobs);
             assert_eq!(read(reopened.clone()).await?, (page(9), large(9)), "{name}");
             let state = State::open(reopened).await?;
             assert_eq!(state.log("turns").entries().len(), 10, "{name}");
@@ -110,129 +204,134 @@ fn the_root_stays_in_the_kv_and_the_blobs_go_to_the_blob_store() -> Result<()> {
     })
 }
 
-/// A zombie (an earlier attempt Restate fenced from the root) flushes after
-/// the new owner, drawing the same blob numbers: the blob store refuses its
-/// blobs, and the owner's flush stands.
+/// An attempt claims its numbers once, durably, before its first blob: its
+/// later flushes need no claim of their own.
 #[test]
-fn a_zombie_flushing_after_the_owner_replaces_nothing() -> Result<()> {
+fn an_attempt_claims_once_before_its_first_blob() -> Result<()> {
     futures::executor::block_on(async {
-        for (name, blobs) in blob_stores() {
-            let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-            let first = State::open(split(kv.clone(), blobs.clone())).await?;
-            let mut mutation = first.mutation();
-            mutation.write(&first.file("f")?, 0, Some(page(1)))?;
-            mutation.flush().await?;
-            drop(first);
-
-            fix_blob_jump(Some(1000));
-            let fenced: Arc<dyn KvStore> = Arc::new(Fenced(kv.clone()));
-            let zombie = State::open(split(fenced, blobs.clone())).await?;
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
-            let mut mutation = owner.mutation();
-            mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
-            mutation.set(&owner.record("big"), large(2))?;
-            mutation.flush().await?;
-            let mut mutation = zombie.mutation();
-            mutation.write(&zombie.file("f")?, 0, Some(page(9)))?;
-            mutation.set(&zombie.record("big"), large(9))?;
-            let error = mutation.flush().await.unwrap_err().to_string();
-            fix_blob_jump(None);
-            let reopened = split(kv, blobs);
-            assert_eq!(read(reopened).await?, (page(2), large(2)), "{name}");
-            assert!(error.contains("another writer's blob"), "{name}: {error}");
-        }
-        Ok(())
-    })
-}
-
-/// A zombie flushes first, with the numbers the owner draws: its blobs land
-/// but its root does not, and the owner's flush fails rather than name
-/// them. Reopened, the owner jumps elsewhere and flushes.
-#[test]
-fn a_zombie_flushing_first_fails_the_owners_flush_and_the_next_open_jumps() -> Result<()> {
-    futures::executor::block_on(async {
-        for (name, blobs) in blob_stores() {
-            let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-            let fenced: Arc<dyn KvStore> = Arc::new(Fenced(kv.clone()));
-            fix_blob_jump(Some(1000));
-            let zombie = State::open(split(fenced, blobs.clone())).await?;
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
-            let mut mutation = zombie.mutation();
-            mutation.write(&zombie.file("f")?, 0, Some(page(9)))?;
-            mutation.set(&zombie.record("big"), large(9))?;
-            assert!(mutation.flush().await.is_err(), "{name}: fenced");
-            let mut mutation = owner.mutation();
-            mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
-            mutation.set(&owner.record("big"), large(2))?;
-            let error = mutation.flush().await.unwrap_err().to_string();
-            assert!(error.contains("another writer's blob"), "{name}: {error}");
-            assert!(!owner.is_usable(), "{name}: the outcome is unknown");
-            fix_blob_jump(None);
-
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
-            assert_eq!(owner.version(), 0, "{name}: nothing landed");
-            let mut mutation = owner.mutation();
-            mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
-            mutation.set(&owner.record("big"), large(2))?;
-            mutation.flush().await?;
-            assert_eq!(read(split(kv, blobs)).await?, (page(2), large(2)), "{name}");
-        }
-        Ok(())
-    })
-}
-
-/// The blob store fails midway through a flush: the root stays as it was,
-/// the blobs that landed are orphans, and sweeping them changes nothing
-/// that reads.
-#[test]
-fn a_flush_failing_midway_leaves_the_last_root_and_orphans_to_sweep() -> Result<()> {
-    futures::executor::block_on(async {
-        let kv = Arc::new(MemoryKv::default());
-        let blobs = MemoryBlobs::default();
-        let state = State::open(split(kv.clone(), Arc::new(blobs.clone()))).await?;
+        let restate = Restate::default();
+        let blobs: Arc<dyn BlobStore> = Arc::new(MemoryBlobs::default());
+        let state = State::open(split(restate.attempt(), &blobs)).await?;
         let mut mutation = state.mutation();
-        mutation.write(&state.file("f")?, 0, Some(page(1)))?;
-        mutation.set(&state.record("big"), large(1))?;
+        mutation.set(&state.record("small"), "inline".into())?;
         mutation.flush().await?;
-        let named = blobs.len();
-
-        blobs.fail_after(Some(1));
-        let mut mutation = state.mutation();
-        mutation.write(&state.file("f")?, 0, Some(page(2)))?;
-        mutation.set(&state.record("big"), large(2))?;
-        assert!(mutation.flush().await.is_err());
-        blobs.fail_after(None);
-        let root = kv.contents()[ROOT_KEY].clone();
-        let stray = orphans(&root, &blobs).await?;
-        assert_eq!(stray.len(), 1, "the one put that landed: {stray:?}");
-        assert_eq!(blobs.len(), named + 1);
-        for key in stray {
-            blobs.delete(&key).await?;
-        }
-        assert_eq!(
-            read(split(kv.clone(), Arc::new(blobs.clone()))).await?,
-            (page(1), large(1))
+        assert!(
+            !restate.store.keys().contains(CLAIM_KEY),
+            "no blob, no claim"
         );
-        assert!(orphans(&root, &blobs).await?.is_empty());
+        for n in 0..5 {
+            change(&state, n).await?;
+        }
+        let claims = restate.store.stats().kind("claim").puts;
+        assert_eq!(claims, 1, "one claim for five flushes");
         Ok(())
     })
 }
 
-/// A put the blob store applied but did not acknowledge, retried: the same
-/// bytes are this writer's own, and the sync succeeds; other bytes are not.
+/// The blob store fails midway through a flush, and the attempt with it.
+/// The retry, a new attempt, numbers past what the failed one claimed: it
+/// overwrites none of the blobs that landed, which a sweep deletes once a
+/// root passes them.
 #[test]
-fn a_blob_already_holding_the_same_bytes_is_a_retry() -> Result<()> {
+fn a_retry_numbers_past_what_the_failed_attempt_claimed() -> Result<()> {
     futures::executor::block_on(async {
-        let blobs = MemoryBlobs::default();
-        blobs.put_new("v16/blob/7", "same".into()).await?;
-        blobs.put_new("v16/blob/8", "theirs".into()).await?;
-        let store = SplitStore::new(Arc::new(MemoryKv::default()), Arc::new(blobs.clone()));
-        store.put("v16/blob/7", "same".into())?;
-        store.sync().await?;
-        store.put("v16/blob/8", "mine".into())?;
-        let error = store.sync().await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(&store.get("v16/blob/8").await?.unwrap()[..], b"theirs");
+        let restate = Restate::default();
+        let memory = MemoryBlobs::default();
+        let blobs: Arc<dyn BlobStore> = Arc::new(memory.clone());
+        let state = State::open(split(restate.attempt(), &blobs))
+            .options(options())
+            .await?;
+        change(&state, 1).await?;
+
+        let before = memory.keys();
+        memory.fail_after(Some(1));
+        assert!(change(&state, 2).await.is_err());
+        assert!(!state.is_usable(), "the attempt fails with its flush");
+        memory.fail_after(None);
+        let stray: Vec<String> = (memory.keys().into_iter())
+            .filter(|key| !before.contains(key))
+            .collect();
+        assert_eq!(stray.len(), 1, "the one put that landed");
+
+        let state = State::open(split(restate.attempt(), &blobs))
+            .options(options())
+            .await?;
+        change(&state, 2).await?;
+        assert_eq!(memory.overwrites(), 0, "no key put twice");
+        assert_eq!(
+            read(split(restate.attempt(), &blobs)).await?,
+            (page(2), large(2))
+        );
+        let state = State::open(split(restate.attempt(), &blobs))
+            .options(options())
+            .await?;
+        collect_all(&state).await?;
+        assert!(
+            !memory.keys().contains(&stray[0]),
+            "the failed attempt's blob went"
+        );
+        Ok(())
+    })
+}
+
+/// A zombie that tries to claim after Restate fenced it: the claim's sync
+/// fails, which ends its state, and it puts no blob.
+#[test]
+fn a_zombie_claiming_after_it_was_fenced_puts_nothing() -> Result<()> {
+    futures::executor::block_on(async {
+        for (name, blobs) in blob_stores() {
+            let restate = Restate::default();
+            let zombie = State::open(split(restate.attempt(), &blobs)).await?;
+            let owner = State::open(split(restate.attempt(), &blobs)).await?;
+            let error = change(&zombie, 9).await.unwrap_err().to_string();
+            assert!(error.contains("fenced"), "{name}: {error}");
+            assert!(!zombie.is_usable(), "{name}");
+            assert!(blobs.list("v17/").await?.is_empty(), "{name}: no blob put");
+            change(&owner, 2).await?;
+            assert_eq!(
+                read(split(restate.attempt(), &blobs)).await?,
+                (page(2), large(2)),
+                "{name}"
+            );
+        }
+        Ok(())
+    })
+}
+
+/// A zombie that claimed while it ran, fenced since, flushes again within
+/// its claim, before or after the owner flushes: its blobs land at its own
+/// numbers, its root is refused, and the owner's blobs are untouched. A
+/// sweep deletes the zombie's blobs once a root passes them.
+#[test]
+fn a_zombie_that_claimed_before_it_was_fenced_never_touches_the_owners_blobs() -> Result<()> {
+    futures::executor::block_on(async {
+        for zombie_first in [false, true] {
+            let restate = Restate::default();
+            let memory = MemoryBlobs::default();
+            let blobs: Arc<dyn BlobStore> = Arc::new(memory.clone());
+            let zombie = State::open(split(restate.attempt(), &blobs))
+                .options(options())
+                .await?;
+            change(&zombie, 1).await?;
+            let owner = State::open(split(restate.attempt(), &blobs))
+                .options(options())
+                .await?;
+            let before = memory.puts();
+            if zombie_first {
+                assert!(change(&zombie, 9).await.is_err(), "fenced");
+                change(&owner, 2).await?;
+            } else {
+                change(&owner, 2).await?;
+                assert!(change(&zombie, 9).await.is_err(), "fenced");
+            }
+            assert!(memory.puts() >= before + 4, "both put their blobs");
+            assert_eq!(memory.overwrites(), 0, "zombie first: {zombie_first}");
+            let reopened = split(restate.attempt(), &blobs);
+            assert_eq!(read(reopened.clone()).await?, (page(2), large(2)));
+            let owner = State::open(reopened).options(options()).await?;
+            collect_all(&owner).await?;
+            assert_eq!(read(split(restate.attempt(), &blobs)).await?.1, large(2));
+        }
         Ok(())
     })
 }

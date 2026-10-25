@@ -1,9 +1,11 @@
 //! The stored state: immutable blobs, and one root that names them.
 //!
-//! | Key            | Holds                                                                     |
-//! | -------------- | ------------------------------------------------------------------------- |
-//! | `v16/root`     | The commit point: the directory of files and records, and what each names |
-//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, a map node, or a record or log entry |
+//! | Key             | Holds                                                                       |
+//! | --------------- | --------------------------------------------------------------------------- |
+//! | `v17/root`      | The commit point: the directory of files and records, and what each names   |
+//! | `v17/blob/<n>`  | One zstd frame, never changed once a root names it: a chunk, a map node, or a record or log entry |
+//! | `v17/claim`     | The first blob number no attempt claimed, where blobs are not fenced        |
+//! | `v17/sweep`     | The blobs the last sweep found dead, and the version it looked at           |
 //!
 //! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
 //! each. A chunk is stored as a *base*, a frame of its pages compressed
@@ -15,24 +17,48 @@
 //! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
 //! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
 //! are in the root. A log's entries are blobs of their own, one each, from
-//! the first not yet truncated, written once: the root, which every flush
-//! rewrites, holds only their numbers.
+//! the first not yet truncated: the root, which every flush rewrites, holds
+//! only their numbers.
 //!
 //! **One rule.** A blob is written before the first root that names it, and
 //! deleted only once no root a reader may hold names it. The store keeps
 //! writes in issue order, so a root is stored only with the blobs it names:
 //! whatever prefix of a flush's writes a crash keeps, the root stored names
-//! only blobs that are there. There is no log to replay, nothing is
-//! overwritten, and nothing needs repair after a crash.
+//! only blobs that are there. There is no log to replay, and nothing needs
+//! repair after a crash.
 //!
-//! **Flush.** Delete the blobs that died [`StateOptions::garbage_after`]
-//! flushes ago or earlier; put the flush's blobs, at numbers no durable root
-//! has used; put the root, at the next version, naming them, and listing the
-//! blobs it no longer names as garbage, with its version; sync once.
+//! **Numbers only grow.** A flush numbers its blobs from the root's next
+//! blob on, and the root it puts moves the next blob past them. So a blob
+//! below a root's next blob that the root does not name is dead for good:
+//! no later root names it again. That is what lets anyone sweep, at any
+//! time, beside the owner.
 //!
-//! **Open.** Get the root, and the blobs of its large records (and, cold, of a
-//! small file), in one more round trip. A page read gets its chunk's base and
-//! delta together, in one.
+//! **Claims.** Where an earlier attempt of the owner, fenced from the root,
+//! may still put blobs ([`KvStore::unfenced_blobs`]: S3 beside Restate),
+//! the owner claims its numbers first: before its first blob, it writes the
+//! claim, past every number it will use, and syncs. A sync that fails ends
+//! the state (and so the attempt). Every later attempt numbers from the
+//! claim on, so no two attempts ever put the same key: a retry after a
+//! crash never overwrites what the crashed attempt put, and a zombie puts
+//! only at numbers no one else uses, which no committed root names. Where
+//! the store fences blobs with the root (all in Restate), there is nothing
+//! to claim: a crashed flush's blobs are overwritten by the next.
+//!
+//! **Flush.** Put the flush's blobs, at numbers from the next blob on
+//! (claimed, where blobs are not fenced); put the root, at the next
+//! version, naming them; sync once. A flush deletes nothing.
+//!
+//! **Sweep** (`State::collect_garbage`): mark and sweep, in two phases. Read
+//! the root, durable, and list the blobs: those below its next blob that it
+//! does not name are dead. Delete those the previous sweep found dead, once
+//! [`StateOptions::garbage_after`] versions have passed since, and keep the
+//! rest for the next sweep. A sweep writes no root: any state may sweep, an
+//! owner's or a reader's, as often as it likes, beside the owner's flushes.
+//!
+//! **Open.** Get the root (and, for an owner that claims, the claim beside
+//! it), and the blobs of its large records (and, cold, of a small file), in
+//! one more round trip. A page read gets its chunk's base and delta
+//! together, in one.
 //!
 //! **Readers and caching.** A blob's content never changes once a durable root
 //! names it, so any state may cache it under its number (and its database's
@@ -40,13 +66,13 @@
 //! state reads the root it opened as a consistent snapshot while the owner
 //! flushes, for [`StateOptions::garbage_after`] of the owner's flushes. (A
 //! crashed flush's blobs, which no durable root names, are overwritten by
-//! the next flush: nothing caches them, since nothing caches a blob before a
-//! durable root names it.)
+//! the next flush where blobs are fenced: nothing caches them, since nothing
+//! caches a blob before a durable root names it.)
 use crate::{
     Base, PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
     kv::KvStore,
-    map::{MAX_FANOUT, Map, Node, Nodes, Shape},
+    map::{MAX_FANOUT, Map, Node, Nodes, Shape, Visit},
     zstd,
 };
 use bytes::Bytes;
@@ -60,9 +86,15 @@ use std::{
 /// The root's key: the one key a flush overwrites, and its commit. An open
 /// reads it first, so a host whose store can send keys ahead of the first
 /// read (Restate's eager state) should send this one.
-pub const ROOT_KEY: &str = "v16/root";
-pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
-const ROOT_MAGIC: &[u8; 4] = b"SR16";
+pub const ROOT_KEY: &str = "v17/root";
+pub(crate) const BLOB_PREFIX: &str = "v17/blob/";
+/// The first blob number no attempt claimed ([`KvStore::unfenced_blobs`]).
+pub(crate) const CLAIM_KEY: &str = "v17/claim";
+/// What the last sweep found dead ([`Sweep`]).
+pub(crate) const SWEEP_KEY: &str = "v17/sweep";
+const ROOT_MAGIC: &[u8; 4] = b"SR17";
+const CLAIM_MAGIC: &[u8; 4] = b"SC17";
+const SWEEP_MAGIC: &[u8; 4] = b"SS17";
 /// Bytes of a record's value, or of a log entry.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Entries a log holds: appending past it is refused, until a truncation
@@ -78,6 +110,11 @@ pub(crate) const MAX_CHUNK_PAGES: u64 = 256;
 const MAX_FILES: u32 = 1 << 16;
 /// Largest version or blob number a root may hold, far from overflow.
 const MAX_SEQUENCE: u64 = 1 << 62;
+/// Numbers an owner claims past what its flush needs: the next flushes of
+/// the state need no claim of their own.
+const CLAIM_AHEAD: u64 = 1 << 12;
+/// Most blobs a sweep keeps for the next.
+const MAX_CANDIDATES: u64 = 1 << 24;
 /// Largest decoded root.
 const MAX_ROOT_BYTES: usize = 64 << 20;
 /// Chunk images a state keeps decoded before it drops them all.
@@ -133,25 +170,90 @@ fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<u64> {
     Ok(flush.put(frame, None))
 }
 
-/// The largest jump [`blob_jump`] makes: 2^24 numbers, so an open costs a
-/// few bytes of the root and the maps, and 2^38 opens fit under
-/// [`MAX_SEQUENCE`].
-const MAX_JUMP: u64 = 1 << 24;
-
-#[cfg(feature = "simulation")]
-thread_local! {
-    /// A jump tests fix: see [`crate::simulation::fix_blob_jump`].
-    pub(crate) static FIXED_JUMP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+fn encode_claim(claim: u64) -> Bytes {
+    let mut out = CLAIM_MAGIC.to_vec();
+    put_varint(&mut out, claim);
+    out.into()
 }
 
-/// How far past the root's next blob a writer of a store with
-/// [`KvStore::write_once_blobs`] starts numbering: 1 to [`MAX_JUMP`].
-fn blob_jump() -> u64 {
-    #[cfg(feature = "simulation")]
-    if let Some(jump) = FIXED_JUMP.with(|fixed| fixed.get()) {
-        return jump;
+pub(crate) fn decode_claim(bytes: &[u8]) -> io::Result<u64> {
+    let body = (bytes.strip_prefix(CLAIM_MAGIC)).ok_or_else(|| invalid("claim"))?;
+    let mut r = Reading::new(body, "claim");
+    let claim = r.bounded(MAX_SEQUENCE)?;
+    r.end()?;
+    Ok(claim)
+}
+
+/// What a sweep found dead, for a later one to delete: the blobs of the
+/// database `database` that its root of version `marked` did not name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Sweep {
+    pub database: u64,
+    pub marked: u64,
+    pub dead: BTreeSet<u64>,
+}
+
+impl Sweep {
+    pub fn encode(&self) -> Bytes {
+        let mut out = SWEEP_MAGIC.to_vec();
+        out.extend_from_slice(&self.database.to_le_bytes());
+        put_varint(&mut out, self.marked);
+        put_varint(&mut out, self.dead.len() as u64);
+        let mut previous = 0;
+        for &n in &self.dead {
+            put_varint(&mut out, n - previous);
+            previous = n;
+        }
+        out.into()
     }
-    1 + crate::cache::random() % MAX_JUMP
+
+    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let body = (bytes.strip_prefix(SWEEP_MAGIC)).ok_or_else(|| invalid("sweep"))?;
+        let (database, body) = body.split_first_chunk().ok_or_else(|| invalid("sweep"))?;
+        let mut r = Reading::new(body, "sweep");
+        let marked = r.bounded(MAX_SEQUENCE)?;
+        let mut dead = BTreeSet::new();
+        let mut previous = 0u64;
+        for i in 0..r.bounded(MAX_CANDIDATES)? {
+            let gap = r.varint()?;
+            previous = (previous.checked_add(gap))
+                .filter(|&n| (i == 0 || gap > 0) && n < MAX_SEQUENCE)
+                .ok_or_else(|| invalid("sweep"))?;
+            dead.insert(previous);
+        }
+        r.end()?;
+        Ok(Self {
+            database: u64::from_le_bytes(*database),
+            marked,
+            dead,
+        })
+    }
+}
+
+/// What a sweep did ([`crate::State::collect_garbage`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// The version of the root it marked against.
+    pub version: u64,
+    /// Blobs stored.
+    pub listed: usize,
+    /// Blobs the root names.
+    pub named: usize,
+    /// Blobs it deleted: dead at the last sweep, at least
+    /// [`StateOptions::garbage_after`] versions ago.
+    pub deleted: usize,
+    /// Dead blobs it keeps for a later sweep to delete.
+    pub dead: usize,
+    /// It wrote nothing: the last sweep's dead blobs are not
+    /// [`StateOptions::garbage_after`] versions old yet.
+    pub waiting: bool,
+}
+
+/// What a sweep will write: the blobs to delete, and the sweep to keep.
+pub(crate) struct Marked {
+    collected: Collected,
+    deleted: Vec<u64>,
+    sweep: Option<Sweep>,
 }
 
 fn refuse<T>(message: String) -> io::Result<T> {
@@ -321,15 +423,14 @@ pub(crate) struct Root {
     pub id: u64,
     /// The flushes that changed something, ever.
     pub version: u64,
-    /// The next blob number: none at or past it is named.
+    /// The next blob number: none at or past it is named, and none below it
+    /// that this root does not name is named again.
     pub next_blob: u64,
     /// Pages per chunk, set when the namespace was made.
     pub chunk_pages: u64,
     /// Entries per node of a file's chunk map, set when the namespace was
     /// made.
     pub fanout: u64,
-    /// Blobs no root names since the version given, to delete.
-    pub garbage: BTreeMap<u64, u64>,
     pub next_file: u32,
     pub directory: BTreeMap<u32, Entry>,
 }
@@ -412,7 +513,6 @@ impl Root {
             next_blob: 0,
             chunk_pages,
             fanout,
-            garbage: BTreeMap::new(),
             next_file: 0,
             directory: BTreeMap::new(),
         }
@@ -442,13 +542,6 @@ impl Root {
         put_varint(&mut body, self.next_blob);
         put_varint(&mut body, self.chunk_pages);
         put_varint(&mut body, self.fanout);
-        put_varint(&mut body, self.garbage.len() as u64);
-        let mut previous = 0;
-        for (&n, &since) in &self.garbage {
-            put_varint(&mut body, n - previous);
-            put_varint(&mut body, self.version - since);
-            previous = n;
-        }
         put_varint(&mut body, u64::from(self.next_file));
         put_varint(&mut body, self.directory.len() as u64);
         let mut next = 0;
@@ -513,18 +606,6 @@ impl Root {
                 .filter(|&n| n < next_blob)
                 .ok_or_else(|| invalid("root"))
         };
-        let mut previous = 0u64;
-        for _ in 0..r.bounded(next_blob)? {
-            previous = blob(
-                previous
-                    .checked_add(r.varint()?)
-                    .ok_or_else(|| invalid("root"))?,
-            )?;
-            let since = version
-                .checked_sub(r.varint()?)
-                .ok_or_else(|| invalid("root"))?;
-            root.garbage.insert(previous, since);
-        }
         root.next_file = r.bounded(MAX_FILES.into())? as u32;
         let mut next = 0u32;
         for _ in 0..r.bounded(root.next_file.into())? {
@@ -648,10 +729,14 @@ pub(crate) struct Snapshot {
     pub(crate) unchanged: bool,
     /// A reader's: it changes nothing in the cache.
     reader: bool,
-    /// The next flush numbers its blobs from a random jump past the root's
-    /// next blob ([`KvStore::write_once_blobs`]): this writer has not
-    /// flushed yet.
-    jump: bool,
+    /// The number the next flush puts its first blob at: the root's next
+    /// blob, or, for an owner that claims ([`Self::claimed`]), the claim it
+    /// opened on, if higher.
+    next_blob: u64,
+    /// An owner's whose store does not fence blobs
+    /// ([`KvStore::unfenced_blobs`]): the end of the numbers it claimed,
+    /// durably. It puts blobs only below it.
+    claimed: Option<u64>,
     /// Chunk images decoded, by the blob that holds them: blobs never change,
     /// so every view of the state shares them.
     images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
@@ -686,13 +771,11 @@ impl Readahead {
     }
 }
 
-/// A flush being built: the next root, and the blobs it puts and frees.
+/// A flush being built: the next root, and the blobs it puts.
 struct Flush {
     root: Root,
     /// Blobs to put, with the chunk images they hold.
     fresh: Vec<(u64, Bytes, Option<Arc<Image>>)>,
-    /// Blobs the next root no longer names.
-    dead: Vec<u64>,
     /// The map nodes it puts, decoded.
     nodes: Vec<(u64, Arc<Node>)>,
     /// Chunks given a new base in place of their old one.
@@ -700,13 +783,15 @@ struct Flush {
 }
 
 impl Flush {
-    fn new(root: &Root) -> Self {
+    /// The flush of the root after `root`, its blobs numbered from
+    /// `next_blob` on.
+    fn new(root: &Root, next_blob: u64) -> Self {
         let mut root = root.clone();
         root.version += 1;
+        root.next_blob = next_blob;
         Self {
             root,
             fresh: Vec::new(),
-            dead: Vec::new(),
             nodes: Vec::new(),
             rebased: 0,
         }
@@ -762,6 +847,44 @@ struct FileWrite<'a> {
 }
 
 impl Snapshot {
+    /// The namespace as `root_bytes` holds it, with nothing fetched.
+    fn bare(
+        store: Arc<dyn KvStore>,
+        options: StateOptions,
+        cache: Option<NamespaceCache>,
+        reader: bool,
+        root_bytes: Option<Bytes>,
+    ) -> io::Result<Self> {
+        let root = match &root_bytes {
+            Some(bytes) => Root::decode(bytes)?,
+            None if !(1..=MAX_CHUNK_PAGES).contains(&options.chunk_pages) => {
+                return refuse(format!("chunk_pages {} is invalid", options.chunk_pages));
+            }
+            None if !(2..=MAX_FANOUT).contains(&options.fanout) => {
+                return refuse(format!("fanout {} is invalid", options.fanout));
+            }
+            None => Root::new(options.chunk_pages, options.fanout),
+        };
+        Ok(Self {
+            store,
+            options,
+            cache,
+            next_blob: root.next_blob,
+            claimed: None,
+            root: Arc::new(root),
+            root_bytes,
+            records: Records::new(),
+            logs: Logs::new(),
+            bases: BTreeMap::new(),
+            unchanged: false,
+            reader,
+            images: Arc::default(),
+            nodes: Arc::default(),
+            fetching: Arc::default(),
+            readahead: Mutex::default(),
+        })
+    }
+
     /// Open the namespace: see the module documentation. An owner without a
     /// cache, or whose last flush had an unknown outcome, syncs alongside, so
     /// that what it reads is durable; a `reader` reads what is stored.
@@ -780,38 +903,25 @@ impl Snapshot {
                 false => Ok(()),
             }
         };
-        let (root_bytes, ()) = futures::try_join!(store.get(ROOT_KEY), settle)?;
+        // An owner that claims its blob numbers reads the claim beside the
+        // root: no attempt claims after this one began (Restate fences them).
+        let claims = !reader && store.unfenced_blobs();
+        let claim = async {
+            match claims {
+                true => store.get(CLAIM_KEY).await,
+                false => Ok(None),
+            }
+        };
+        let (root_bytes, claim, ()) = futures::try_join!(store.get(ROOT_KEY), claim, settle)?;
         if let (Some(owner), Some(unknown)) = (owner, unsettled) {
             owner.settled(unknown);
         }
-        let root = match &root_bytes {
-            Some(bytes) => Root::decode(bytes)?,
-            None if !(1..=MAX_CHUNK_PAGES).contains(&options.chunk_pages) => {
-                return refuse(format!("chunk_pages {} is invalid", options.chunk_pages));
-            }
-            None if !(2..=MAX_FANOUT).contains(&options.fanout) => {
-                return refuse(format!("fanout {} is invalid", options.fanout));
-            }
-            None => Root::new(options.chunk_pages, options.fanout),
-        };
-        let write_once = store.write_once_blobs();
-        let mut snapshot = Self {
-            store,
-            options: options.clone(),
-            cache: cache.clone(),
-            root: Arc::new(root),
-            root_bytes,
-            records: Records::new(),
-            logs: Logs::new(),
-            bases: BTreeMap::new(),
-            unchanged: false,
-            reader,
-            jump: !reader && write_once,
-            images: Arc::default(),
-            nodes: Arc::default(),
-            fetching: Arc::default(),
-            readahead: Mutex::default(),
-        };
+        let mut snapshot = Self::bare(store, options.clone(), cache.clone(), reader, root_bytes)?;
+        if claims {
+            let claim = claim.as_deref().map(decode_claim).transpose()?;
+            snapshot.next_blob = snapshot.next_blob.max(claim.unwrap_or(0));
+            snapshot.claimed = Some(snapshot.next_blob);
+        }
         // The large records' and log entries' blobs and every chunk of a
         // small file, together, beside the maps of all but the largest files.
         let (small, fetched) = {
@@ -884,8 +994,130 @@ impl Snapshot {
         Ok(snapshot)
     }
 
+    /// The namespace's root as stored now, made durable first: what a sweep
+    /// marks against. (A root a crash could still lose might no longer name
+    /// blobs the root before it names, and the next flush builds on.)
+    pub async fn latest(
+        store: Arc<dyn KvStore>,
+        options: StateOptions,
+        cache: Option<NamespaceCache>,
+    ) -> io::Result<Self> {
+        let root_bytes = store.get(ROOT_KEY).await?;
+        store.sync().await?;
+        Self::bare(store, options, cache, true, root_bytes)
+    }
+
+    /// Mark against this root, which must be durable, the blobs `listed`:
+    /// those below its next blob that it does not name are dead. Those the
+    /// last sweep found dead too, long enough ago, are to delete; the
+    /// others to keep for the next sweep. Reads only.
+    pub async fn mark(&self, listed: &[String]) -> io::Result<Marked> {
+        let root = &self.root;
+        let (held, named) = futures::try_join!(self.store.get(SWEEP_KEY), self.named())?;
+        let listed: BTreeSet<u64> = listed
+            .iter()
+            .filter_map(|key| parse_blob_key(key))
+            .collect();
+        let dead: BTreeSet<u64> = (listed.range(..root.next_blob))
+            .filter(|n| !named.contains(n))
+            .copied()
+            .collect();
+        // A sweep of a namespace made again since is of no use.
+        let held = (held.as_deref().map(Sweep::decode).transpose()?)
+            .filter(|held| held.database == root.id)
+            .unwrap_or_default();
+        let mut collected = Collected {
+            version: root.version,
+            listed: listed.len(),
+            named: named.len(),
+            ..Collected::default()
+        };
+        if !held.dead.is_empty() && root.version < held.marked + self.options.garbage_after.max(1) {
+            collected.dead = held.dead.len();
+            collected.waiting = true;
+            let (deleted, sweep) = (Vec::new(), None);
+            return Ok(Marked {
+                collected,
+                deleted,
+                sweep,
+            });
+        }
+        // Dead then and dead now (no root names one again: this checks it).
+        let deleted: Vec<u64> = held.dead.intersection(&dead).copied().collect();
+        let kept: BTreeSet<u64> = (dead.difference(&held.dead))
+            .take(MAX_CANDIDATES as usize)
+            .copied()
+            .collect();
+        collected.deleted = deleted.len();
+        collected.dead = kept.len();
+        let sweep = (!held.dead.is_empty() || !kept.is_empty()).then(|| Sweep {
+            database: root.id,
+            marked: root.version,
+            dead: kept,
+        });
+        Ok(Marked {
+            collected,
+            deleted,
+            sweep,
+        })
+    }
+
+    /// Delete what `marked` deletes, keep what it keeps, and sync.
+    pub async fn sweep(&self, marked: Marked) -> io::Result<Collected> {
+        let Some(sweep) = marked.sweep else {
+            return Ok(marked.collected);
+        };
+        for &n in &marked.deleted {
+            self.store.delete(&blob_key(n))?;
+        }
+        match sweep.dead.is_empty() {
+            true => self.store.delete(SWEEP_KEY)?,
+            false => self.store.put(SWEEP_KEY, sweep.encode())?,
+        }
+        self.store.sync().await?;
+        Ok(marked.collected)
+    }
+
+    /// Every blob the root names: its records' and log entries', and its
+    /// maps' nodes and chunks.
+    async fn named(&self) -> io::Result<BTreeSet<u64>> {
+        let mut named = BTreeSet::new();
+        for entry in self.root.directory.values() {
+            match &entry.kind {
+                Kind::Record(Value::Blob(n)) => {
+                    named.insert(*n);
+                }
+                Kind::Log { entries, .. } => named.extend(entries),
+                Kind::Record(Value::Inline(_)) | Kind::Paged { .. } => {}
+            }
+        }
+        let maps: Vec<(&Map, Shape)> = (self.root.directory.keys())
+            .filter_map(|&id| self.map(id))
+            .collect();
+        let met = self.with_nodes(|nodes| {
+            let mut met = Vec::new();
+            for &(map, shape) in &maps {
+                map.walk(shape, nodes, &mut |visit| met.push(visit));
+            }
+            met
+        });
+        for visit in met.await? {
+            match visit {
+                Visit::Node(n) => {
+                    named.insert(n);
+                }
+                Visit::Chunk(_, chunk) => named.extend(chunk.blobs()),
+            }
+        }
+        Ok(named)
+    }
+
     pub fn version(&self) -> u64 {
         self.root.version
+    }
+
+    pub fn store(&self) -> &Arc<dyn KvStore> {
+        &self.store
     }
 
     pub fn records(&self) -> &Records {
@@ -1319,12 +1551,7 @@ impl Snapshot {
                 self.continued(self.root.clone(), self.root_bytes.clone()),
             ));
         }
-        let mut flush = Flush::new(&self.root);
-        if self.jump {
-            flush.root.next_blob = (flush.root.next_blob.checked_add(blob_jump()))
-                .filter(|&next| next < MAX_SEQUENCE - MAX_JUMP)
-                .ok_or_else(|| io::Error::other("the blob numbers are spent"))?;
-        }
+        let mut flush = Flush::new(&self.root, self.next_blob);
         for (name, written) in &writes {
             self.commit_file(&mut flush, name, written).await?;
         }
@@ -1395,7 +1622,6 @@ impl Snapshot {
         for (n, node) in update.fresh {
             flush.put_node(n, node)?;
         }
-        flush.dead.extend(update.dead);
         let Some(Entry {
             kind:
                 Kind::Paged {
@@ -1451,9 +1677,7 @@ impl Snapshot {
         if pages == now && stored.current().is_some() && !file.missing {
             return Ok(stored);
         }
-        flush.dead.extend(stored.delta);
         if pages == hole || file.missing {
-            flush.dead.extend(stored.base);
             return Ok(Chunk::default());
         }
         let pages = Bytes::from(pages);
@@ -1470,7 +1694,6 @@ impl Snapshot {
         let prefix = if file.base.is_some() { &hole[..] } else { &[] };
         let frame = zstd::compress(&pages, prefix, Bytes::copy_from_slice)?;
         flush.rebased += usize::from(stored.base.is_some());
-        flush.dead.extend(stored.base);
         Ok(Chunk {
             base: Some(flush.put(frame, Some(pages))),
             delta: None,
@@ -1483,9 +1706,6 @@ impl Snapshot {
         let mut after = self.records.clone();
         for (name, value) in records {
             let id = flush.file(&name, || Kind::Record(Value::Inline(Bytes::new())));
-            if let Kind::Record(Value::Blob(n)) = flush.root.directory[&id].kind {
-                flush.dead.push(n);
-            }
             let stored = self.store_value(flush, &value)?;
             flush.root.directory.get_mut(&id).expect("allocated").kind = Kind::Record(stored);
             after.insert(name, value);
@@ -1522,8 +1742,7 @@ impl Snapshot {
             held.values.drain(..dropped);
             held.first += dropped as u64;
             // Those appended and dropped at once were never stored.
-            let stored_dropped = dropped.min(entries.len());
-            flush.dead.extend(entries.drain(..stored_dropped));
+            entries.drain(..dropped.min(entries.len()));
             entries.extend(fresh);
             *first = held.first;
         }
@@ -1538,8 +1757,8 @@ impl Snapshot {
         }
     }
 
-    /// Write `flush`: delete the garbage past its grace, put the blobs, then
-    /// the root that names them; then one sync.
+    /// Write `flush`: claim its numbers if this owner must and has not yet,
+    /// put the blobs, then the root that names them; then one sync.
     async fn write(
         &self,
         flush: Flush,
@@ -1547,9 +1766,8 @@ impl Snapshot {
         logs: Logs,
     ) -> io::Result<(FlushReport, Self)> {
         let Flush {
-            mut root,
+            root,
             fresh,
-            dead,
             nodes,
             rebased,
         } = flush;
@@ -1557,43 +1775,46 @@ impl Snapshot {
         if cache.is_some_and(|cache| !cache.claim(self.version())) {
             return refuse("another state flushed since this one opened; reopen".into());
         }
-        let version = root.version;
-        // The garbage old enough that no reader holds a root naming it.
-        let grace = self.options.garbage_after.max(1);
-        let (old, kept): (Vec<_>, Vec<_>) =
-            (root.garbage.iter()).partition(|&(_, &since)| since + grace <= version);
-        let old: Vec<u64> = old.into_iter().map(|(&n, _)| n).collect();
-        root.garbage = kept.into_iter().map(|(&n, &since)| (n, since)).collect();
-        root.garbage.extend(dead.into_iter().map(|n| (n, version)));
-        let write = |key: &str, value: Option<Bytes>| {
-            let queued = match value {
-                Some(value) => self.store.put(key, value),
-                None => self.store.delete(key),
-            };
-            queued.map_err(|error| self.failed(error))
-        };
-        for n in old {
-            write(&blob_key(n), None)?;
+        if root.next_blob >= MAX_SEQUENCE - CLAIM_AHEAD {
+            return Err(io::Error::other("the blob numbers are spent"));
         }
+        let write = |key: &str, value: Bytes| {
+            (self.store.put(key, value)).map_err(|error| self.failed(error))
+        };
+        let claimed = match self.claimed {
+            Some(claimed) if root.next_blob > claimed => {
+                // Durable before any blob is put: every later attempt
+                // numbers past it. A sync that fails ends the state.
+                let claim = root.next_blob + CLAIM_AHEAD;
+                write(CLAIM_KEY, encode_claim(claim))?;
+                if let Err(error) = self.store.sync().await {
+                    return Err(self.failed(error));
+                }
+                Some(claim)
+            }
+            claimed => claimed,
+        };
         let mut blob_bytes = 0;
         for (n, value, _) in &fresh {
             blob_bytes += value.len();
-            write(&blob_key(*n), Some(value.clone()))?;
+            write(&blob_key(*n), value.clone())?;
         }
         let bytes = root.encode();
         let root_bytes = bytes.len();
-        write(ROOT_KEY, Some(bytes.clone()))?;
+        write(ROOT_KEY, bytes.clone())?;
         if let Err(error) = self.store.sync().await {
             return Err(self.failed(error));
         }
+        let version = root.version;
         if let Some(cache) = cache {
             for (n, value, _) in &fresh {
                 cache.insert(root.id, *n, value.clone());
             }
             cache.flushed(bytes.clone(), version);
         }
+        let next_blob = root.next_blob;
         let mut after = self.continued(Arc::new(root), Some(bytes));
-        after.jump = false;
+        (after.next_blob, after.claimed) = (next_blob, claimed);
         after.records = records;
         after.logs = logs;
         after.keep(
@@ -1629,7 +1850,8 @@ impl Snapshot {
             bases: self.bases.clone(),
             unchanged: false,
             reader: self.reader,
-            jump: self.jump,
+            next_blob: self.next_blob,
+            claimed: self.claimed,
             images: self.images.clone(),
             nodes: self.nodes.clone(),
             fetching: self.fetching.clone(),

@@ -288,32 +288,15 @@ impl Map {
             nodes,
             next,
             fresh: Vec::new(),
-            dead: Vec::new(),
         };
         let top = new.height() - 1;
         let node = rebuild.node(top, 0);
-        // A shorter map: the old top's place is in the root now, and the
-        // nodes above it hold only what is past the end.
-        if top < self.top() {
-            rebuild.dead.extend(rebuild.held_blob(top, 0));
-        }
-        for k in top + 1..self.height {
-            rebuild.dead.extend(rebuild.held_blob(k, 0));
-            if let Some(Node::Inner(children)) = rebuild.held_node(k, 0).as_deref() {
-                for (slot, child) in children.iter().enumerate().skip(1) {
-                    if let Some(blob) = *child {
-                        rebuild.drop(k - 1, slot as u64, blob);
-                    }
-                }
-            }
-        }
         Update {
             map: Map {
                 height: top + 1,
                 node,
             },
             fresh: rebuild.fresh,
-            dead: rebuild.dead,
         }
     }
 }
@@ -349,8 +332,6 @@ pub(crate) struct Update {
     pub map: Map,
     /// The nodes to put, with their blob numbers, in order.
     pub fresh: Vec<(u64, Arc<Node>)>,
-    /// The blobs the old map named and this one does not.
-    pub dead: Vec<u64>,
 }
 
 /// [`Map::update`] at work.
@@ -362,7 +343,6 @@ struct Rebuild<'a> {
     nodes: &'a Nodes<'a>,
     next: u64,
     fresh: Vec<(u64, Arc<Node>)>,
-    dead: Vec<u64>,
 }
 
 impl Rebuild<'_> {
@@ -416,9 +396,6 @@ impl Rebuild<'_> {
                 Some(Node::Leaf(chunks)) => &chunks[..],
                 _ => &[],
             };
-            for chunk in held.iter().skip(slots as usize) {
-                self.dead.extend(chunk.blobs());
-            }
             Node::Leaf(
                 (0..slots)
                     .map(|slot| match self.changes.get(&(first + slot)) {
@@ -432,11 +409,6 @@ impl Rebuild<'_> {
                 Some(Node::Inner(children)) => &children[..],
                 _ => &[],
             };
-            for (slot, child) in held.iter().enumerate().skip(slots as usize) {
-                if let Some(blob) = *child {
-                    self.drop(k - 1, first + slot as u64, blob);
-                }
-            }
             Node::Inner(
                 (0..slots)
                     .map(|slot| match self.changes(k - 1, first + slot) {
@@ -450,10 +422,9 @@ impl Rebuild<'_> {
     }
 
     /// The node at level `k`, index `i`, below the top, which changes: a
-    /// new blob, or none if it holds only holes. The old one's blob dies.
+    /// new blob, or none if it holds only holes.
     fn child(&mut self, k: u32, i: u64) -> Option<u64> {
         let node = self.node(k, i);
-        self.dead.extend(self.held_blob(k, i));
         if node.is_holes() {
             return None;
         }
@@ -461,27 +432,6 @@ impl Rebuild<'_> {
         self.next += 1;
         self.fresh.push((blob, node));
         Some(blob)
-    }
-
-    /// The old subtree at level `k`, index `i`, in `blob`, all of it past
-    /// the new end: every blob in it dies.
-    fn drop(&mut self, k: u32, i: u64, blob: u64) {
-        self.dead.push(blob);
-        let need = Need {
-            blob,
-            leaf: k == 0,
-            slots: self.old.slots(k, i),
-        };
-        match &*self.nodes.node(need) {
-            Node::Leaf(chunks) => self.dead.extend(chunks.iter().flat_map(|c| c.blobs())),
-            Node::Inner(children) => {
-                for (slot, child) in children.iter().enumerate() {
-                    if let Some(child) = *child {
-                        self.drop(k - 1, i * self.old.fanout + slot as u64, child);
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -76,7 +76,6 @@ fn run(seed: u64, fanout: u64) {
     let mut blobs = Blobs::default();
     let mut map = Map::empty();
     let mut row: Vec<Chunk> = Vec::new();
-    let mut live: BTreeSet<u64> = BTreeSet::new();
     let largest = fanout.pow(4).min(400);
     for step in 0..60 {
         let old = Shape {
@@ -90,7 +89,6 @@ fn run(seed: u64, fanout: u64) {
         let new = Shape { fanout, count };
         // The flush's chunk blobs, then its nodes, as a flush puts them.
         let mut changes = BTreeMap::new();
-        let mut dead: Vec<u64> = Vec::new();
         for _ in 0..rng.below(8) {
             if count == 0 {
                 break;
@@ -113,7 +111,6 @@ fn run(seed: u64, fanout: u64) {
             };
             blobs.next += u64::from(fresh.blobs().any(|n| n == blobs.next));
             if fresh != held && !changes.contains_key(&chunk) {
-                dead.extend(held.blobs().filter(|n| !fresh.blobs().any(|f| f == *n)));
                 changes.insert(chunk, fresh);
             }
         }
@@ -135,7 +132,6 @@ fn run(seed: u64, fanout: u64) {
             assert_eq!(&Node::from_frame(&frame, need).unwrap(), &**node);
             blobs.frames.insert(*n, frame);
         }
-        dead.extend(&update.dead);
         map = update.map;
         row.resize(count as usize, Chunk::default());
         for (&chunk, &fresh) in &changes {
@@ -151,21 +147,16 @@ fn run(seed: u64, fanout: u64) {
         assert_eq!(read, row, "seed {seed}, fanout {fanout}, step {step}");
         assert!(rounds < map.height as usize, "{rounds} rounds");
         assert_eq!(map.height, new.height());
-        // Nothing leaks, nothing dies twice.
-        let after = named(&map, new, &blobs);
-        let mut before = live.clone();
-        before.extend(update.fresh.iter().map(|(n, _)| *n));
-        before.extend(changes.values().flat_map(|c| c.blobs()));
-        let dead_set: BTreeSet<u64> = dead.iter().copied().collect();
-        assert_eq!(dead_set.len(), dead.len(), "a blob dies twice: {dead:?}");
-        assert!(after.is_disjoint(&dead_set), "a named blob dies");
-        let mut accounted = after.clone();
-        accounted.extend(&dead_set);
-        assert_eq!(
-            accounted, before,
+        // It names its chunks' blobs, and nodes the flushes put: nothing
+        // else.
+        let named = named(&map, new, &blobs);
+        let chunks: BTreeSet<u64> = row.iter().flat_map(|c| c.blobs()).collect();
+        let nodes: BTreeSet<u64> = named.difference(&chunks).copied().collect();
+        assert!(
+            chunks.is_subset(&named),
             "seed {seed}, fanout {fanout}, step {step}"
         );
-        live = after;
+        assert!(nodes.iter().all(|node| blobs.frames.contains_key(node)));
         // The root's part round-trips.
         let mut bytes = Vec::new();
         map.encode(&mut bytes);
@@ -176,7 +167,7 @@ fn run(seed: u64, fanout: u64) {
 }
 
 #[test]
-fn a_map_reads_back_what_flushes_wrote_and_names_only_the_live_blobs() {
+fn a_map_reads_back_what_flushes_wrote_and_names_its_chunks() {
     for seed in 0..200 {
         for fanout in [2, 3, 4, 16] {
             run(seed, fanout);

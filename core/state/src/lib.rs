@@ -4,8 +4,8 @@
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
-//! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
-//! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
+//! them durable at a sync (see [`kv`]). It needs no multi-key transaction or
+//! compare-and-swap; only collecting garbage lists keys. Its [`File`]s are 4 KiB pages read
 //! and written at random, its [`Record`]s whole values, and its [`Log`]s
 //! entries appended and truncated from the start. The state is
 //! read; it changes only through a [`Mutation`] ([`State::mutation`]): the
@@ -30,8 +30,26 @@
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Root | `v16/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
-//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record, or a log entry; written once | Yes, until no root a reader may hold names it |
+//! | Root | `v17/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
+//! | Blobs | `v17/blob/<n>`: a chunk's base or delta, a map node, a large record, or a log entry | Yes, until a sweep deletes it, once no root a reader may hold names it |
+//! | Claim | `v17/claim`: the first blob number no attempt claimed, where blobs are not fenced ([`kv::KvStore::unfenced_blobs`]) | Yes |
+//! | Sweep | `v17/sweep`: the blobs the last sweep found dead | Yes |
+//!
+//! # Garbage collection
+//!
+//! A flush deletes nothing. Blob numbers only grow, so a blob below the
+//! root's next blob that the root does not name is dead for good;
+//! [`State::collect_garbage`] lists the blobs and deletes those, in two
+//! phases, [`StateOptions::garbage_after`] versions apart, for the readers.
+//! It writes no root, so any state may sweep, beside the owner.
+//!
+//! # Blobs beside Restate
+//!
+//! Where the blobs are elsewhere than the root ([`blobs::SplitStore`]: S3
+//! beside Restate), Restate fences an earlier attempt from the root but
+//! not from the blobs. So an owner claims its blob numbers in the root's
+//! store, and syncs, before it puts a blob: no later attempt uses them, and
+//! a sync that fails ends the state, and so the attempt.
 //!
 //! # Ownership and concurrency
 //!
@@ -42,9 +60,10 @@
 //! Any number of states may read beside the owner ([`Open::reader`], or
 //! states of the owner that overlap in a [`PageCache`]): each reads the root
 //! it opened, a consistent snapshot, while the owner flushes, because blobs
-//! never change and are deleted only [`StateOptions::garbage_after`] flushes
-//! after the last root that named them. Only one flushes: a flush is refused
-//! if another state of the owner flushed since this one opened.
+//! never change and are deleted only [`StateOptions::garbage_after`]
+//! versions after a sweep found no root naming them. Only one flushes: a
+//! flush is refused if another state of the owner flushed since this one
+//! opened.
 //!
 //! The [`PageCache`] is the process's: it keeps blobs in memory and on a
 //! local disk tier under one budget for every namespace it opens, under
@@ -90,7 +109,8 @@ mod zstd;
 pub use cache::{PageCache, PageCacheConfig};
 use store::Is;
 pub use store::{
-    FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY,
+    Collected, FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES,
+    ROOT_KEY,
 };
 
 use crate::cache::{NamespaceCache, ParkedValue};
@@ -156,9 +176,9 @@ pub struct StateOptions {
     /// Every chunk of a file of at most this many pages is fetched at open,
     /// alongside the root's other blobs.
     pub prefetch_pages: u64,
-    /// Flushes after the last root that named a blob before a flush deletes
-    /// it (at least 1): a reader that opened before reads its root for as
-    /// long.
+    /// Versions between the sweep that finds a blob dead and the one that
+    /// deletes it (at least 1): a reader that opened before the first reads
+    /// its root for as long ([`State::collect_garbage`]).
     pub garbage_after: u64,
 }
 
@@ -448,6 +468,47 @@ impl State {
     /// Whether the state can flush: a failed or cancelled flush ends it.
     pub fn is_usable(&self) -> bool {
         !self.shared.poisoned.load(Ordering::SeqCst)
+    }
+
+    /// Delete the blobs no root names any more: mark and sweep, in two
+    /// phases. It reads the namespace's root as stored now (synced first, so
+    /// that it is durable) and lists the blobs: those below the root's next
+    /// blob that it does not name are dead for good, since a flush numbers
+    /// its blobs past it. It deletes those the last sweep found dead too, at
+    /// least [`StateOptions::garbage_after`] versions ago, so that a reader
+    /// that opened before then read its root for as long; it keeps the
+    /// others for the next sweep. Call it now and then: every
+    /// [`StateOptions::garbage_after`] flushes, say.
+    ///
+    /// A sweep writes no root, so any state may run it, an owner's or a
+    /// reader's, beside the owner's flushes: in the owner's handler, or in a
+    /// separate worker where the blobs are elsewhere than the root
+    /// ([`blobs::SplitStore`]). It needs a store that lists its keys
+    /// ([`KvStore::list`]): one that cannot fails before anything is
+    /// written, and the state goes on. Any other failure ends the state, as
+    /// a failed flush does.
+    pub async fn collect_garbage(&self) -> Result<Collected> {
+        let shared = &self.shared;
+        if shared.poisoned.load(Ordering::SeqCst) {
+            return Err(ENDED.into());
+        }
+        let store = shared.snapshot().store().clone();
+        let listed = store.list(store::BLOB_PREFIX).await?;
+        let options = shared.options.clone();
+        let swept = async {
+            let latest = Snapshot::latest(store, options, shared.cache.clone()).await?;
+            let marked = latest.mark(&listed).await?;
+            latest.sweep(marked).await
+        };
+        swept.await.map_err(|error| {
+            shared.poisoned.store(true, Ordering::SeqCst);
+            // What it wrote has an unknown outcome: the owner's next open
+            // syncs before it reads.
+            if let Some(cache) = shared.cache.as_ref().filter(|_| !self.is_reader()) {
+                cache.forget();
+            }
+            error.into()
+        })
     }
 }
 

@@ -5,7 +5,7 @@
 mod support;
 
 use futures::future::Either;
-use state::{Result, StateOptions, kv::KvStore, simulation::*};
+use state::{Result, State, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
@@ -194,9 +194,10 @@ fn a_namespace_made_again_never_reads_the_old_databases_blobs() -> Result<()> {
     })
 }
 
-/// A reader beside the owner, which flushes meanwhile: it reads the state
-/// it opened, and never writes to the store; once the owner deleted a blob
-/// it needs, a read of it fails, never reads another state.
+/// A reader beside the owner, which flushes meanwhile, and a worker that
+/// sweeps after each flush: the reader reads the state it opened, and never
+/// writes to the store; once a sweep deleted a blob it needs, a read of it
+/// fails, never reads another state.
 #[test]
 fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
     futures::executor::block_on(async {
@@ -228,6 +229,9 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                 let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
                 let ops = [hot, Op::random(&mut rng)];
                 flush(&store, Some(&owner), &mut model, &ops).await?;
+                // A worker sweeps beside them.
+                let worker = State::open(store.clone()).reader().await?;
+                worker.collect_garbage().await?;
             }
             for _ in 0..16 {
                 let name = rng.pick(&FILES);

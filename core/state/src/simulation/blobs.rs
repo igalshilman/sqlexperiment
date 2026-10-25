@@ -1,4 +1,4 @@
-//! An in-memory [`BlobStore`]: S3 with `If-None-Match`, as tests need it.
+//! An in-memory [`BlobStore`]: S3, as tests need it.
 use crate::blobs::BlobStore;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -8,8 +8,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Write-once blobs in memory, each durable once its request returns; clones
-/// share them.
+/// Blobs in memory, each durable once its request returns; clones share
+/// them.
 #[derive(Clone, Default)]
 pub struct MemoryBlobs {
     inner: Arc<Mutex<Inner>>,
@@ -19,8 +19,8 @@ pub struct MemoryBlobs {
 struct Inner {
     values: BTreeMap<String, Bytes>,
     puts: u64,
-    /// Puts refused because the key held a value.
-    conflicts: u64,
+    /// Puts of a key that held a value.
+    overwrites: u64,
     /// Puts left to accept before the store fails every put.
     puts_before_failing: Option<u64>,
 }
@@ -38,14 +38,14 @@ impl MemoryBlobs {
         self.len() == 0
     }
 
-    /// Puts accepted, refused ones included.
+    /// Puts accepted.
     pub fn puts(&self) -> u64 {
         self.inner.lock().unwrap().puts
     }
 
-    /// Puts refused because the key held a value.
-    pub fn conflicts(&self) -> u64 {
-        self.inner.lock().unwrap().conflicts
+    /// Puts of a key that held a value: what no two attempts may do.
+    pub fn overwrites(&self) -> u64 {
+        self.inner.lock().unwrap().overwrites
     }
 
     /// Accept `puts` more puts, then fail every put; `None` accepts them all.
@@ -59,7 +59,7 @@ impl BlobStore for MemoryBlobs {
         Box::pin(async move { Ok(self.inner.lock().unwrap().values.get(key).cloned()) })
     }
 
-    fn put_new<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
+    fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
         Box::pin(async move {
             let mut inner = self.inner.lock().unwrap();
             if let Some(left) = &mut inner.puts_before_failing {
@@ -69,11 +69,9 @@ impl BlobStore for MemoryBlobs {
                 *left -= 1;
             }
             inner.puts += 1;
-            if inner.values.contains_key(key) {
-                inner.conflicts += 1;
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, key.to_owned()));
+            if inner.values.insert(key.to_owned(), value).is_some() {
+                inner.overwrites += 1;
             }
-            inner.values.insert(key.to_owned(), value);
             Ok(())
         })
     }

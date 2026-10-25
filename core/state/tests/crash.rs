@@ -1,7 +1,7 @@
 //! A crash at every write of every flush of a sequence that sets records
 //! (inline and in blobs), writes several files (one with a base), shrinks
-//! one, rebases chunks and deletes garbage: each flush is atomic, durable
-//! once its root is, and the state goes on.
+//! one and rebases chunks: each flush is atomic, durable once its root is,
+//! and the state goes on. (A crash in a sweep: the campaign's.)
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -142,7 +142,7 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
         }
         // The sequence covers every kind of write a flush makes.
         let kinds: Vec<_> = kinds.into_iter().collect();
-        let expected = ["blob delete", "blob put", "root put"];
+        let expected = ["blob put", "root put"];
         assert_eq!(kinds, expected);
         println!("crashed flushes: {cases} cases");
         Ok(())

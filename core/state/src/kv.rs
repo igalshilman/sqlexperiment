@@ -18,8 +18,9 @@
 //! A store may keep blobs where an earlier attempt of the owner, still
 //! running, can write too: S3 beside Restate, say ([`crate::blobs`]), where
 //! Restate fences the root but nothing fences the blobs. It says so
-//! ([`KvStore::write_once_blobs`]), and the state then never writes a blob
-//! key twice.
+//! ([`KvStore::unfenced_blobs`]), and the state then claims the numbers of
+//! its blobs, durably, before it puts any: no two attempts ever put the same
+//! blob key.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::io;
@@ -36,13 +37,24 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
-    /// Whether the store refuses to write a blob key that holds a value. The
-    /// state then numbers the blobs of each writer's first flush from a
-    /// random jump past the root's next blob, so that another writer of the
-    /// same root (an attempt fenced from the root, or one whose flush failed)
-    /// is unlikely to have used the numbers; if one did, the store refuses,
-    /// the flush fails, and the next open jumps again. A wrapper forwards it.
-    fn write_once_blobs(&self) -> bool {
+    /// Every key under `prefix`, stored or written since: what a sweep
+    /// ([`crate::State::collect_garbage`]) needs. A store that cannot list
+    /// fails with [`io::ErrorKind::Unsupported`]; its garbage stays.
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        let _ = prefix;
+        Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this store cannot list its keys",
+            ))
+        })
+    }
+    /// Whether an earlier attempt of the owner, fenced from the root, may
+    /// still put blobs: the blobs are elsewhere than the root, as in S3
+    /// beside Restate. The state then claims its blob numbers before it puts
+    /// any: it writes the claim and syncs, and only then puts the blobs.
+    /// A wrapper forwards it.
+    fn unfenced_blobs(&self) -> bool {
         false
     }
 }

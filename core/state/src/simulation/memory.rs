@@ -3,7 +3,7 @@
 use crate::{
     kv::KvStore,
     simulation::yield_now,
-    store::{BLOB_PREFIX, ROOT_KEY, Root},
+    store::{BLOB_PREFIX, CLAIM_KEY, ROOT_KEY, Root, SWEEP_KEY},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -30,10 +30,15 @@ pub struct Traffic {
     pub delete_key_bytes: u64,
 }
 
-/// Class of a key, used to split traffic counters: `root`, `blob` or `other`.
+/// Class of a key, used to split traffic counters: `root`, `blob`, `claim`,
+/// `sweep` or `other`.
 pub fn object_kind(key: &str) -> &'static str {
     if key == ROOT_KEY {
         "root"
+    } else if key == CLAIM_KEY {
+        "claim"
+    } else if key == SWEEP_KEY {
+        "sweep"
     } else if key.starts_with(BLOB_PREFIX) {
         "blob"
     } else {
@@ -71,8 +76,8 @@ struct Inner {
     /// The writes issued since the last sync, in order.
     unsynced: Vec<(String, Option<Bytes>)>,
     stats: Stats,
-    /// Blob keys ever put, when the store is write-once ([`MemoryKv::write_once`]).
-    written_once: Option<BTreeSet<String>>,
+    /// Blob keys ever put, when its blobs are unfenced ([`MemoryKv::unfenced`]).
+    put_once: Option<BTreeSet<String>>,
 }
 
 /// Memory simulator of a store that keeps writes in issue order: reads see
@@ -84,11 +89,12 @@ pub struct MemoryKv {
 }
 
 impl MemoryKv {
-    /// A store whose blobs are write-once ([`KvStore::write_once_blobs`]),
-    /// like blobs in S3: a put of a blob key ever put before panics.
-    pub fn write_once() -> Self {
+    /// A store whose blobs are not fenced ([`KvStore::unfenced_blobs`]),
+    /// like blobs in S3 beside Restate, so the state claims its numbers: a
+    /// put of a blob key ever put before panics, as two attempts would.
+    pub fn unfenced() -> Self {
         let store = Self::default();
-        store.inner.lock().unwrap().written_once = Some(BTreeSet::new());
+        store.inner.lock().unwrap().put_once = Some(BTreeSet::new());
         store
     }
 
@@ -101,7 +107,7 @@ impl MemoryKv {
                 durable: inner.durable.clone(),
                 unsynced: inner.unsynced.clone(),
                 stats: Stats::default(),
-                written_once: inner.written_once.clone(),
+                put_once: inner.put_once.clone(),
             })),
         }
     }
@@ -216,11 +222,11 @@ impl KvStore for MemoryKv {
     }
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(written) = &mut inner.written_once
-            && key.starts_with(crate::store::BLOB_PREFIX)
-            && !written.insert(key.to_owned())
+        if let Some(put) = &mut inner.put_once
+            && key.starts_with(BLOB_PREFIX)
+            && !put.insert(key.to_owned())
         {
-            panic!("{key} put twice in a write-once store");
+            panic!("{key} put twice where blobs are unfenced");
         }
         let bytes = value.len() as u64;
         inner.stats.puts += 1;
@@ -257,8 +263,18 @@ impl KvStore for MemoryKv {
             Ok(())
         })
     }
-    fn write_once_blobs(&self) -> bool {
-        self.inner.lock().unwrap().written_once.is_some()
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        Box::pin(async move {
+            yield_now().await;
+            let inner = self.inner.lock().unwrap();
+            Ok((inner.values.keys())
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect())
+        })
+    }
+    fn unfenced_blobs(&self) -> bool {
+        self.inner.lock().unwrap().put_once.is_some()
     }
 }
 

@@ -67,7 +67,7 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
     if seeds().len() as u64 >= SEEDS {
         let t = &totals;
         assert!(
-            t.blobs > 0 && t.collected > 0 && t.rebased > 0 && t.reads_beside > 0,
+            t.blobs > 0 && t.collected > 0 && t.sweeps > 0 && t.rebased > 0 && t.reads_beside > 0,
             "{t:?}"
         );
         assert!(
@@ -94,6 +94,8 @@ struct Totals {
     rebased: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
+    /// Sweeps by the owner or a worker beside it, faulty ones included.
+    sweeps: usize,
 }
 
 impl Totals {
@@ -109,6 +111,7 @@ impl Totals {
         self.collected += run.collected;
         self.rebased += run.rebased;
         self.reads_beside += run.reads_beside;
+        self.sweeps += run.sweeps;
     }
 }
 
@@ -358,6 +361,9 @@ impl World {
             }
             self.observed(pending);
             text(self.read_beside(session.state.version()).await)?;
+            if self.rng.percent(25) {
+                session = self.sweep(session).await?;
+            }
             // The session goes on, or a new one (after a crash, perhaps)
             // reads exactly what was acknowledged.
             if self.rng.percent(60) {
@@ -430,6 +436,101 @@ impl World {
         Ok(())
     }
 
+    /// A sweep after an acknowledged flush, by the owner's state or by a
+    /// worker beside it, sometimes with a fault. A failed sweep ends the
+    /// state that ran it: the owner's reopens. Returns the session that goes
+    /// on.
+    async fn sweep(&mut self, session: Session) -> std::result::Result<Session, String> {
+        let worker = match self.rng.percent(50) {
+            true => None,
+            false => {
+                let setup = Setup {
+                    options: StateOptions {
+                        garbage_after: self.garbage_after,
+                        ..StateOptions::default()
+                    },
+                    cache: None,
+                };
+                Some(text(Session::reader(self.store.clone(), setup).await)?)
+            }
+        };
+        let faulty = self.rng.percent(30);
+        if faulty {
+            let rng = &mut self.rng;
+            let (operation, key_prefix) = rng.pick(&[
+                (Operation::Get, "v17/root"),
+                (Operation::Delete, "v17/blob/"),
+                (Operation::Put, "v17/sweep"),
+                (Operation::Delete, "v17/sweep"),
+                (Operation::Sync, ""),
+            ]);
+            let _signal = self.store.arm(Failpoint {
+                operation,
+                key_prefix: key_prefix.into(),
+                nth: 1 + rng.below(3) as usize,
+                effect: rng.pick(&[Effect::None, Effect::After]),
+                cancel: false,
+            });
+        }
+        let state = worker
+            .as_ref()
+            .map_or(&session.state, |worker| &worker.state);
+        let swept = state.collect_garbage().await;
+        self.store.disarm();
+        self.totals.sweeps += 1;
+        trace(|| {
+            let by = if worker.is_some() {
+                "a worker"
+            } else {
+                "the owner"
+            };
+            format!("sweep by {by}: {swept:?}")
+        });
+        let error = match swept {
+            Ok(_) => return Ok(session),
+            Err(error) if faulty && error.to_string().contains("injected") => error,
+            Err(error) => return Err(format!("sweep: {error}")),
+        };
+        if state.is_usable() {
+            return Err(format!("a failed sweep left the state usable: {error}"));
+        }
+        if worker.is_some() {
+            // The worker's requests settle, in its own process.
+            text(self.settle().await)?;
+            return Ok(session);
+        }
+        drop(session);
+        if self.rng.percent(50) {
+            self.crash();
+        }
+        let candidates = self.since_sync.clone();
+        self.reopen(&candidates).await
+    }
+
+    /// Sweep everything dead, as a fresh owner that keeps garbage a single
+    /// version: what was dead at one sweep, the next one, a version on,
+    /// deletes.
+    async fn collect_all(&mut self) -> std::result::Result<(), String> {
+        let setup = Setup {
+            options: StateOptions {
+                garbage_after: 1,
+                ..StateOptions::default()
+            },
+            cache: None,
+        };
+        let session = text(Session::open(self.store.clone(), setup).await)?;
+        let mut swept = Vec::new();
+        for tick in 0..3 {
+            swept.push(text(session.state.collect_garbage().await)?);
+            let ops = [Op::Set("progress", format!("tick {tick}").into())];
+            text(session.flush(&ops).await)?;
+        }
+        if swept[2].waiting || swept[2].deleted != swept[1].dead {
+            return Err(format!("a sweep left garbage: {swept:#?}"));
+        }
+        Ok(())
+    }
+
     /// A random failpoint; it may match nothing the flush does.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
@@ -441,7 +542,7 @@ impl World {
         ]);
         let key_prefix = match operation {
             Operation::Sync => "",
-            _ => rng.pick(&["", "", "v16/root", "v16/blob/"]),
+            _ => rng.pick(&["", "", "v17/root", "v17/blob/"]),
         };
         Failpoint {
             operation,
@@ -505,10 +606,11 @@ fn text<T>(result: Result<T>) -> std::result::Result<T, String> {
 
 async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let mut rng = Rng::new(seed);
-    // Odd seeds keep blobs write-once, as in S3 beside Restate: no reopen
-    // after a crash or a fault may put a blob number twice.
+    // Odd seeds leave blobs unfenced, as in S3 beside Restate: the owner
+    // claims its numbers, and no reopen after a crash or a fault may put a
+    // blob number twice.
     let memory = match seed % 2 {
-        1 => MemoryKv::write_once(),
+        1 => MemoryKv::unfenced(),
         _ => MemoryKv::default(),
     };
     let fault = FaultKv::new(memory.clone(), rng.below(3));
@@ -541,6 +643,8 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let candidates = world.since_sync.clone();
     let session = world.reopen(&candidates).await?;
     world.check(&session).await?;
+    drop(session);
+    world.collect_all().await?;
     world.violations()?;
     let stats = world.memory.stats();
     world.totals.requests_checked = world.store.checked();

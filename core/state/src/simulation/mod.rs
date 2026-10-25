@@ -18,13 +18,6 @@ use std::sync::{
     atomic::{AtomicU64, Ordering::Relaxed},
 };
 
-/// Number this thread's next flushes on a store with
-/// [`KvStore::write_once_blobs`] from `jump` past the root's next blob, as
-/// if two writers drew the same; `None` draws at random again.
-pub fn fix_blob_jump(jump: Option<u64>) {
-    crate::store::FIXED_JUMP.with(|fixed| fixed.set(jump));
-}
-
 /// Cache settings for tests: a temporary file, and 1 MiB disk blocks.
 pub fn cache_config(memory: usize, disk: usize) -> PageCacheConfig {
     PageCacheConfig {
@@ -124,3 +117,9 @@ pub(crate) async fn yield_now() {
 pub fn blob_key(n: u64) -> String {
     crate::store::blob_key(n)
 }
+
+/// The key of the claim ([`KvStore::unfenced_blobs`]).
+pub const CLAIM_KEY: &str = crate::store::CLAIM_KEY;
+
+/// The key of the sweep's dead blobs ([`State::collect_garbage`]).
+pub const SWEEP_KEY: &str = crate::store::SWEEP_KEY;
