@@ -457,29 +457,39 @@ impl World {
                 Some(text(Session::reader(self.store.clone(), setup).await)?)
             }
         };
-        let faulty = self.rng.percent(30);
-        if faulty {
-            let rng = &mut self.rng;
-            let (operation, key_prefix) = rng.pick(&[
-                (Operation::Get, "v17/root"),
-                (Operation::Delete, "v17/blob/"),
-                (Operation::Put, "v17/sweep"),
-                (Operation::Delete, "v17/sweep"),
-                (Operation::Sync, ""),
-            ]);
-            let _signal = self.store.arm(Failpoint {
-                operation,
-                key_prefix: key_prefix.into(),
-                nth: 1 + rng.below(3) as usize,
-                effect: rng.pick(&[Effect::None, Effect::After]),
-                cancel: false,
-            });
-        }
         let state = worker
             .as_ref()
             .map_or(&session.state, |worker| &worker.state);
-        let swept = state.collect_garbage().await;
-        self.store.disarm();
+        // Whole, with a fault at any of its requests, or dropped at a poll.
+        let (faulty, swept) = match self.rng.below(10) {
+            0..=5 => (false, state.collect_garbage().await),
+            6..=8 => {
+                let failpoint = self.failpoint();
+                let _signal = self.store.arm(failpoint);
+                let swept = state.collect_garbage().await;
+                self.store.disarm();
+                (true, swept)
+            }
+            _ => {
+                let polls = self.rng.below(8);
+                let mut sweep = Box::pin(state.collect_garbage());
+                let mut cx = Context::from_waker(noop_waker_ref());
+                let mut swept = Err("cancelled".into());
+                for _ in 0..polls {
+                    if let Poll::Ready(outcome) = sweep.as_mut().poll(&mut cx) {
+                        swept = outcome;
+                        break;
+                    }
+                }
+                drop(sweep);
+                self.totals.cancelled += 1;
+                match polls {
+                    // Never polled: nothing happened.
+                    0 => return Ok(session),
+                    _ => (true, swept),
+                }
+            }
+        };
         self.totals.sweeps += 1;
         trace(|| {
             let by = if worker.is_some() {
@@ -491,7 +501,14 @@ impl World {
         });
         let error = match swept {
             Ok(_) => return Ok(session),
-            Err(error) if faulty && error.to_string().contains("injected") => error,
+            Err(error)
+                if faulty
+                    && ["injected", "cancelled"]
+                        .iter()
+                        .any(|e| error.to_string().contains(e)) =>
+            {
+                error
+            }
             Err(error) => return Err(format!("sweep: {error}")),
         };
         if state.is_usable() {
@@ -535,19 +552,28 @@ impl World {
         Ok(())
     }
 
-    /// A random failpoint; it may match nothing the flush does.
+    /// A random failpoint, at any request a flush or a sweep makes: of the
+    /// claim, the blobs, the root, the sweep, or the listing. It may match
+    /// nothing.
     fn failpoint(&mut self) -> Failpoint {
         let rng = &mut self.rng;
-        let operation = rng.pick(&[
-            Operation::Put,
-            Operation::Put,
-            Operation::Delete,
-            Operation::Sync,
+        let (operation, key_prefix) = rng.pick(&[
+            (Operation::Put, ""),
+            (Operation::Put, "v17/blob/"),
+            (Operation::Put, "v17/root"),
+            (Operation::Put, "v17/claim"),
+            (Operation::Put, "v17/sweep"),
+            (Operation::Delete, ""),
+            (Operation::Delete, "v17/blob/"),
+            (Operation::Delete, "v17/sweep"),
+            (Operation::Get, ""),
+            (Operation::Get, "v17/blob/"),
+            (Operation::Get, "v17/root"),
+            (Operation::Get, "v17/sweep"),
+            (Operation::Sync, ""),
+            (Operation::Sync, ""),
+            (Operation::Keys, ""),
         ]);
-        let key_prefix = match operation {
-            Operation::Sync => "",
-            _ => rng.pick(&["", "", "v17/root", "v17/blob/"]),
-        };
         Failpoint {
             operation,
             key_prefix: key_prefix.into(),
