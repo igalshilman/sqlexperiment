@@ -121,11 +121,11 @@ pub(crate) async fn yield_now() {
 
 /// The key of the part `part` of the tail entry of `version`.
 pub fn tail_key(version: u64, part: u32) -> String {
-    crate::tail::tail_key(version, part)
+    crate::format::tail_key(version, part)
 }
 
 /// Where the tail's entries are.
-pub const TAIL_PREFIX: &str = crate::tail::TAIL_PREFIX;
+pub const TAIL_PREFIX: &str = crate::format::TAIL_PREFIX;
 
 /// Where checkpoints' packs are named, in a blob store.
-pub const PACK_PREFIX: &str = crate::tail::PACK_PREFIX;
+pub const PACK_PREFIX: &str = crate::format::PACK_PREFIX;

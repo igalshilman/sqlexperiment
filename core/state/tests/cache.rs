@@ -9,13 +9,12 @@ use state::{Result, State, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-/// Small chunks, rebased often, large records in blobs, and a checkpoint
+/// Small frames, large records in packs, and a checkpoint
 /// every other flush.
 fn options(cache: Option<&Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            chunk_pages: 2,
-            rebase_ratio: 0.1,
+            frame_pages: 2,
             inline_record_bytes: 256,
             checkpoint_entries: 2,
             ..StateOptions::default()

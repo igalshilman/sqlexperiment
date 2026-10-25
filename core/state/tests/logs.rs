@@ -1,7 +1,6 @@
 //! Logs: entries appended in a mutation are read once flushed, from the
 //! index each took, and survive a reopen; a truncation drops a prefix, the
-//! entries the same mutation appends included, and checkpoints drop its
-//! blobs;
+//! entries the same mutation appends included, and checkpoints drop them;
 //! a write refuses what no flush could store; a reader keeps the log it
 //! opened.
 #![cfg(feature = "simulation")]
@@ -9,7 +8,7 @@ use bytes::Bytes;
 use state::{
     MAX_LOG_ENTRIES, MAX_RECORD_BYTES, Result, State, StateOptions, kv::KvStore, simulation::*,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 fn entries(values: &[&str]) -> Vec<Bytes> {
     values
@@ -68,18 +67,15 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
         mutation.append(&log, "d".into())?;
         mutation.flush().await?;
         assert_eq!((log.first(), log.entries()), (1, entries(&["b", "c", "d"])));
-        // Appended, then truncated past: the entry never lands. Each entry
-        // is a blob of its own: one more, for "f".
+        // Appended, then truncated past: the entry never lands.
         let mut mutation = state.mutation();
         mutation.append(&log, large(5))?;
         mutation.append(&log, "f".into())?;
         mutation.truncate(&log, 5)?;
-        let blobs = store.tail_blobs().len();
-        mutation.flush().await?;
-        assert_eq!(
-            store.tail_blobs().len(),
-            blobs + 1,
-            "the large entry, never stored"
+        let report = mutation.flush().await?;
+        assert!(
+            report.entry_bytes < 100,
+            "the large entry, never stored: {report:?}"
         );
         assert_eq!(
             (log.first(), log.next(), log.entries()),
@@ -96,7 +92,7 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
     })
 }
 
-/// An entry that does not compress: its blob is as large as it is.
+/// An entry that does not compress: stored, it is as large as it is.
 fn noise(n: u8, len: usize) -> Bytes {
     let mut seed = u64::from(n) + 1;
     (0..len)
@@ -107,11 +103,11 @@ fn noise(n: u8, len: usize) -> Bytes {
         .collect()
 }
 
-/// A truncated entry's blob leaves the tail with the checkpoint after the
-/// next, and is in no checkpoint since: the pack that held it, mostly dead,
-/// is compacted into a later one, then deleted.
+/// A truncated entry leaves the tail with the checkpoint after the next, and
+/// is in no checkpoint since: the pack that held it, mostly dead, is
+/// compacted into a later one, then deleted.
 #[test]
-fn a_truncated_entrys_blob_is_dropped_by_checkpoints() -> Result<()> {
+fn a_truncated_entry_is_dropped_by_checkpoints() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let options = StateOptions {
@@ -122,14 +118,14 @@ fn a_truncated_entrys_blob_is_dropped_by_checkpoints() -> Result<()> {
         let log = state.log("turns");
         let mut mutation = state.mutation();
         mutation.append(&log, noise(1, 60_000))?;
-        mutation.append(&log, noise(2, 1_000))?;
+        mutation.append(&log, noise(2, 2_000))?;
         mutation.flush().await?;
-        assert_eq!(store.tail_blobs().len(), 2);
+        assert_eq!(store.tail_entries(), BTreeSet::from([1]));
         let mut mutation = state.mutation();
         mutation.truncate(&log, 1)?;
         let report = mutation.flush().await?;
         let first = report.checkpoint.expect("the first checkpoint");
-        assert_eq!((first.version, first.blobs), (1, 2), "both live then");
+        assert_eq!((first.version, first.values), (1, 2), "both live then");
         assert!(first.pack_bytes > 60_000, "{first:?}");
         let mut checkpoints = Vec::new();
         for n in 0..3 {
@@ -140,11 +136,11 @@ fn a_truncated_entrys_blob_is_dropped_by_checkpoints() -> Result<()> {
         assert_eq!(checkpoints[0].compacted, 1, "{checkpoints:?}");
         assert!(checkpoints[0].pack_bytes < 10_000, "{checkpoints:?}");
         assert_eq!(checkpoints[1].deleted, 1, "{checkpoints:?}");
-        assert!(store.tail_blobs().is_empty());
+        assert_eq!(store.tail_entries(), BTreeSet::from([4, 5]));
         assert!(store.stored_bytes() < 20_000, "{}", store.stored_bytes());
         let reopened = State::open(store).await?.log("turns");
-        assert_eq!(reopened.entries(), vec![noise(2, 1_000)]);
-        assert_eq!(log.entries(), vec![noise(2, 1_000)]);
+        assert_eq!(reopened.entries(), vec![noise(2, 2_000)]);
+        assert_eq!(log.entries(), vec![noise(2, 2_000)]);
         Ok(())
     })
 }

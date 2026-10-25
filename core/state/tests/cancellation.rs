@@ -19,8 +19,7 @@ use support::*;
 fn options(cache: Option<Namespace>) -> Setup {
     Setup {
         options: StateOptions {
-            chunk_pages: 2,
-            rebase_ratio: 0.2,
+            frame_pages: 2,
             checkpoint_entries: 2,
             inline_record_bytes: 200,
             ..StateOptions::default()

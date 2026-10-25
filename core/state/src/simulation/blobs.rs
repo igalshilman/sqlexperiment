@@ -8,7 +8,7 @@
 //! What lands later waits for [`MemoryBlobs::land_late`].
 use super::yield_now;
 use crate::blobs::BlobStore;
-use crate::tail::PACK_PREFIX;
+use crate::format::PACK_PREFIX;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{

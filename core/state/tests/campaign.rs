@@ -75,7 +75,7 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
                 && t.checkpoints > 0
                 && t.compacted > 0
                 && t.collected > 0
-                && t.rebased > 0
+                && t.frames > 0
                 && t.reads_beside > 0,
             "{t:?}"
         );
@@ -99,12 +99,12 @@ struct Totals {
     handovers: usize,
     requests_checked: usize,
     /// Tail entries put; checkpoints adopted, packs they compacted, and
-    /// packs deleted as garbage; chunks rebased.
+    /// packs deleted as garbage; frames checkpoints rewrote.
     tail_entries: u64,
     checkpoints: usize,
     compacted: usize,
     collected: usize,
-    rebased: usize,
+    frames: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
     /// Garbage collections by the owner or a worker beside it, faulty ones
@@ -128,7 +128,7 @@ impl Totals {
         self.checkpoints += run.checkpoints;
         self.compacted += run.compacted;
         self.collected += run.collected;
-        self.rebased += run.rebased;
+        self.frames += run.frames;
         self.reads_beside += run.reads_beside;
         self.collections += run.collections;
         self.s3_faults += run.s3_faults;
@@ -186,9 +186,7 @@ impl World {
         Setup {
             options: StateOptions {
                 // Kept by the namespace's first root.
-                chunk_pages: rng.pick(&[1, 2, 4, 16]),
-                fanout: rng.pick(&[2, 3, 4, 64]),
-                rebase_ratio: rng.pick(&[0.0, 0.25, 1.0, 100.0]),
+                frame_pages: rng.pick(&[1, 2, 4, 16]),
                 inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),
                 checkpoint_entries: rng.pick(&[0, 1, 2, 3, 8]),
@@ -264,11 +262,10 @@ impl World {
             trace(|| {
                 let o = &options.options;
                 format!(
-                    "open by {:?}{}: chunks of {}, rebase past {}, inline {}, prefetch {}",
+                    "open by {:?}{}: frames of {}, inline {}, prefetch {}",
                     self.owner,
                     if faulty { ", faulty" } else { "" },
-                    o.chunk_pages,
-                    o.rebase_ratio,
+                    o.frame_pages,
                     o.inline_record_bytes,
                     o.prefetch_pages,
                 )
@@ -392,10 +389,10 @@ impl World {
         });
         match &outcome {
             Ok(report) => {
-                self.totals.rebased += report.rebased;
                 if let Some(checkpoint) = &report.checkpoint {
                     self.adopted += 1;
                     self.totals.checkpoints += 1;
+                    self.totals.frames += checkpoint.frames;
                     self.totals.compacted += checkpoint.compacted;
                     self.totals.collected += checkpoint.deleted;
                 }

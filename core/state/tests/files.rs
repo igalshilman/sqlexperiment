@@ -110,7 +110,7 @@ fn a_long_sequential_read_returns_every_chunk() -> Result<()> {
     futures::executor::block_on(async {
         let memory = MemoryKv::default();
         let options = || state::StateOptions {
-            chunk_pages: 1,
+            frame_pages: 1,
             ..state::StateOptions::default()
         };
         let state = State::open(Arc::new(memory.clone()))

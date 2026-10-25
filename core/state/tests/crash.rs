@@ -19,9 +19,7 @@ const STEPS: u64 = 16;
 fn options(cache: Option<Namespace>, packs: Option<&MemoryBlobs>) -> Setup {
     Setup {
         options: StateOptions {
-            chunk_pages: 2,
-            fanout: 2,
-            rebase_ratio: 0.5,
+            frame_pages: 2,
             inline_record_bytes: 150,
             prefetch_pages: 0,
             checkpoint_entries: 2,

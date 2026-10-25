@@ -12,8 +12,7 @@ use support::*;
 
 fn options() -> StateOptions {
     StateOptions {
-        chunk_pages: 2,
-        rebase_ratio: 0.5,
+        frame_pages: 2,
         inline_record_bytes: 200,
         prefetch_pages: 2,
         checkpoint_entries: 2,

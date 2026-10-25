@@ -2,10 +2,9 @@
 //! it, with exact logical traffic counters.
 use crate::{
     blobs::KV_PREFIX,
+    format::{HEAD_KEY, Head, TAIL_PREFIX, parse_tail_key},
     kv::KvStore,
     simulation::yield_now,
-    store::Root,
-    tail::{HEAD_KEY, Head, TAIL_PREFIX, read_part},
 };
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -147,15 +146,13 @@ impl MemoryKv {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
-    /// Every key and its value, with the root's random database identity
+    /// Every key and its value, with the head's random database identity
     /// zeroed: two stores that hold the same state compare equal.
     pub fn contents(&self) -> BTreeMap<String, Bytes> {
         let mut contents: BTreeMap<String, Bytes> = self.values().into_iter().collect();
         if let Some(bytes) = contents.get_mut(HEAD_KEY) {
             let mut head = Head::decode(bytes).expect("a stored head decodes");
-            let mut root = Root::decode(&head.root).expect("a stored root decodes");
-            root.id = 0;
-            head.root = root.encode();
+            head.id = 0;
             *bytes = head.encode();
         }
         contents
@@ -181,16 +178,12 @@ impl MemoryKv {
             .map(String::len)
             .sum()
     }
-    /// The blobs of the tail entries stored.
-    pub fn tail_blobs(&self) -> BTreeSet<u64> {
+    /// The versions of the tail entries stored.
+    pub fn tail_entries(&self) -> BTreeSet<u64> {
         let inner = self.inner.lock().unwrap();
-        let mut blobs = std::collections::HashMap::new();
-        for (key, value) in &inner.values {
-            if key.starts_with(TAIL_PREFIX) {
-                read_part(value, &mut blobs).expect("a stored tail entry decodes");
-            }
-        }
-        blobs.into_keys().collect()
+        (inner.values.keys())
+            .filter_map(|key| Some(parse_tail_key(key)?.0))
+            .collect()
     }
 
     /// Number of keys of the kind `kind` ([`object_kind`]).

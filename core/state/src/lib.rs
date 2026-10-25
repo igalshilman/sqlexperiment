@@ -17,31 +17,26 @@
 //! before the host flushes it; the durable functions runtime adds a
 //! program's memory and its run. Coordinating them is theirs.
 //!
-//! # Copy on write, a tail and checkpoints
+//! # A tail and checkpoints
 //!
-//! Nothing stored is ever changed: a flush writes what changed as new,
-//! immutable blobs, and a new root that names them. A file is stored as
-//! chunks of a few pages, each a zstd frame compressed against the chunk's
-//! base, so a flush costs about what it changed (see the private `store`
-//! module, and `docs/DESIGN.md`).
-//!
-//! Where they go is split by what each store is good at (see the private
-//! `tail` module, and `docs/TAIL_EXPERIMENT.md`). A flush puts its blobs as
-//! one entry of a *tail* in Restate, then the *head*, which holds the root,
+//! Where the state is stored is split by what each store is good at (see
+//! the private `format` and `store` modules, and `docs/FRAMES.md`). A flush
+//! puts its mutation as one entry of a *tail* in Restate, then the *head*,
 //! and syncs once: one round trip, which Restate fences. Now and then
-//! ([`StateOptions::checkpoint_entries`]), a flush first moves the blobs the
-//! durable root names out of the tail, into one *pack*, a *checkpoint*, in a
-//! [`blobs::BlobStore`]: S3 ([`Open::checkpoints`]), or Restate's state
-//! itself by default. Its head then names the checkpoint, and drops the
-//! tail it covered. Pack names are unique, so S3 needs no fencing, nor
-//! conditional puts.
+//! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as
+//! a *checkpoint*: the frames of pages the tail changed, and the values it
+//! set, into one *pack* in a [`blobs::BlobStore`] (S3, through
+//! [`Open::checkpoints`], or Restate's state itself by default), with a
+//! manifest of where every frame and value is. Its head then names the
+//! checkpoint, and drops the tail it covered. Pack names are unique, and
+//! packs never change, so S3 needs no fencing, nor conditional puts.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Head | `v18/head`: the root (the directory, small records, the top of each file's chunk map), the checkpoints, the tail's extent | Yes, after an acknowledged flush |
-//! | Tail | `v18/tail/<version>/<part>`: the blobs a flush wrote: chunks' bases and deltas, map nodes, large records, log entries | Yes, until a checkpoint after the next one |
-//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: the blobs a checkpoint moved, and its manifest | Yes, until no checkpoint the head names needs it |
+//! | Head | `v19/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
+//! | Tail | `v19/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (a zstd frame each) | Yes, until a checkpoint after the next one |
+//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values, a manifest | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -50,17 +45,17 @@
 //! another session. There is no distributed lock or fence here.
 //!
 //! Any number of states may read beside the owner ([`Open::reader`], or
-//! states of the owner that overlap in a [`PageCache`]): each reads the root
-//! it opened, a consistent snapshot, while the owner flushes, because blobs
-//! never change, and the tail and the packs a head names stay for one
+//! states of the owner that overlap in a [`PageCache`]): each reads the
+//! state it opened, a consistent snapshot, while the owner flushes, because
+//! packs never change, and the tail and the packs a head names stay for one
 //! checkpoint more. Only one flushes: a flush is refused if another state
 //! of the owner flushed since this one opened.
 //!
-//! The [`PageCache`] is the process's: it keeps blobs in memory and on a
-//! local disk tier under one budget for every namespace it opens, under
-//! their numbers, for as long as it likes: a blob never changes. It
-//! remembers the root this owner made durable, so a steady-state open and
-//! flush are each one round trip. A value may be parked there for the next
+//! The [`PageCache`] is the process's: it keeps ranges of packs in memory
+//! and on a local disk tier under one budget for every namespace it opens,
+//! under their location, for as long as it likes: a pack never changes. It
+//! remembers the head this owner made durable, and the state as of it, so a
+//! steady-state open and flush are each one round trip. A value may be parked there for the next
 //! state of the namespace ([`State::park`]), such as an SQL engine, which
 //! takes it back when nothing changed. The disk tier's I/O runs on tokio.
 //!
@@ -85,13 +80,13 @@
 //! [`MAX_RECORD_BYTES`] (a log entry too), a log [`MAX_LOG_ENTRIES`], a name
 //! [`MAX_NAME_BYTES`]. The backend is assumed
 //! to return what was stored; decoding checks structure and bounds, and
-//! blobs' zstd frames carry a checksum. Use a fresh, dedicated namespace; no
+//! zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. Simulation and benchmark
 //! support require the opt-in `simulation` feature.
 pub mod blobs;
 mod cache;
+mod format;
 pub mod kv;
-mod map;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 mod store;
@@ -99,9 +94,9 @@ mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
+pub use format::{HEAD_KEY, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
 use store::Is;
-pub use store::{FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
-pub use tail::{Checkpointed, HEAD_KEY};
+pub use store::{Checkpointed, FlushReport};
 
 use crate::blobs::{BlobStore, KvBlobs};
 use crate::cache::{NamespaceCache, ParkedValue};
@@ -131,8 +126,8 @@ pub type Page = Bytes;
 
 /// What a paged file's absent pages hold: a golden image it diverges from (a
 /// VM's memory, say). An absent page, or a hole, of a file with a base reads
-/// as the base's page (zeros past it), and its chunks are compressed against
-/// it until they have a base of their own.
+/// as the base's page (zeros past it), and its pages and frames are
+/// compressed against it.
 pub trait Base: Send + Sync {
     /// Names the base: a file made with one is opened only with it again.
     /// Below `u64::MAX`.
@@ -141,46 +136,35 @@ pub trait Base: Send + Sync {
     fn page(&self, index: u64) -> Option<&[u8]>;
 }
 
-/// Default [`StateOptions::chunk_pages`].
-pub const CHUNK_PAGES: u64 = 4;
+/// Default [`StateOptions::frame_pages`].
+pub const FRAME_PAGES: u64 = 16;
 
-/// How a state flushes and reads. Only [`Self::chunk_pages`] and
-/// [`Self::fanout`] are stored, when the namespace is made; the others never
-/// change the stored format.
+/// How a state flushes and reads. Only [`Self::frame_pages`] is stored, when
+/// the namespace is made; the others never change the stored format.
 #[derive(Clone)]
 pub struct StateOptions {
-    /// Pages per chunk, the unit a flush rewrites: smaller chunks cost less
-    /// to rebase, larger ones compress better and make a smaller root. Set
-    /// when the namespace is made; its root keeps it.
-    pub chunk_pages: u64,
-    /// Entries per node of a file's chunk map, a radix tree whose top node
-    /// the root holds: a file of up to this many chunks is mapped in the
-    /// root alone; each level more multiplies that by it, and costs a cold
-    /// read a round trip and a flush a node per path it changes. Set when
-    /// the namespace is made; its root keeps it.
-    pub fanout: u64,
-    /// A chunk's delta past this fraction of its base's stored bytes is
-    /// written as a new base instead.
-    pub rebase_ratio: f64,
-    /// Bytes of a record the root holds; a larger one is a blob of its own,
-    /// written when it changes.
+    /// Pages per frame of a checkpoint, the unit a read fetches and a
+    /// checkpoint rewrites: larger frames compress better and make a
+    /// smaller manifest, smaller ones cost a checkpoint less to rewrite. Set
+    /// when the namespace is made; its head keeps it.
+    pub frame_pages: u64,
+    /// Bytes of a record or log entry a checkpoint's manifest holds; a
+    /// larger one is a value of its own in the pack.
     pub inline_record_bytes: usize,
-    /// Every chunk of a file of at most this many pages is fetched at open,
-    /// alongside the root's other blobs.
+    /// Every frame of a file of at most this many pages is fetched at open,
+    /// alongside the manifest's values.
     pub prefetch_pages: u64,
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
-    /// ... or about this many bytes; 0 never does by size.
+    /// ... or this many bytes; 0 never does by size.
     pub checkpoint_bytes: u64,
 }
 
 impl Default for StateOptions {
     fn default() -> Self {
         Self {
-            chunk_pages: CHUNK_PAGES,
-            fanout: map::FANOUT,
-            rebase_ratio: 0.25,
+            frame_pages: FRAME_PAGES,
             inline_record_bytes: 1024,
             prefetch_pages: 16,
             checkpoint_entries: 128,
@@ -208,7 +192,7 @@ pub struct State {
 struct Shared {
     /// The durable state: as opened, then as the mutations flushed it.
     snapshot: Mutex<Arc<Snapshot>>,
-    /// Where the snapshot reads and flushes: the head, the tail, the packs.
+    /// Where the state is stored: the head, the tail, the packs.
     tail: Arc<Tiered>,
     options: StateOptions,
     cache: Option<NamespaceCache>,
@@ -236,7 +220,8 @@ impl Shared {
             shared: self,
             done: false,
         };
-        let deleted = self.tail.collect_garbage().await?;
+        let head = self.snapshot().head().clone();
+        let deleted = self.tail.collect_garbage(&head).await?;
         collecting.done = true;
         Ok(deleted)
     }
@@ -307,9 +292,9 @@ impl Drop for Shared {
 const ENDED: &str = "the state ended after a failed or cancelled flush; open a new one";
 
 impl State {
-    /// Open the namespace over `store`, Restate's state: read its head (and
-    /// the blobs of its large records and small files) before anything
-    /// reads; a crash leaves nothing to recover. Await it as it is, or set
+    /// Open the namespace over `store`, Restate's state: read its head, its
+    /// checkpoint's manifest and its tail (and its large records and small
+    /// files) before anything reads; a crash leaves nothing to recover. Await it as it is, or set
     /// how first:
     ///
     /// ```no_run
@@ -344,7 +329,8 @@ impl State {
         } = open;
         let packs = packs.unwrap_or_else(|| Arc::new(KvBlobs::new(store.clone())));
         let tail = Arc::new(Tiered::new(store, packs));
-        let snapshot = Snapshot::open(tail.clone(), options.clone(), cache.clone(), reader).await?;
+        let snapshot = Snapshot::open(tail.clone(), options.clone(), cache.clone(), reader);
+        let snapshot = snapshot.await?;
         let mut parked = match &cache {
             Some(cache) if snapshot.unchanged => cache.take_parked(),
             _ => HashMap::new(),
@@ -370,8 +356,8 @@ impl State {
         &self.shared.options
     }
 
-    /// The record named `name`: a whole value the root keeps, read
-    /// here and set in a mutation (see [`Record`]).
+    /// The record named `name`: a whole value, read here and set in a
+    /// mutation (see [`Record`]).
     pub fn record(&self, name: &str) -> Record {
         Record {
             name: format!("{}{name}", self.prefix).into(),
@@ -450,7 +436,7 @@ impl State {
     /// cache drops it when anything changes, or under its budget; one
     /// heavier than the whole budget is not kept. `value` must hold no
     /// handle of this state (a [`File`], a [`Record`], the [`State`]), which
-    /// would keep it open meanwhile, on a root whose blobs later flushes
+    /// would keep it open meanwhile, on a state whose packs later flushes
     /// delete.
     pub fn park<T: Any + Send>(
         &self,
@@ -526,14 +512,9 @@ impl State {
     /// one before name. Others are garbage.
     #[cfg(feature = "simulation")]
     pub async fn needed_packs(&self) -> Result<std::collections::BTreeSet<String>> {
-        Ok(self
-            .shared
-            .tail
-            .needed()
-            .await?
-            .iter()
-            .map(|pack| pack.key())
-            .collect())
+        let head = self.shared.snapshot().head().clone();
+        let needed = self.shared.tail.needed(&head).await?;
+        Ok(needed.iter().map(|pack| pack.key()).collect())
     }
 }
 
@@ -578,8 +559,7 @@ impl Open {
     /// state that writes nothing to the store (its mutations refuse to flush). It
     /// reads the state as of open, whatever the owner flushes meanwhile,
     /// until the owner's second checkpoint after it. With a cache
-    /// ([`Self::cached`]), it reads the blobs the owner cached, and changes
-    /// nothing there.
+    /// ([`Self::cached`]), it reads the ranges of packs the owner cached.
     pub fn reader(self) -> Self {
         Self {
             reader: true,
@@ -761,10 +741,8 @@ impl Mutation {
         }
     }
 
-    /// Make every record set, page written and entry appended durable: the
-    /// blobs of the chunks, records and entries it changes, as a tail
-    /// entry, then the head that names them, then one sync, in one round
-    /// trip. Nothing changed: nothing is written. It is refused while another flush of the state
+    /// Make every record set, page written and entry appended durable: as
+    /// a tail entry, then the head, then one sync, in one round trip. Nothing changed: nothing is written. It is refused while another flush of the state
     /// runs, and for writes the state cannot store; a refused flush writes
     /// nothing, and the state goes on. `Ok`
     /// holds what it wrote; any other error (one refused because another
@@ -804,24 +782,20 @@ impl Mutation {
         let mut records = std::mem::take(&mut self.records);
         let mut logs = std::mem::take(&mut self.logs);
         self.taken = true;
-        let options = &shared.options;
-        // Only a flush that writes a head adopts a checkpoint.
-        if snapshot.changes(&mut files, &mut records, &mut logs)
-            && (shared.tail).due(options.checkpoint_entries, options.checkpoint_bytes)
-        {
-            // A failed checkpoint fails nothing: the next flush tries again.
-            let _ = shared.tail.checkpoint(&snapshot).await;
-        }
-        let result = snapshot.commit(files, records, logs).await;
+        // Only a flush that writes a head adopts a checkpoint. A failed
+        // checkpoint fails nothing: the next flush tries again.
+        let staged = match snapshot.changes(&mut files, &mut records, &mut logs) && snapshot.due() {
+            true => snapshot.checkpoint().await.ok(),
+            false => None,
+        };
+        let result = snapshot.commit(files, records, logs, staged).await;
         running.returned = true;
-        let (report, after) = result?;
+        let (mut report, after) = result?;
         *shared.snapshot.lock().unwrap() = Arc::new(after);
         running.done = true;
         for receipt in &self.receipts {
             receipt.0.store(FLUSHED, Ordering::SeqCst);
         }
-        let mut report = report;
-        report.checkpoint = shared.tail.take_adopted();
         if let Some(checkpoint) = &mut report.checkpoint {
             checkpoint.deleted = shared.collect_garbage().await?;
         }
@@ -870,14 +844,13 @@ impl Receipt {
     }
 }
 
-/// A named whole value the root keeps, replaced whole: the host's state
-/// beside its files (a run's progress, an outbox), flushed with them in the
-/// same root. Read from the state ([`Self::get`]), set in a mutation
-/// ([`Mutation::set`]). A cheap handle.
+/// A named whole value, replaced whole: the host's state beside its files
+/// (a run's progress, an outbox), flushed with them. Read from the state
+/// ([`Self::get`]), set in a mutation ([`Mutation::set`]). A cheap handle.
 ///
-/// A value of up to [`StateOptions::inline_record_bytes`] is in the root,
-/// which every flush rewrites; a larger one is a blob of its own, written
-/// when it changes. Either way, opening the state reads it.
+/// A flush puts the value in its tail entry; a checkpoint keeps one of up
+/// to [`StateOptions::inline_record_bytes`] in its manifest, and a larger
+/// one as a value of its own. Opening the state reads it.
 #[derive(Clone)]
 pub struct Record {
     name: Arc<str>,
@@ -904,11 +877,10 @@ impl Record {
 /// at the next index, and dropped from its start ([`Mutation::truncate`]),
 /// read from the state ([`Self::entries`]). A cheap handle.
 ///
-/// Each entry is a blob of its own, written once (the root, which every
-/// flush rewrites, holds only its number); opening the state reads every
-/// entry. A flush costs about what it appends: what a log is for is changes
-/// too small to rewrite their whole, folded into a record or a file now and
-/// then, and truncated. A value of a few bytes is better in a record.
+/// A flush puts the entries it appends in its tail entry, and a checkpoint
+/// each once; opening the state reads every entry. A flush costs about what
+/// it appends: what a log is for is changes too small to rewrite their
+/// whole, folded into a record or a file now and then, and truncated.
 #[derive(Clone)]
 pub struct Log {
     name: Arc<str>,
@@ -946,8 +918,10 @@ impl Log {
 /// records. An absent page, never written or past the end, reads as `None`
 /// (zeros). A cheap handle.
 ///
-/// Stored as chunks of [`StateOptions::chunk_pages`] pages, each a base and
-/// maybe a delta against it, which the [`PageCache`] keeps across states.
+/// A page flushed is in the tail, a zstd frame of its own, until a
+/// checkpoint writes it into a frame of [`StateOptions::frame_pages`]
+/// pages, which a read fetches whole and the [`PageCache`] keeps across
+/// states.
 ///
 /// Two handles are equal (and hash alike) when they name the same file of
 /// the same state.

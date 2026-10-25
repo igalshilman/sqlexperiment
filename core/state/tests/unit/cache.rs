@@ -1,51 +1,73 @@
 use super::*;
-use crate::simulation::{fresh_namespace_cache, shared_cache};
+use crate::{
+    format::{Head, PackId},
+    simulation::{fresh_namespace_cache, shared_cache},
+};
 
 fn value(n: usize) -> Bytes {
     Bytes::from(vec![n as u8; n])
 }
 
+/// The range at `offset` of the pack of version 1 of the database `id`.
+fn at(id: u64, offset: u64) -> Location {
+    let pack = PackId {
+        version: 1,
+        nonce: id,
+    };
+    Location {
+        pack,
+        offset,
+        len: 4,
+    }
+}
+
+fn durable() -> Arc<Durable> {
+    Arc::new(Durable::empty(Head::new(1, 16)))
+}
+
 #[test]
-fn namespaces_never_share_blobs() {
+fn namespaces_never_share_ranges() {
     futures::executor::block_on(async {
         let (a, b) = (fresh_namespace_cache(), fresh_namespace_cache());
-        a.insert(0, 1, value(4));
-        assert_eq!(a.get(0, 1).await, Some(value(4)));
-        assert_eq!(b.get(0, 1).await, None, "same number, other namespace");
-        assert_eq!(a.get(9, 1).await, None, "same number, other database");
+        a.insert(at(0, 1), value(4));
+        assert_eq!(a.get(at(0, 1)).await, Some(value(4)));
+        assert_eq!(b.get(at(0, 1)).await, None, "same number, other namespace");
+        assert_eq!(a.get(at(9, 1)).await, None, "same offset, other pack");
         // A handle by the same key is the same namespace.
-        shared_cache().namespace("by-key").insert(0, 7, value(7));
+        shared_cache()
+            .namespace("by-key")
+            .insert(at(0, 7), value(7));
         assert_eq!(
-            shared_cache().namespace("by-key").get(0, 7).await,
+            shared_cache().namespace("by-key").get(at(0, 7)).await,
             Some(value(7))
         );
     })
 }
 
 /// The same root is known; another one forgets this owner's flush, and
-/// keeps the blobs, which never change.
+/// keeps the ranges, which never change.
 #[test]
-fn another_root_forgets_the_flush_not_the_blobs() {
+fn another_head_forgets_the_flush_not_the_ranges() {
     futures::executor::block_on(async {
         let root = |n: u8| Bytes::from(vec![b'S', b'R', b'1', b'6', n]);
         let cache = fresh_namespace_cache();
         assert!(!cache.validate(None), "a fresh owner knows nothing");
-        cache.record(None, Some(0));
+        cache.record(None, Some(0), durable());
         assert!(cache.validate(None), "an absent root, as recorded");
         assert!(!cache.validate(Some(&root(1))), "not after another");
-        cache.record(Some(root(1)), Some(3));
-        cache.insert(0, 1, value(4));
+        cache.record(Some(root(1)), Some(3), durable());
+        cache.insert(at(0, 1), value(4));
         assert!(cache.validate(Some(&root(1))));
         assert_eq!(cache.committed(), Some(3));
 
-        // Another writer flushed: the blobs stay.
+        // Another writer flushed: the ranges stay.
         assert!(!cache.validate(Some(&root(2))));
         assert_eq!(cache.committed(), None);
-        assert_eq!(cache.get(0, 1).await, Some(value(4)));
+        assert_eq!(cache.get(at(0, 1)).await, Some(value(4)));
 
         // A flush with an unknown outcome forgets the root, and makes the
         // next open sync.
-        cache.record(Some(root(3)), Some(5));
+        cache.record(Some(root(3)), Some(5), durable());
         cache.forget();
         assert!(!cache.validate(Some(&root(3))));
         assert_eq!(cache.unsettled(), Some(1));
@@ -54,12 +76,12 @@ fn another_root_forgets_the_flush_not_the_blobs() {
 
         // A flush runs: an open syncs, and does not let another flush build
         // on the root it reads, until the flush ends.
-        cache.record(Some(root(4)), Some(6));
+        cache.record(Some(root(4)), Some(6), durable());
         assert!(cache.claim(6));
         assert_eq!(cache.unsettled(), Some(1));
-        cache.record(Some(root(5)), Some(7));
+        cache.record(Some(root(5)), Some(7), durable());
         assert!(!cache.claim(7));
-        cache.flushed(root(5), 7);
+        cache.flushed(root(5), 7, durable());
         assert_eq!(cache.unsettled(), None);
         assert!(cache.claim(7));
     })
@@ -96,12 +118,12 @@ fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
         let buffer = Bytes::from(vec![9; 1 << 20]);
         let inside = |value: &Bytes| buffer.as_ptr_range().contains(&value.as_ptr());
         let slice = buffer.slice(4096..8192);
-        cache.insert(0, 1, slice.clone());
-        let cached = cache.get(0, 1).await.expect("cached");
+        cache.insert(at(0, 1), slice.clone());
+        let cached = cache.get(at(0, 1)).await.expect("cached");
         assert_eq!(cached, slice);
         assert!(!inside(&cached));
-        cache.record(Some(slice.clone()), None);
-        assert!(!inside(cache.owner().root.as_ref().unwrap()));
+        cache.record(Some(slice.clone()), None, durable());
+        assert!(!inside(cache.owner().head.as_ref().unwrap()));
     })
 }
 
