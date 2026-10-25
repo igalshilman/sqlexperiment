@@ -70,8 +70,14 @@ impl KvBlobs {
         }
     }
 
-    fn part(&self, key: &str, part: u64) -> String {
+    fn part_key(&self, key: &str, part: u64) -> String {
         format!("{}{key}/{part}", self.prefix)
+    }
+
+    /// Part `part` of the blob `key`: its bytes `part × 64 KiB` onward, up
+    /// to 64 KiB; `None` if absent.
+    pub(crate) async fn part(&self, key: &str, part: u64) -> io::Result<Option<Bytes>> {
+        self.store.get(&self.part_key(key, part)).await
     }
 
     /// The blob's key, of a part's key.
@@ -121,7 +127,7 @@ impl BlobStore for KvBlobs {
             let parts = range.start / KV_PART..range.end.div_ceil(KV_PART);
             let first = parts.start;
             let got = try_join_all(parts.map(|part| {
-                let key = self.part(key, part);
+                let key = self.part_key(key, part);
                 async move { self.store.get(&key).await }
             }))
             .await?;
@@ -149,7 +155,7 @@ impl BlobStore for KvBlobs {
             {
                 let end = (at + KV_PART).min(value.len() as u64);
                 let slice = value.slice(at as usize..end as usize);
-                self.store.put(&self.part(key, part as u64), slice)?;
+                self.store.put(&self.part_key(key, part as u64), slice)?;
             }
             Ok(())
         })

@@ -12,7 +12,7 @@
 //! (see [`crate::format`]), so a range of it (a frame, a value, a manifest)
 //! is cached under its location, for as long as the cache keeps it: there
 //! is nothing to invalidate. Keys are the namespace's identity, the pack's
-//! name and the offset; a namespace's identity comes from a per-cache
+//! name, the offset and the length; a namespace's identity comes from a per-cache
 //! counter, randomly seeded, and the disk tier starts empty in every process.
 //!
 //! # Durability knowledge
@@ -436,6 +436,7 @@ impl NamespaceCache {
             version: at.pack.version,
             nonce: at.pack.nonce,
             offset: at.offset,
+            len: at.len,
         }
     }
 
@@ -598,13 +599,17 @@ impl Parked {
     }
 }
 
-/// A range's key: its namespace's identity, its pack's name, and its offset.
+/// A range's key: its namespace's identity, its pack's name, its offset and
+/// its length. A pack never changes, so these name its bytes exactly: a
+/// range a checkpoint wrote and a block a read fetched (a part of a pack
+/// kept in Restate) are both kept, each under its own extent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RangeKey {
     namespace: u64,
     version: u64,
     nonce: u64,
     offset: u64,
+    len: u64,
 }
 
 impl Code for RangeKey {
@@ -612,7 +617,8 @@ impl Code for RangeKey {
         self.namespace.encode(writer)?;
         self.version.encode(writer)?;
         self.nonce.encode(writer)?;
-        self.offset.encode(writer)
+        self.offset.encode(writer)?;
+        self.len.encode(writer)
     }
 
     fn decode(reader: &mut impl std::io::Read) -> foyer::Result<Self> {
@@ -621,11 +627,12 @@ impl Code for RangeKey {
             version: u64::decode(reader)?,
             nonce: u64::decode(reader)?,
             offset: u64::decode(reader)?,
+            len: u64::decode(reader)?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        32
+        40
     }
 }
 

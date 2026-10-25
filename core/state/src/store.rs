@@ -765,9 +765,51 @@ impl Snapshot {
     }
 
     /// The bytes at `at`, in a pack: from the cache, or the pack store.
+    /// Where the store reads in blocks (the parts of a pack kept in
+    /// Restate), it fetches and caches the blocks `at` overlaps, so that
+    /// its neighbours in them are read from the cache too.
     async fn raw(&self, at: Location) -> io::Result<Bytes> {
+        if let Some(cache) = &self.cache
+            && let Some(value) = cache.get(at).await
+        {
+            return Ok(value);
+        }
+        let Some(block) = self.tiered.block() else {
+            return self.fetch(at, false).await;
+        };
+        let blocks = at.offset / block..at.range().end.div_ceil(block);
+        let first = blocks.start;
+        let got = try_join_all(blocks.map(|index| {
+            let at = Location {
+                pack: at.pack,
+                offset: index * block,
+                len: block,
+            };
+            self.fetch(at, true)
+        }))
+        .await?;
+        let start = (at.offset - first * block) as usize;
+        let end = start + at.len as usize;
+        let joined = match got.as_slice() {
+            [one] => one.clone(),
+            _ => Bytes::from(got.concat()),
+        };
+        if end > joined.len() {
+            return Err(io::Error::other(format!(
+                "{} is shorter than {:?}",
+                at.pack.key(),
+                at.range()
+            )));
+        }
+        Ok(joined.slice(start..end))
+    }
+
+    /// The range, or with `block` the block, `at` of a pack: from the
+    /// cache, or fetched, once for every read that awaits it, and cached.
+    async fn fetch(&self, at: Location, block: bool) -> io::Result<Bytes> {
         let cache = self.cache.clone();
-        if let Some(cache) = &cache
+        if block
+            && let Some(cache) = &cache
             && let Some(value) = cache.get(at).await
         {
             return Ok(value);
@@ -779,7 +821,11 @@ impl Snapshot {
             } else {
                 let tiered = self.tiered.clone();
                 let fetch: Fetch = async move {
-                    let value = (tiered.get(at.pack, at.range()).await).map_err(Arc::new)?;
+                    let value = match block {
+                        true => tiered.get_block(at.pack, at.offset / at.len).await,
+                        false => tiered.get(at.pack, at.range()).await,
+                    };
+                    let value = value.map_err(Arc::new)?;
                     // A pack never changes, and its name is never reused.
                     if let Some(cache) = cache {
                         cache.insert(at, value.clone());
