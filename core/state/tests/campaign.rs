@@ -94,7 +94,8 @@ struct Totals {
     rebased: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
-    /// Sweeps by the owner or a worker beside it, faulty ones included.
+    /// Sweeps by a flush, the owner or a worker beside it, faulty ones
+    /// included.
     sweeps: usize,
 }
 
@@ -169,6 +170,7 @@ impl World {
                 inline_record_bytes: rng.pick(&[0, 200, 1024, 8192]),
                 prefetch_pages: rng.pick(&[0, 4, 16]),
                 garbage_after: self.garbage_after,
+                sweep_every: rng.pick(&[0, 1, 3, 16]),
             },
             cache,
         }
@@ -352,6 +354,7 @@ impl World {
         });
         if let Ok(report) = &outcome {
             self.totals.rebased += report.rebased;
+            self.totals.sweeps += usize::from(report.swept.is_some());
         }
         if outcome.is_ok() {
             // One that wrote syncs; an unchanged one writes nothing, and
@@ -514,6 +517,7 @@ impl World {
         let setup = Setup {
             options: StateOptions {
                 garbage_after: 1,
+                sweep_every: 0,
                 ..StateOptions::default()
             },
             cache: None,

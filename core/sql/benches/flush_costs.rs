@@ -1,5 +1,5 @@
-//! Copy-on-write blobs on SQL workloads, one flush per session and a sweep
-//! every `garbage_after` flushes: the requests, bytes and round trips a flush
+//! Copy-on-write blobs on SQL workloads, one flush per session, and a sweep
+//! every `sweep_every` versions: the requests, bytes and round trips a flush
 //! costs (its share of the sweeps included), what is stored, and a cold read.
 //!
 //! ```sh
@@ -7,8 +7,8 @@
 //! CHUNK_PAGES=1 REBASE_RATIO=0.5 cargo bench --locked --features simulation --bench flush_costs
 //! ```
 //!
-//! `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES` and `GARBAGE_AFTER` set the
-//! state's options; `WORKLOAD` runs only the workloads it names part of,
+//! `CHUNK_PAGES`, `FANOUT`, `REBASE_RATIO`, `INLINE_BYTES`, `GARBAGE_AFTER` and
+//! `SWEEP_EVERY` set the state's options; `WORKLOAD` runs only the workloads it names part of,
 //! `FLUSHES` that many flushes each (an aged database); `LABEL` names the run
 //! in its rows. Prints Markdown rows.
 use sql::{Sql, Value};
@@ -80,6 +80,7 @@ fn options() -> StateOptions {
         rebase_ratio: var("REBASE_RATIO").unwrap_or(default.rebase_ratio),
         inline_record_bytes: var("INLINE_BYTES").unwrap_or(default.inline_record_bytes),
         garbage_after: var("GARBAGE_AFTER").unwrap_or(default.garbage_after),
+        sweep_every: var("SWEEP_EVERY").unwrap_or(default.sweep_every),
         ..default
     }
 }
@@ -297,11 +298,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     for i in 0..w.flushes {
         let mut db = open(&store, &cache).await?;
         let effects = step(&mut db, w, i, &mut words).await?;
-        let state = db.state();
         save(db, effects).await?;
-        if (i + 1) % options().garbage_after.max(1) == 0 {
-            state.collect_garbage().await?;
-        }
     }
     let s = memory.stats();
     let rts = store.round_trips();

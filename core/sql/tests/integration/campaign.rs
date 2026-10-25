@@ -266,6 +266,7 @@ impl Campaign {
                 fanout: rng.pick(&[2, 3, 64]),
                 rebase_ratio: rng.pick(&[0.0, 0.25, 4.0]),
                 garbage_after: 1 + rng.below(4),
+                sweep_every: rng.pick(&[0, 1, 4]),
                 inline_record_bytes: rng.pick(&[64, 1024]),
                 prefetch_pages: rng.pick(&[0, 16]),
             },
@@ -273,7 +274,7 @@ impl Campaign {
         };
         let session = seed.is_multiple_of(2);
         let summary = format!(
-            "{}, cached: {cached}, chunks of {} pages, rebase over {}, garbage after {} flushes, inline records to {} bytes, prefetch {}",
+            "{}, cached: {cached}, chunks of {} pages, rebase over {}, garbage after {} versions, a sweep every {} (0: none), inline records to {} bytes, prefetch {}",
             if session {
                 "binding session"
             } else {
@@ -282,6 +283,7 @@ impl Campaign {
             options.options.chunk_pages,
             options.options.rebase_ratio,
             options.options.garbage_after,
+            options.options.sweep_every,
             options.options.inline_record_bytes,
             options.options.prefetch_pages,
         );

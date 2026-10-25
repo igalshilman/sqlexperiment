@@ -180,6 +180,10 @@ pub struct StateOptions {
     /// deletes it (at least 1): a reader that opened before the first reads
     /// its root for as long ([`State::collect_garbage`]).
     pub garbage_after: u64,
+    /// A flush whose version is a multiple of this sweeps too, where the
+    /// store lists its keys ([`Mutation::flush`]); 0 never does: then sweep
+    /// with [`State::collect_garbage`], beside the owner if you like.
+    pub sweep_every: u64,
 }
 
 impl Default for StateOptions {
@@ -191,6 +195,7 @@ impl Default for StateOptions {
             inline_record_bytes: 1024,
             prefetch_pages: 16,
             garbage_after: 16,
+            sweep_every: 16,
         }
     }
 }
@@ -230,6 +235,57 @@ struct Shared {
 impl Shared {
     fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.lock().unwrap().clone()
+    }
+
+    /// Sweep against `latest`, a durable root, or the root as stored now
+    /// ([`State::collect_garbage`]); `None` where the store cannot list its
+    /// keys. A failure, or dropping the future midway, ends the state.
+    async fn sweep(&self, latest: Option<Arc<Snapshot>>) -> Result<Option<Collected>> {
+        let mut sweeping = Sweeping {
+            shared: self,
+            done: false,
+        };
+        let store = self.snapshot().store().clone();
+        let listed = match store.list(store::BLOB_PREFIX).await {
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                sweeping.done = true;
+                return Ok(None);
+            }
+            listed => listed,
+        };
+        let latest = match latest {
+            Some(latest) => latest,
+            None => {
+                let options = self.options.clone();
+                Arc::new(Snapshot::latest(store, options, self.cache.clone()).await?)
+            }
+        };
+        let marked = latest.mark(&listed?).await?;
+        let collected = latest.sweep(marked).await?;
+        sweeping.done = true;
+        Ok(Some(collected))
+    }
+}
+
+/// A running sweep. One that fails or is dropped midway ends the state, and
+/// the owner's cache forgets what it knew of the namespace: what the sweep
+/// wrote has an unknown outcome, which the next open syncs.
+struct Sweeping<'a> {
+    shared: &'a Shared,
+    done: bool,
+}
+
+impl Drop for Sweeping<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        self.shared.poisoned.store(true, Ordering::SeqCst);
+        if let Some(cache) =
+            (self.shared.cache.as_ref()).filter(|_| !self.shared.reader.load(Ordering::SeqCst))
+        {
+            cache.forget();
+        }
     }
 }
 
@@ -477,8 +533,8 @@ impl State {
     /// its blobs past it. It deletes those the last sweep found dead too, at
     /// least [`StateOptions::garbage_after`] versions ago, so that a reader
     /// that opened before then read its root for as long; it keeps the
-    /// others for the next sweep. Call it now and then: every
-    /// [`StateOptions::garbage_after`] flushes, say.
+    /// others for the next sweep. A flush sweeps too, every
+    /// [`StateOptions::sweep_every`] versions.
     ///
     /// A sweep writes no root, so any state may run it, an owner's or a
     /// reader's, beside the owner's flushes: in the owner's handler, or in a
@@ -488,27 +544,17 @@ impl State {
     /// written, and the state goes on. Any other failure ends the state, as
     /// a failed flush does.
     pub async fn collect_garbage(&self) -> Result<Collected> {
-        let shared = &self.shared;
-        if shared.poisoned.load(Ordering::SeqCst) {
+        if self.shared.poisoned.load(Ordering::SeqCst) {
             return Err(ENDED.into());
         }
-        let store = shared.snapshot().store().clone();
-        let listed = store.list(store::BLOB_PREFIX).await?;
-        let options = shared.options.clone();
-        let swept = async {
-            let latest = Snapshot::latest(store, options, shared.cache.clone()).await?;
-            let marked = latest.mark(&listed).await?;
-            latest.sweep(marked).await
-        };
-        swept.await.map_err(|error| {
-            shared.poisoned.store(true, Ordering::SeqCst);
-            // What it wrote has an unknown outcome: the owner's next open
-            // syncs before it reads.
-            if let Some(cache) = shared.cache.as_ref().filter(|_| !self.is_reader()) {
-                cache.forget();
-            }
-            error.into()
-        })
+        match self.shared.sweep(None).await? {
+            Some(collected) => Ok(collected),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this store cannot list its keys, so it is never swept",
+            )
+            .into()),
+        }
     }
 }
 
@@ -741,6 +787,11 @@ impl Mutation {
     /// holds what it wrote; any other error (one refused because another
     /// state flushed since included), or dropping the future, ends the
     /// state: open it again.
+    ///
+    /// A flush whose version is a multiple of [`StateOptions::sweep_every`]
+    /// then sweeps ([`State::collect_garbage`]), against the root it made
+    /// durable, where the store lists its keys. A sweep that fails ends the
+    /// state as well, though the flush landed: its receipts say so.
     pub async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
         if shared.poisoned.load(Ordering::SeqCst) {
@@ -774,6 +825,13 @@ impl Mutation {
         running.done = true;
         for receipt in &self.receipts {
             receipt.0.store(FLUSHED, Ordering::SeqCst);
+        }
+        let mut report = report;
+        let every = shared.options.sweep_every;
+        let version = shared.snapshot().version();
+        if report.root_bytes > 0 && every > 0 && version.is_multiple_of(every) {
+            // Against the root it made durable.
+            report.swept = shared.sweep(Some(shared.snapshot())).await?;
         }
         Ok(report)
     }

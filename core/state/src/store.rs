@@ -363,6 +363,9 @@ pub struct FlushReport {
     /// Chunks whose base it replaced with a new one, rather than write a
     /// delta against it.
     pub rebased: usize,
+    /// What the sweep after it did, if it swept
+    /// ([`crate::StateOptions::sweep_every`]).
+    pub swept: Option<Collected>,
 }
 
 /// Where a chunk is stored: its base, and its delta against that base; a
@@ -1827,6 +1830,7 @@ impl Snapshot {
             blob_bytes,
             root_bytes,
             rebased,
+            swept: None,
         };
         Ok((report, after))
     }

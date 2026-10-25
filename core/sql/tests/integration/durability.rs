@@ -143,6 +143,7 @@ fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
 }
 
 /// With an owner cache, a write transaction costs one round trip: its sync.
+/// (One that sweeps too costs the sweep's: off here.)
 #[test]
 fn a_flush_is_one_round_trip_with_a_cache() -> Result<()> {
     futures::executor::block_on(async {
@@ -150,6 +151,7 @@ fn a_flush_is_one_round_trip_with_a_cache() -> Result<()> {
         let cache = fresh_namespace();
         let options = options(Some(cache)).with(|o| StateOptions {
             garbage_after: 32,
+            sweep_every: 0,
             inline_record_bytes: usize::MAX,
             ..o
         });

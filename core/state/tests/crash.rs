@@ -21,6 +21,8 @@ fn options(cache: Option<Namespace>) -> Setup {
             inline_record_bytes: 150,
             prefetch_pages: 0,
             garbage_after: 1,
+            // The flush's sync fails first; sweeps crash in the campaign.
+            sweep_every: 0,
         },
         cache,
     }
