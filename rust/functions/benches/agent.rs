@@ -2,7 +2,9 @@
 //! memory: `cargo bench --bench agent`. A scripted model reads files, runs
 //! commands and edits, step after step, with outputs the size of real ones,
 //! until the conversation is long. Every 25 steps the run is restored, as a
-//! new attempt after a crash would be. Results go to bench-agent.json.
+//! new attempt after a crash would be. Results go to bench-agent.json; with
+//! `-- s3`, the checkpoints' packs go to an S3 in memory, and the results to
+//! bench-agent-s3.json.
 //!
 //! Per step it reports the request the run sends the model (the whole
 //! conversation, which the host reads from the scope's database: the
@@ -17,7 +19,7 @@ use functions::{
 use futures::future::BoxFuture;
 use futures_executor::block_on as block;
 use serde_json::{Value, json};
-use state::simulation::MemoryKv;
+use state::simulation::{MemoryBlobs, MemoryKv};
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -53,7 +55,13 @@ fn main() -> Result<()> {
     let store = MemoryKv::default();
     let model = Scripted::default();
     let llm = Llm::new().provider("anthropic", Provider::local(model.clone()));
-    let scope = Scope::new(Arc::new(store.clone())).extended(Extensions::new().with("llm", llm));
+    let s3 = std::env::args().any(|arg| arg == "s3");
+    let packs = MemoryBlobs::default();
+    let mut scope =
+        Scope::new(Arc::new(store.clone())).extended(Extensions::new().with("llm", llm));
+    if s3 {
+        scope = scope.checkpoints(Arc::new(packs.clone()));
+    }
     let start = |now| {
         let task = json!({"task": "Refactor the parser"});
         block(Run::start(
@@ -63,9 +71,12 @@ fn main() -> Result<()> {
     let mut run = start(1000)?;
     let mut session = Session::default();
     let mut stored = store.stats().bytes_written as usize;
+    let mut uploaded = 0;
     let mut rows = Vec::new();
     let mut ended = None;
-    println!("step  request KiB  model ms  tool ms  stored B/step  of it, commit B  stored MiB");
+    println!(
+        "step  request KiB  model ms  tool ms  stored B/step  of it, commit B  stored MiB  S3 B/step"
+    );
     'session: for step in 1..=STEPS {
         // The model's answer, then the tool's result.
         let mut turns = [0.0; 2];
@@ -101,6 +112,8 @@ fn main() -> Result<()> {
         }
         let written = store.stats().bytes_written as usize - stored;
         stored = store.stats().bytes_written as usize;
+        let s3_bytes = packs.uploaded() as usize - uploaded;
+        uploaded = packs.uploaded() as usize;
         let mut restore_ms = None;
         if step.is_multiple_of(RESTORE_EVERY) {
             let started = Instant::now();
@@ -110,20 +123,21 @@ fn main() -> Result<()> {
         let view = run.view();
         rows.push(
             json!({"step": step, "request_bytes": request, "request_read_ms": read_ms, "model_turn_ms": turns[0],
-            "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written,
+            "tool_turn_ms": turns[1], "restore_ms": restore_ms, "stored_bytes": written, "s3_bytes": s3_bytes,
             "memory_bytes": view.memory_bytes,
             "live_pages": view.live_pages, "entry_bytes": view.entry_bytes,
             "head_bytes": view.head_bytes}),
         );
         if step.is_multiple_of(10) || step == 1 {
             println!(
-                "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>15}  {:>10.1}",
+                "{step:>4}  {:>11.0}  {:>8.2}  {:>7.2}  {:>13}  {:>15}  {:>10.1}  {:>9}",
                 request as f64 / 1024.0,
                 turns[0],
                 turns[1],
                 written,
                 view.head_bytes,
                 stored as f64 / (1 << 20) as f64,
+                s3_bytes,
             );
         }
     }
@@ -142,10 +156,16 @@ fn main() -> Result<()> {
     let output = json!({"steps": STEPS, "ended": ended, "notes": [
         "request_bytes: the step's request to the model, the whole conversation so far, read from the scope's database as the host makes the call.",
         "request_read_ms: the time to read it.",
-        "stored_bytes: what the step's two turns stored (pages, commits); Scope, no network.",
+        "stored_bytes: what the step's two turns stored (pages, commits) in the store (Restate); no network.",
+        "s3_bytes: what they put in S3, with -- s3: checkpoints' packs.",
         "restore_ms: a new attempt after the step, reading the commit and its pages into a new VM."],
         "rows": rows});
-    std::fs::write("bench-agent.json", serde_json::to_string_pretty(&output)?)?;
+    let file = if s3 {
+        "bench-agent-s3.json"
+    } else {
+        "bench-agent.json"
+    };
+    std::fs::write(file, serde_json::to_string_pretty(&output)?)?;
     Ok(())
 }
 

@@ -7,7 +7,7 @@
 //! a head is never stored without the tail entry it names.
 use crate::extension::Extensions;
 use anyhow::Result;
-use state::{PageCache, State, kv::KvStore};
+use state::{PageCache, State, blobs::BlobStore, kv::KvStore};
 use std::sync::Arc;
 
 /// A scope's storage: the store its database lives in, and, for a process
@@ -16,6 +16,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Scope {
     store: Arc<dyn KvStore>,
+    /// Where checkpoints' packs go, if not the store: S3, say.
+    packs: Option<Arc<dyn BlobStore>>,
     /// The process's cache, and the scope's namespace in it.
     cache: Option<(PageCache, String)>,
     pub(crate) extensions: Extensions,
@@ -25,6 +27,7 @@ impl Scope {
     pub fn new(store: Arc<dyn KvStore>) -> Self {
         Self {
             store,
+            packs: None,
             cache: None,
             extensions: Extensions::new(),
         }
@@ -33,6 +36,16 @@ impl Scope {
     /// The same scope, its runs offered `extensions`.
     pub fn extended(self, extensions: Extensions) -> Self {
         Self { extensions, ..self }
+    }
+
+    /// The same scope, its checkpoints' packs kept in `packs`, S3 say,
+    /// rather than in the store (see [`state::Open::checkpoints`]): every
+    /// process serving the scope must.
+    pub fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
+        Self {
+            packs: Some(packs),
+            ..self
+        }
     }
 
     /// The same scope, kept warm in `cache` between attempts, as
@@ -47,7 +60,10 @@ impl Scope {
     /// Open the scope's state: its SQL, memory and records durable together
     /// at each turn's flush.
     pub(crate) async fn open(&self) -> Result<State> {
-        let open = State::open(self.store.clone());
+        let mut open = State::open(self.store.clone());
+        if let Some(packs) = &self.packs {
+            open = open.checkpoints(packs.clone());
+        }
         let open = match &self.cache {
             Some((cache, namespace)) => open.cached(cache, namespace),
             None => open,
