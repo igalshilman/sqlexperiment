@@ -4,8 +4,8 @@
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
-//! them durable at a sync (see [`kv`]). It needs no multi-key transaction,
-//! compare-and-swap or listing operation. Its [`File`]s are 4 KiB pages read
+//! them durable at a sync (see [`kv`]). It needs no multi-key transaction or
+//! compare-and-swap; only collecting garbage lists keys. Its [`File`]s are 4 KiB pages read
 //! and written at random, its [`Record`]s whole values, and its [`Log`]s
 //! entries appended and truncated from the start. The state is
 //! read; it changes only through a [`Mutation`] ([`State::mutation`]): the
@@ -20,7 +20,8 @@
 //! # Copy on write
 //!
 //! Nothing stored is ever changed: a flush writes what changed as new,
-//! immutable blobs, then the root, the one key it overwrites, which names
+//! immutable blobs, each named by the hash of its contents (so equal blobs
+//! are stored once), then the root, the one key it overwrites, which names
 //! them; then it syncs once. A file is stored as chunks of a few pages, each
 //! a zstd frame compressed against the chunk's base, so a flush costs about
 //! what it changed. A crash keeps a prefix of a flush's writes, so the root
@@ -30,8 +31,19 @@
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Root | `v16/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
-//! | Blobs | `v16/blob/<n>`: a chunk's base or delta, a map node, or a large record, or a log entry; written once | Yes, until no root a reader may hold names it |
+//! | Root | `v17/root`: the directory, small records, and the top of each file's chunk map | Yes, after an acknowledged flush |
+//! | Blobs | `v17/blob/<hash>`: a chunk's base or delta, a map node, a large record, or a log entry | Yes, until a sweep finds no root a reader may hold names it |
+//! | Sweep | `v17/sweep`: the blobs the last sweep found unnamed | Yes |
+//!
+//! # Garbage collection
+//!
+//! A flush deletes nothing: what no root names any more is garbage, which
+//! [`State::collect_garbage`] collects by mark and sweep. It lists the
+//! blobs ([`KvStore::list`]), marks those the root names, and deletes those
+//! the previous sweep found unnamed too, at least
+//! [`StateOptions::garbage_after`] versions ago, unless a flush named them
+//! again since; the others it keeps as candidates for the next sweep. Call
+//! it now and then; a store that cannot list is never swept.
 //!
 //! # Ownership and concurrency
 //!
@@ -42,13 +54,14 @@
 //! Any number of states may read beside the owner ([`Open::reader`], or
 //! states of the owner that overlap in a [`PageCache`]): each reads the root
 //! it opened, a consistent snapshot, while the owner flushes, because blobs
-//! never change and are deleted only [`StateOptions::garbage_after`] flushes
-//! after the last root that named them. Only one flushes: a flush is refused
-//! if another state of the owner flushed since this one opened.
+//! never change and are deleted only [`StateOptions::garbage_after`]
+//! versions after a sweep found no root naming them. Only one flushes: a
+//! flush is refused if another state of the owner flushed since this one
+//! opened.
 //!
 //! The [`PageCache`] is the process's: it keeps blobs in memory and on a
 //! local disk tier under one budget for every namespace it opens, under
-//! their numbers, for as long as it likes: a blob never changes. It
+//! their names, for as long as it likes: a blob never changes. It
 //! remembers the root this owner made durable, so a steady-state open and
 //! flush are each one round trip. A value may be parked there for the next
 //! state of the namespace ([`State::park`]), such as an SQL engine, which
@@ -157,9 +170,9 @@ pub struct StateOptions {
     /// Every chunk of a file of at most this many pages is fetched at open,
     /// alongside the root's other blobs.
     pub prefetch_pages: u64,
-    /// Flushes after the last root that named a blob before a flush deletes
-    /// it (at least 1): a reader that opened before reads its root for as
-    /// long.
+    /// Versions between the sweep that finds a blob unnamed and the sweep
+    /// that deletes it (at least 1): a reader that opened before the first
+    /// reads its root for as long ([`State::collect_garbage`]).
     pub garbage_after: u64,
 }
 

@@ -58,13 +58,16 @@ but one key, the root, which names everything else: copy-on-write.
 
 A namespace holds:
 
-- **The root** (`v16/root`): the version, the directory of files (paged
+- **The root** (`v17/root`): the version, the directory of files (paged
   files, such as the SQL database's, records and logs), the small records,
   and the top of each paged file's chunk map.
-- **Blobs** (`v16/blob/<n>`): one zstd frame each, written once and never
-  changed: a chunk's _base_ (its 4 pages), maybe a _delta_ (its pages now,
-  compressed against the base, so it costs about what changed), a node of a
-  chunk map, or a large record, or a log entry.
+- **Blobs** (`v17/blob/<hash>`): one zstd frame each, named by the hash of
+  its contents and never changed: a chunk's _base_ (its 4 pages), maybe a
+  _delta_ (its pages now, compressed against the base, so it costs about
+  what changed), a node of a chunk map, or a large record, or a log entry.
+  Equal blobs are one blob.
+- **The sweep** (`v17/sweep`): the blobs the last garbage collection found
+  unnamed, the candidates for the next.
 
 **Chunk maps.** A paged file's chunks are named by a copy-on-write radix
 tree of 64-entry nodes, its top node in the root. A file of up to 1 MiB is
@@ -78,21 +81,29 @@ trip. Once the root is stored, the transaction is durable; before, it
 doesn't exist.
 
 **One rule.** A blob is put before the first root that names it, and deleted
-only once no root a reader may still hold names it: 16 flushes after the
-last root that named it, by default.
+only once no root a reader may still hold names it.
+
+**Garbage collection.** A flush deletes nothing. Now and then the owner
+sweeps (`state.collect_garbage()`): it lists the blobs, marks those the root
+names, and deletes those the previous sweep found unnamed too, at least 16
+versions ago by default, unless a flush named them again since (it takes
+them off the candidates); the rest are the next sweep's candidates. A
+reader that opened before the previous sweep read its root for 16 versions.
+A store that cannot list its keys is never swept.
 
 **Recovery.** There's none: every open reads the root, which names only
-blobs that are stored. A crashed flush's blobs are numbered past what the
-root names, and the next flush overwrites them.
+blobs that are stored. A crashed flush's blobs are garbage no root names,
+which a sweep deletes; a flush that writes the same contents writes the same
+blob again.
 
 **What a crash leaves.**
 
 | Interrupted             | Result                                      |
 | ----------------------- | ------------------------------------------- |
 | A flush                 | Either all of the transaction or none of it |
-| A deletion of old blobs | Repeated by the next flush                  |
+| A sweep                 | Repeated by the next sweep                  |
 
-**Why it is simple.** Blobs never change, so a cache keeps them by number and
+**Why it is simple.** Blobs never change, so a cache keeps them by name and
 never invalidates them, and a reader (a shared handler beside the exclusive
 one) reads the root it opened, a consistent snapshot, while the owner
 flushes.

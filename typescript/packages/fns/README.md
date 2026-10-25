@@ -156,11 +156,11 @@ The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
 `ctx.run`.
 
-**The database is the object's state.** Its keys (`v16/root`, `v16/blob/…`)
+**The database is the object's state.** Its keys (`v17/root`, `v17/blob/…`)
 sit next to the object's other state keys, so `ctx.clearAll()` in any handler
-of the object deletes the database, a handler's own key starting with `v16/`
+of the object deletes the database, a handler's own key starting with `v17/`
 corrupts it, and `ctx.stateKeys()` lists its blobs. Keep other state out of
-`v16/`, and do not clear all of an object that uses `ctx.db`. (Reserving
+`v17/`, and do not clear all of an object that uses `ctx.db`. (Reserving
 these keys in the SDK is future work.)
 
 ## How it works

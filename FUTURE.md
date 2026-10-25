@@ -76,13 +76,13 @@ and the Rust SDK's `main` have no such option). Restate has it since 1.8.0
 ([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
 
 **Now:** SQL objects set lazy state, so an invocation does not start with
-every blob, and a session's first read is the root (`v16/root`): a round
-trip, cached or not.
+every blob, and a session's first read is the root (`v17/root`, and beside
+it the sweep's candidates, `v17/sweep`): a round trip, cached or not.
 
-**Then:** with lazy state still on, whitelist `v16/root`; the server ships
-it with the invocation (best effort, within its eager-state size limit),
-and the open starts with it. Blob names change with each flush, so only the
-root can be listed. The options are in `restate-fns` (`sqlOptions` in
+**Then:** with lazy state still on, whitelist `v17/root` and `v17/sweep`;
+the server ships them with the invocation (best effort, within its
+eager-state size limit), and the open starts with them. Blob names are the
+hashes of their contents, so only those two keys can be listed. The options are in `restate-fns` (`sqlOptions` in
 `typescript/packages/fns/src/index.ts`, `sql_options` in
 `python/fns/restate_fns/session.py`) and the durable functions'
 `ServiceOptions` (`rust/functions/src/restate.rs`); their `TODO:`s mark them.
