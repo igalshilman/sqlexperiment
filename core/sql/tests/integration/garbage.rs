@@ -25,7 +25,8 @@ async fn summary(db: &mut Db) -> Result<(i64, i64)> {
 
 /// Many SQL sessions with inserts, deletes, a schema change and changing
 /// garbage graces keep the same results as an in-memory model, while the
-/// blobs stay bounded: the live ones, and the garbage of the last flushes.
+/// blobs stay bounded with a sweep a round: the live ones, and the garbage of
+/// the last flushes.
 #[test]
 fn sql_sessions_match_a_model_across_garbage_graces() -> Result<()> {
     futures::executor::block_on(async {
@@ -60,12 +61,13 @@ fn sql_sessions_match_a_model_across_garbage_graces() -> Result<()> {
                 db.execute("CREATE INDEX by_payload ON t(payload)").await?;
             }
             let before = store.blob_count();
-            db.save().await?;
-            // Each flush writes blobs; garbage goes once `grace` more
-            // flushes landed, so what is kept is the live blobs and those
-            // written by the last `grace` flushes (plus slack for a lowered
-            // grace).
+            db.flush().await?;
             written.push_front(store.blob_count().saturating_sub(before) + 1);
+            // A sweep a round deletes what was unnamed `grace` versions ago
+            // (a flush and a sweep each), so what is kept is the live blobs
+            // and those written by the last `grace` rounds (plus slack for a
+            // lowered grace).
+            db.state().collect_garbage().await?;
             let recent: usize = written.iter().take(8 + 1).sum();
 
             let expected = (

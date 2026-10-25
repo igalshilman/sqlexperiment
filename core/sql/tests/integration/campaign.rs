@@ -393,8 +393,8 @@ impl Campaign {
         }
         let operation = self.rng.pick(operations);
         let prefixes: &[&str] = match operation {
-            Operation::Put => &["", "", "", "v16/root", "v16/blob/"],
-            Operation::Get => &["", "v16/root", "v16/blob/"],
+            Operation::Put => &["", "", "", "v17/root", "v17/blob/"],
+            Operation::Get => &["", "v17/root", "v17/blob/"],
             _ => &[""],
         };
         Some(Failpoint {

@@ -167,7 +167,7 @@ fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (operation, prefix) in [(Operation::Put, "v16/blob/"), (Operation::Sync, "")] {
+        for (operation, prefix) in [(Operation::Put, "v17/blob/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save puts its blobs, then its root.
@@ -244,7 +244,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v16/blob/1";
+        let key = "v17/blob/1";
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into())?;
         store.get(key).await?;

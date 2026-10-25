@@ -168,7 +168,7 @@ fn warm_engines_continue_only_from_an_unchanged_flushed_state() -> Result<()> {
         db.execute("INSERT INTO t VALUES (100)").await?;
         let _gate = store.arm(Failpoint {
             operation: Operation::Put,
-            key_prefix: "v16/root".into(),
+            key_prefix: "v17/root".into(),
             nth: 1,
             effect: Effect::None,
             cancel: false,

@@ -83,6 +83,9 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
             for i in 0..60 {
                 turn(&mut db, i).await?;
                 assert_eq!(db.state().record("turn").get(), expected(i + 1), "turn {i}");
+                if i % 8 == 7 {
+                    db.state().collect_garbage().await?;
+                }
                 if i % 7 == 6 {
                     // Another session reads the same turn: the records, and the
                     // blobs the root names.
@@ -109,13 +112,14 @@ fn a_turn_flushes_its_records_with_its_sql() -> Result<()> {
             let large = (0..60).filter(|i| value(*i).len() > 1024).count() as u64;
             let put = store.inner.stats().kind("blob").puts;
             assert_eq!(put, large + 30 + 1, "cached={cached}");
-            // What no root names is garbage, deleted `garbage_after` (16)
-            // flushes later: the live blobs (the `turn` value, the chunk's
-            // base and delta) and what the last 16 flushes left, at most two
-            // each (the old `turn` value, the chunk's old delta).
+            // What no root names is garbage, which a sweep every eight turns
+            // deletes once it was unnamed `garbage_after` (16) versions: the
+            // live blobs (the `turn` value, the chunk's base and delta) and
+            // the garbage of at most the last 16 + 8 flushes, two each (the
+            // old `turn` value, the chunk's old delta).
             let stored = store.inner.blob_count();
             assert!(
-                stored <= 3 + 2 * 16,
+                stored <= 3 + 2 * (16 + 8),
                 "cached={cached}: {stored} of {put} blobs stored"
             );
         }

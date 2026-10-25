@@ -96,8 +96,8 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
     })
 }
 
-/// A long session crosses rebases, garbage collection and the cache's
-/// claims, reading its own writes throughout.
+/// A long session crosses rebases, sweeps every five transactions and the
+/// cache's claims, reading its own writes throughout.
 #[test]
 fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
     futures::executor::block_on(async {
@@ -118,11 +118,14 @@ fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
                 })
                 .await?;
                 assert_eq!(count(&mut db).await?, 2 * (i + 1));
+                if i % 5 == 4 {
+                    db.state().collect_garbage().await?;
+                }
             }
             let blob = store.stats().kind("blob");
             assert!(
                 blob.deletes > 0 && store.blob_count() < 80,
-                "garbage is collected as the session goes: {} blobs",
+                "garbage is swept as the session goes: {} blobs",
                 store.blob_count()
             );
             drop(db);
@@ -515,8 +518,7 @@ fn effects_commit_with_their_transaction() -> Result<()> {
 
 /// Records under the default durability: set in the turn's mutation, unchanged
 /// until the save makes them durable, discarded with a dropped session. A
-/// large one is a blob of its own, which the flush that replaces it lists as
-/// garbage, for the next one to delete.
+/// large one is a blob of its own, which sweeps delete once it is replaced.
 #[test]
 fn records_flush_at_save() -> Result<()> {
     futures::executor::block_on(async {
@@ -546,12 +548,15 @@ fn records_flush_at_save() -> Result<()> {
         let large = db.state().record("large");
         db.mutation().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
-        // The replaced value is garbage, which the next flush deletes.
+        // The replaced value is garbage: a sweep finds it, and the next one,
+        // a version later, deletes it.
         let mut db = Db::open(store.clone(), options()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
+        assert_eq!(db.state().collect_garbage().await?.dead, 1);
         let small = db.state().record("small");
         db.mutation().set(&small, Bytes::new())?;
-        db.save().await?;
+        db.flush().await?;
+        assert_eq!(db.state().collect_garbage().await?.deleted, 1);
         assert_eq!(store.blob_count(), with_large - 1, "the large value went");
         let db = Db::open(store.clone(), options()).await?;
         assert!(db.state().record("small").get().is_empty());
