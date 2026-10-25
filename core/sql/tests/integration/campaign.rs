@@ -273,8 +273,10 @@ impl Campaign {
             cache: cached.then(fresh_namespace),
         };
         let session = seed.is_multiple_of(2);
+        // Blobs beside Restate, as in S3: the state claims their numbers.
+        let unfenced = rng.chance(2);
         let summary = format!(
-            "{}, cached: {cached}, chunks of {} pages, rebase over {}, garbage after {} versions, a sweep every {} (0: none), inline records to {} bytes, prefetch {}",
+            "{}, cached: {cached}, unfenced blobs: {unfenced}, chunks of {} pages, rebase over {}, garbage after {} versions, a sweep every {} (0: none), inline records to {} bytes, prefetch {}",
             if session {
                 "binding session"
             } else {
@@ -293,7 +295,10 @@ impl Campaign {
             options,
             summary,
         };
-        let memory = MemoryKv::default();
+        let memory = match unfenced {
+            true => MemoryKv::unfenced(),
+            false => MemoryKv::default(),
+        };
         let store = Arc::new(MonitorKv::new(FaultKv::new(memory.clone(), seed)));
         Self {
             seed,
@@ -395,8 +400,17 @@ impl Campaign {
         }
         let operation = self.rng.pick(operations);
         let prefixes: &[&str] = match operation {
-            Operation::Put => &["", "", "", "v17/root", "v17/blob/"],
-            Operation::Get => &["", "v17/root", "v17/blob/"],
+            Operation::Put => &[
+                "",
+                "",
+                "",
+                "v17/root",
+                "v17/blob/",
+                "v17/claim",
+                "v17/sweep",
+            ],
+            Operation::Get => &["", "v17/root", "v17/blob/", "v17/claim", "v17/sweep"],
+            Operation::Delete => &["", "v17/blob/", "v17/sweep"],
             _ => &[""],
         };
         Some(Failpoint {
@@ -428,6 +442,7 @@ impl Campaign {
                 Operation::Sync,
                 Operation::Sync,
                 Operation::Sync,
+                Operation::Keys,
             ],
         );
         self.log(|| format!("{what} {plan:?}"));
