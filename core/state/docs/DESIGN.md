@@ -390,7 +390,7 @@ This keeps the parsed schema warm, which cuts CPU per session several-fold
 ([cache results](../../sql/benches/CACHE_RESULTS.md)). Parked engines share
 a byte budget (`PageCacheConfig::parked_bytes`, 64 MiB), each weighed as 4 MiB
 (turso's buffer pool) plus 16 bytes per byte of schema SQL. Namespace states
-are capped by count. Least recently used go first; dropping either only makes
+are kept by their bytes (above). Least recently used go first; dropping either only makes
 a namespace cold.
 
 **Threads.** foyer's disk I/O runs on the host's tokio runtime, or on a
