@@ -1,5 +1,6 @@
-//! Corrupted stored values: truncated, bit-flipped or garbage, at the root
-//! or a blob. Open and reads fail or read what was flushed, never panic.
+//! Corrupted stored values: truncated, bit-flipped or garbage, at the root,
+//! the sweep or a blob. Open and reads fail or read what was flushed, never
+//! panic.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -18,8 +19,8 @@ fn options() -> StateOptions {
     }
 }
 
-/// A namespace with every kind of key: the root, and blobs of chunks (bases
-/// and deltas) and of records.
+/// A namespace with every kind of key: the root, the sweep, and blobs of
+/// chunks (bases and deltas) and of records.
 async fn flushed() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
     let mut model = Model::default();
@@ -33,6 +34,9 @@ async fn flushed() -> Result<(MemoryKv, Model)> {
         session.flush(&ops).await?;
         model = model.applied(&ops);
     }
+    let session = Session::open(Arc::new(memory.clone()), options()).await?;
+    let swept = session.state.collect_garbage().await?;
+    assert!(swept.candidates > 0, "{swept:?}");
     Ok((memory, model))
 }
 
@@ -90,7 +94,7 @@ fn corrupted_values_fail_reads_or_read_as_flushed_and_never_panic() -> Result<()
     futures::executor::block_on(async {
         let (memory, model) = flushed().await?;
         let keys = memory.keys();
-        for prefix in ["v16/root", "v16/blob/"] {
+        for prefix in ["v17/root", "v17/sweep", "v17/blob/"] {
             assert!(
                 keys.iter().any(|key| key.starts_with(prefix)),
                 "{prefix}: {keys:?}"

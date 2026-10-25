@@ -1,8 +1,8 @@
 //! The root in a key/value store, the blobs in a blob store ([`SplitStore`]):
-//! only the root goes to the key/value store; an earlier attempt fenced from
-//! the root (a zombie) never replaces a blob a root names, even when it draws
-//! the same numbers; a flush that fails midway leaves the last root and
-//! orphans that [`orphans`] finds.
+//! only the root and the sweep go to the key/value store; an earlier attempt
+//! fenced from the root (a zombie) puts the same bytes as the owner, or blobs
+//! no root names; a flush that fails midway leaves the last root, and blobs
+//! that sweeps delete.
 //!
 //! ```sh
 //! cargo test --features simulation --test split
@@ -12,8 +12,8 @@
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use state::{
-    ROOT_KEY, Result, State, StateOptions,
-    blobs::{BlobStore, SplitStore, orphans},
+    Collected, ROOT_KEY, Result, State, StateOptions,
+    blobs::{BlobStore, SplitStore},
     kv::KvStore,
     simulation::*,
 };
@@ -72,20 +72,35 @@ async fn read(store: Arc<dyn KvStore>) -> Result<(Bytes, Bytes)> {
     Ok((page, state.record("big").get()))
 }
 
+/// Options whose sweeps delete what the previous one found unnamed one
+/// version later.
+fn sweep_soon() -> StateOptions {
+    StateOptions {
+        garbage_after: 1,
+        ..Default::default()
+    }
+}
+
+/// Sweep, flush a small record, and sweep again: the second sweep deletes
+/// what the first found unnamed.
+async fn sweep_twice(state: &State) -> Result<Collected> {
+    state.collect_garbage().await?;
+    let mut mutation = state.mutation();
+    mutation.set(&state.record("tick"), "tock".into())?;
+    mutation.flush().await?;
+    state.collect_garbage().await
+}
+
 /// Flushes of files, records and logs, under the protocol monitor: the
-/// key/value store holds the root alone, the blob store every blob, and a
-/// reopen reads it all, garbage deleted from the blob store as it goes.
+/// key/value store holds the root and the sweep alone, the blob store every
+/// blob, and a reopen reads it all; sweeps leave only what the root names.
 #[test]
 fn the_root_stays_in_the_kv_and_the_blobs_go_to_the_blob_store() -> Result<()> {
     futures::executor::block_on(async {
         for (name, blobs) in blob_stores() {
             let kv = Arc::new(MemoryKv::default());
             let store = Arc::new(MonitorKv::new(SplitStore::new(kv.clone(), blobs.clone())));
-            let options = StateOptions {
-                garbage_after: 2,
-                ..Default::default()
-            };
-            let state = State::open(store.clone()).options(options).await?;
+            let state = State::open(store.clone()).options(sweep_soon()).await?;
             for n in 0..10u8 {
                 let mut mutation = state.mutation();
                 mutation.write(&state.file("f")?, 0, Some(page(n)))?;
@@ -93,14 +108,16 @@ fn the_root_stays_in_the_kv_and_the_blobs_go_to_the_blob_store() -> Result<()> {
                 mutation.append(&state.log("turns"), large(n))?;
                 mutation.flush().await?;
             }
+            let collected = sweep_twice(&state).await?;
             assert_eq!(
                 kv.keys().into_iter().collect::<Vec<_>>(),
-                [ROOT_KEY],
+                [ROOT_KEY, SWEEP_KEY],
                 "{name}"
             );
-            let listed = blobs.list("v16/blob/").await?;
-            // Named: a chunk, the record, 10 entries; then 2 flushes' garbage.
-            assert_eq!(listed.len(), 16, "{name}: garbage deleted: {listed:?}");
+            let listed = blobs.list("v17/blob/").await?;
+            assert!(collected.deleted > 0, "{name}: {collected:?}");
+            assert_eq!(listed.len(), collected.named, "{name}: {collected:?}");
+            assert!(store.violations().is_empty(), "{:?}", store.violations());
             let reopened = split(kv, blobs);
             assert_eq!(read(reopened.clone()).await?, (page(9), large(9)), "{name}");
             let state = State::open(reopened).await?;
@@ -111,10 +128,10 @@ fn the_root_stays_in_the_kv_and_the_blobs_go_to_the_blob_store() -> Result<()> {
 }
 
 /// A zombie (an earlier attempt Restate fenced from the root) flushes after
-/// the new owner, drawing the same blob numbers: the blob store refuses its
-/// blobs, and the owner's flush stands.
+/// the new owner: where it writes what the owner wrote, it puts the same
+/// bytes under the same name; the rest no root names, and sweeps delete it.
 #[test]
-fn a_zombie_flushing_after_the_owner_replaces_nothing() -> Result<()> {
+fn a_zombie_flushing_after_the_owner_changes_nothing_a_root_names() -> Result<()> {
     futures::executor::block_on(async {
         for (name, blobs) in blob_stores() {
             let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
@@ -124,57 +141,37 @@ fn a_zombie_flushing_after_the_owner_replaces_nothing() -> Result<()> {
             mutation.flush().await?;
             drop(first);
 
-            fix_blob_jump(Some(1000));
             let fenced: Arc<dyn KvStore> = Arc::new(Fenced(kv.clone()));
             let zombie = State::open(split(fenced, blobs.clone())).await?;
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
+            let owner = split(kv.clone(), blobs.clone());
+            let owner = State::open(owner).options(sweep_soon()).await?;
             let mut mutation = owner.mutation();
             mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
             mutation.set(&owner.record("big"), large(2))?;
             mutation.flush().await?;
+            let before = blobs.list("v17/blob/").await?.len();
             let mut mutation = zombie.mutation();
-            mutation.write(&zombie.file("f")?, 0, Some(page(9)))?;
+            mutation.write(&zombie.file("f")?, 0, Some(page(2)))?;
             mutation.set(&zombie.record("big"), large(9))?;
             let error = mutation.flush().await.unwrap_err().to_string();
-            fix_blob_jump(None);
-            let reopened = split(kv, blobs);
-            assert_eq!(read(reopened).await?, (page(2), large(2)), "{name}");
-            assert!(error.contains("another writer's blob"), "{name}: {error}");
-        }
-        Ok(())
-    })
-}
+            assert!(error.contains("fenced"), "{name}: {error}");
+            // The page's delta, the same as the owner's; the record's, new.
+            assert_eq!(blobs.list("v17/blob/").await?.len(), before + 1, "{name}");
+            assert_eq!(
+                read(split(kv.clone(), blobs.clone())).await?,
+                (page(2), large(2))
+            );
 
-/// A zombie flushes first, with the numbers the owner draws: its blobs land
-/// but its root does not, and the owner's flush fails rather than name
-/// them. Reopened, the owner jumps elsewhere and flushes.
-#[test]
-fn a_zombie_flushing_first_fails_the_owners_flush_and_the_next_open_jumps() -> Result<()> {
-    futures::executor::block_on(async {
-        for (name, blobs) in blob_stores() {
-            let kv: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
-            let fenced: Arc<dyn KvStore> = Arc::new(Fenced(kv.clone()));
-            fix_blob_jump(Some(1000));
-            let zombie = State::open(split(fenced, blobs.clone())).await?;
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
-            let mut mutation = zombie.mutation();
-            mutation.write(&zombie.file("f")?, 0, Some(page(9)))?;
-            mutation.set(&zombie.record("big"), large(9))?;
-            assert!(mutation.flush().await.is_err(), "{name}: fenced");
-            let mut mutation = owner.mutation();
-            mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
-            mutation.set(&owner.record("big"), large(2))?;
-            let error = mutation.flush().await.unwrap_err().to_string();
-            assert!(error.contains("another writer's blob"), "{name}: {error}");
-            assert!(!owner.is_usable(), "{name}: the outcome is unknown");
-            fix_blob_jump(None);
-
-            let owner = State::open(split(kv.clone(), blobs.clone())).await?;
-            assert_eq!(owner.version(), 0, "{name}: nothing landed");
-            let mut mutation = owner.mutation();
-            mutation.write(&owner.file("f")?, 0, Some(page(2)))?;
-            mutation.set(&owner.record("big"), large(2))?;
-            mutation.flush().await?;
+            let collected = sweep_twice(&owner).await?;
+            assert_eq!(
+                collected.deleted, 2,
+                "{name}: page 1's chunk, the zombie's record"
+            );
+            assert_eq!(
+                blobs.list("v17/blob/").await?.len(),
+                collected.named,
+                "{name}"
+            );
             assert_eq!(read(split(kv, blobs)).await?, (page(2), large(2)), "{name}");
         }
         Ok(())
@@ -182,10 +179,9 @@ fn a_zombie_flushing_first_fails_the_owners_flush_and_the_next_open_jumps() -> R
 }
 
 /// The blob store fails midway through a flush: the root stays as it was,
-/// the blobs that landed are orphans, and sweeping them changes nothing
-/// that reads.
+/// and the blob that landed is unnamed until sweeps delete it.
 #[test]
-fn a_flush_failing_midway_leaves_the_last_root_and_orphans_to_sweep() -> Result<()> {
+fn a_flush_failing_midway_leaves_the_last_root_and_blobs_to_sweep() -> Result<()> {
     futures::executor::block_on(async {
         let kv = Arc::new(MemoryKv::default());
         let blobs = MemoryBlobs::default();
@@ -202,37 +198,17 @@ fn a_flush_failing_midway_leaves_the_last_root_and_orphans_to_sweep() -> Result<
         mutation.set(&state.record("big"), large(2))?;
         assert!(mutation.flush().await.is_err());
         blobs.fail_after(None);
-        let root = kv.contents()[ROOT_KEY].clone();
-        let stray = orphans(&root, &blobs).await?;
-        assert_eq!(stray.len(), 1, "the one put that landed: {stray:?}");
-        assert_eq!(blobs.len(), named + 1);
-        for key in stray {
-            blobs.delete(&key).await?;
-        }
+        assert_eq!(blobs.len(), named + 1, "the one put that landed");
+
+        let store = split(kv.clone(), Arc::new(blobs.clone()));
+        let state = State::open(store).options(sweep_soon()).await?;
+        let collected = sweep_twice(&state).await?;
+        assert_eq!((collected.deleted, collected.candidates), (1, 0));
+        assert_eq!(blobs.len(), named);
         assert_eq!(
             read(split(kv.clone(), Arc::new(blobs.clone()))).await?,
             (page(1), large(1))
         );
-        assert!(orphans(&root, &blobs).await?.is_empty());
-        Ok(())
-    })
-}
-
-/// A put the blob store applied but did not acknowledge, retried: the same
-/// bytes are this writer's own, and the sync succeeds; other bytes are not.
-#[test]
-fn a_blob_already_holding_the_same_bytes_is_a_retry() -> Result<()> {
-    futures::executor::block_on(async {
-        let blobs = MemoryBlobs::default();
-        blobs.put_new("v16/blob/7", "same".into()).await?;
-        blobs.put_new("v16/blob/8", "theirs".into()).await?;
-        let store = SplitStore::new(Arc::new(MemoryKv::default()), Arc::new(blobs.clone()));
-        store.put("v16/blob/7", "same".into())?;
-        store.sync().await?;
-        store.put("v16/blob/8", "mine".into())?;
-        let error = store.sync().await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(&store.get("v16/blob/8").await?.unwrap()[..], b"theirs");
         Ok(())
     })
 }

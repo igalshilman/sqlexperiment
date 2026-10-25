@@ -1,11 +1,12 @@
 //! A seeded random campaign over the public API: mutations of changes to several
 //! files (one with a base), records and logs, flushed with small chunks and random
-//! rebase ratios so that deltas, rebases and garbage deletion all happen,
-//! and random faults, cancellations, crashes and reopens by owners with and
+//! rebase ratios so that deltas and rebases happen, sweeps now and then, and
+//! random faults, cancellations, crashes and reopens by owners with and
 //! without a cache, every request checked by the protocol monitor. After
 //! each reopen the state reads as the model: every acknowledged flush, and
 //! an unacknowledged one wholly or not at all. Readers opened beside the
-//! owner read the state they opened while it flushes.
+//! owner read the state they opened while it flushes and sweeps. At the end,
+//! sweeps leave only the blobs the root names.
 //!
 //! ```sh
 //! cargo test --features simulation --test campaign                  # a few seeds
@@ -16,7 +17,9 @@
 mod support;
 
 use futures::task::noop_waker_ref;
-use state::{FlushReport, Mutation, PageCache, Result, StateOptions, kv::KvStore, simulation::*};
+use state::{
+    Collected, FlushReport, Mutation, PageCache, Result, StateOptions, kv::KvStore, simulation::*,
+};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -70,6 +73,7 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
             t.blobs > 0 && t.collected > 0 && t.rebased > 0 && t.reads_beside > 0,
             "{t:?}"
         );
+        assert!(t.sweeps > 0 && t.swept_early > 0, "{t:?}");
         assert!(
             t.landed > 0 && t.lost > 0 && t.crashes > 0 && t.cancelled > 0,
             "{t:?}"
@@ -92,6 +96,9 @@ struct Totals {
     blobs: u64,
     collected: u64,
     rebased: usize,
+    /// Sweeps that wrote, and ones too soon after the last to.
+    sweeps: usize,
+    swept_early: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
 }
@@ -108,6 +115,8 @@ impl Totals {
         self.blobs += run.blobs;
         self.collected += run.collected;
         self.rebased += run.rebased;
+        self.sweeps += run.sweeps;
+        self.swept_early += run.swept_early;
         self.reads_beside += run.reads_beside;
     }
 }
@@ -144,8 +153,8 @@ struct World {
     /// The states a crash may go back to: the durable one, then each one
     /// read or flushed since the last sync.
     since_sync: Vec<Model>,
-    /// Flushes after the last root that named a blob before it goes: the
-    /// world's, as readers rely on it.
+    /// Versions after the last root that named a blob before a sweep
+    /// deletes it: the world's, as readers rely on it.
     garbage_after: u64,
     /// Readers beside the owner, and what they opened.
     readers: Vec<(Session, Model)>,
@@ -292,6 +301,9 @@ impl World {
             let candidates = self.since_sync.clone();
             session = self.reopen(&candidates).await?;
         }
+        if self.rng.percent(15) {
+            return self.sweep(session).await;
+        }
         let mut mutation = session.state.mutation();
         let mut pending = self.model.clone();
         for _ in 0..1 + self.rng.below(8) {
@@ -393,15 +405,76 @@ impl World {
         Ok(session)
     }
 
-    /// After a flush by the owner, at `version`: each reader beside it reads
-    /// what it opened, until the owner's flushes may have deleted its blobs
-    /// (`garbage_after` versions on). Sometimes a new reader opens, on what
+    /// A sweep, perhaps with a fault: one that fails ends the state, whose
+    /// contents it never changes.
+    async fn sweep(&mut self, session: Session) -> std::result::Result<Session, String> {
+        let faulty = self.rng.percent(30);
+        let failpoint = self.failpoint();
+        let _signal = faulty.then(|| self.store.arm(failpoint));
+        let swept = session.state.collect_garbage().await;
+        self.store.disarm();
+        trace(|| format!("sweep{}: {swept:?}", if faulty { ", faulty" } else { "" }));
+        match swept {
+            Ok(collected) => {
+                if !self.memory.unsynced().is_empty() {
+                    return Err("an acknowledged sweep left writes unsynced".into());
+                }
+                match collected.skipped {
+                    true => self.totals.swept_early += 1,
+                    false => self.totals.sweeps += 1,
+                }
+                text(self.read_beside(session.state.version()).await)?;
+                Ok(session)
+            }
+            Err(_) => {
+                if session.state.is_usable() {
+                    return Err("a failed sweep left the state usable".into());
+                }
+                drop(session);
+                if self.rng.percent(50) {
+                    self.crash();
+                }
+                let candidates = self.since_sync.clone();
+                self.reopen(&candidates).await
+            }
+        }
+    }
+
+    /// Sweep, then flush `garbage_after` versions of a small record (inline:
+    /// no garbage), and again, until a sweep finds nothing unnamed: what
+    /// the store holds then is what the root names.
+    async fn sweep_all(&mut self) -> std::result::Result<Collected, String> {
+        let options = StateOptions {
+            garbage_after: self.garbage_after,
+            ..StateOptions::default()
+        };
+        let session = text(Session::open(self.store.clone(), options).await)?;
+        let state = &session.state;
+        for round in 0..4 {
+            let collected = text(state.collect_garbage().await)?;
+            trace(|| format!("final sweep {round}: {collected:?}"));
+            if collected.skipped && collected.candidates == 0 {
+                return Ok(collected);
+            }
+            for tick in 0..self.garbage_after {
+                let mut mutation = state.mutation();
+                let value = format!("{round}.{tick}").into();
+                text(mutation.set(&state.record("tick"), value))?;
+                text(mutation.flush().await)?;
+            }
+        }
+        Err("four sweeps left blobs unnamed".into())
+    }
+
+    /// After a flush or sweep by the owner, at `version`: each reader beside
+    /// it reads what it opened, until the owner's sweeps may have deleted
+    /// its blobs (`garbage_after` versions on). Sometimes a new reader opens, on what
     /// is durable: a reader sees only what the store holds.
     async fn read_beside(&mut self, version: u64) -> Result<()> {
         let grace = self.garbage_after;
         let mut kept = Vec::new();
         for (reader, model) in std::mem::take(&mut self.readers) {
-            // A flush at the next version, or one at this version that did
+            // A sweep at the next version, or one at this version that did
             // not land, deletes what died `grace` versions before it.
             let opened = reader.state.version();
             let may_be_gone = version >= opened + grace;
@@ -420,8 +493,12 @@ impl World {
         self.readers = kept;
         if self.readers.len() < 3 && self.rng.percent(30) && self.memory.unsynced().is_empty() {
             let cache = self.rng.pick(&[None, Some(0), Some(1)]);
+            // Lazy sometimes: it reads blobs long after it opened.
             let setup = Setup {
-                options: StateOptions::default(),
+                options: StateOptions {
+                    prefetch_pages: self.rng.pick(&[0, 16]),
+                    ..StateOptions::default()
+                },
                 cache: cache.map(|owner| self.caches[owner].clone()),
             };
             let reader = Session::reader(self.store.clone(), setup).await?;
@@ -441,7 +518,7 @@ impl World {
         ]);
         let key_prefix = match operation {
             Operation::Sync => "",
-            _ => rng.pick(&["", "", "v16/root", "v16/blob/"]),
+            _ => rng.pick(&["", "", "v17/root", "v17/blob/", "v17/sweep"]),
         };
         Failpoint {
             operation,
@@ -505,12 +582,7 @@ fn text<T>(result: Result<T>) -> std::result::Result<T, String> {
 
 async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let mut rng = Rng::new(seed);
-    // Odd seeds keep blobs write-once, as in S3 beside Restate: no reopen
-    // after a crash or a fault may put a blob number twice.
-    let memory = match seed % 2 {
-        1 => MemoryKv::write_once(),
-        _ => MemoryKv::default(),
-    };
+    let memory = MemoryKv::default();
     let fault = FaultKv::new(memory.clone(), rng.below(3));
     let store = Arc::new(MonitorKv::new(fault).with_base("vm", golden()));
     let caches = [new_owner(&mut rng), new_owner(&mut rng)];
@@ -541,6 +613,14 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
     let candidates = world.since_sync.clone();
     let session = world.reopen(&candidates).await?;
     world.check(&session).await?;
+    drop(session);
+    let swept = world.sweep_all().await?;
+    let stored = (world.memory.keys().into_iter())
+        .filter(|key| is_blob_key(key))
+        .count();
+    if (swept.listed, swept.named) != (stored, stored) {
+        return Err(format!("{stored} blobs stored after the sweeps: {swept:?}"));
+    }
     world.violations()?;
     let stats = world.memory.stats();
     world.totals.requests_checked = world.store.checked();

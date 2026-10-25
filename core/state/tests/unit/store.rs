@@ -1,10 +1,12 @@
 use super::*;
 
+fn b(n: u8) -> BlobId {
+    BlobId([n; 16])
+}
+
 fn root() -> Root {
     let mut root = Root::new(4, 64);
     root.version = 7;
-    root.next_blob = 300;
-    root.garbage = BTreeMap::from([(3, 7), (40, 5)]);
     root.next_file = 5;
     let paged = |base, chunks| Kind::Paged {
         size: 3 * 4 * PAGE,
@@ -22,25 +24,25 @@ fn root() -> Root {
             paged(
                 None,
                 vec![
-                    chunk(Some(1), Some(299)),
+                    chunk(Some(b(1)), Some(b(199))),
                     chunk(None, None),
-                    chunk(Some(200), None),
+                    chunk(Some(b(200)), None),
                 ],
             ),
         ),
-        (1, "vm", paged(Some(9), vec![chunk(Some(5), None); 3])),
+        (1, "vm", paged(Some(9), vec![chunk(Some(b(5)), None); 3])),
         (
             2,
             "small",
             Kind::Record(Value::Inline(Bytes::from_static(b"hi"))),
         ),
-        (3, "large", Kind::Record(Value::Blob(250))),
+        (3, "large", Kind::Record(Value::Blob(b(250)))),
         (
             4,
             "turns",
             Kind::Log {
                 first: 12,
-                entries: vec![260, 261],
+                entries: vec![b(60), b(61)],
             },
         ),
     ];
@@ -67,10 +69,47 @@ fn a_root_decodes_as_encoded() {
 }
 
 #[test]
-fn a_root_naming_a_blob_past_its_next_is_invalid() {
-    let mut root = root();
-    root.next_blob = 299;
-    assert!(Root::decode(&root.encode()).is_err());
+fn a_sweep_decodes_as_encoded() {
+    let sweep = Sweep {
+        marked: 9,
+        candidates: BTreeSet::from([b(1), b(2), b(255)]),
+    };
+    assert_eq!(Sweep::decode(&sweep.encode()).unwrap(), sweep);
+    let bytes = sweep.encode();
+    for len in 0..bytes.len() {
+        assert!(Sweep::decode(&bytes[..len]).is_err(), "truncated to {len}");
+    }
+}
+
+#[test]
+fn a_blob_key_parses_back() {
+    let blob = BlobId::of(7, Against::Nothing, b"frame");
+    assert_eq!(parse_blob_key(&blob_key(blob)), Some(blob));
+    assert_eq!(
+        blob_key(b(0xab)),
+        format!("{BLOB_PREFIX}{}", "ab".repeat(16))
+    );
+    for key in ["v17/blob/1", "v17/root", &blob_key(blob).to_uppercase()] {
+        assert_eq!(parse_blob_key(key), None, "{key}");
+    }
+}
+
+/// A frame's name hashes what it is compressed against: the same frame
+/// against two references holds different pages.
+#[test]
+fn a_name_hashes_the_database_the_reference_and_the_frame() {
+    let names = [
+        BlobId::of(7, Against::Nothing, b"frame"),
+        BlobId::of(8, Against::Nothing, b"frame"),
+        BlobId::of(7, Against::Nothing, b"other"),
+        BlobId::of(7, Against::Blob(b(1)), b"frame"),
+        BlobId::of(7, Against::Blob(b(2)), b"frame"),
+        BlobId::of(7, Against::Base { base: 1, chunk: 0 }, b"frame"),
+        BlobId::of(7, Against::Base { base: 1, chunk: 1 }, b"frame"),
+        BlobId::of(7, Against::Base { base: 2, chunk: 0 }, b"frame"),
+    ];
+    assert_eq!(BTreeSet::from(names).len(), names.len());
+    assert_eq!(names[0], BlobId::of(7, Against::Nothing, b"frame"));
 }
 
 /// Truncated, extended, or any bytes at all: an error, never a panic.

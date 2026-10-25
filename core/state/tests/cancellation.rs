@@ -62,7 +62,11 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
         // Reopened by the owner, or after a crash.
         for (cached, crash) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut landed = [0; 2];
-            for polls in 0.. {
+            let mut completed = 0;
+            // Past the first that completes: requests take more or fewer
+            // polls by their keys, blobs' names, which hash a random
+            // database identity.
+            for polls in 0..48 {
                 // Slow requests: a flush takes several polls.
                 let memory = prepared.fork();
                 let fault = FaultKv::new(memory.clone(), 5);
@@ -85,7 +89,8 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                     Some(outcome) => {
                         outcome?;
                         assert!(polls > 2, "a flush takes several polls");
-                        break;
+                        completed += 1;
+                        continue;
                     }
                     // Never polled: nothing happened, and the mutation went with
                     // the future.
@@ -132,6 +137,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 );
                 assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
             }
+            assert!(completed > 0, "cached {cached}: a flush completes");
             // Some drops came after the root went out (and, uncached, some
             // while the flush still fetched what it builds on).
             if !crash {

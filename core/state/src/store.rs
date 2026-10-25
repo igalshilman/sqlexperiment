@@ -1,9 +1,10 @@
 //! The stored state: immutable blobs, and one root that names them.
 //!
-//! | Key            | Holds                                                                     |
-//! | -------------- | ------------------------------------------------------------------------- |
-//! | `v16/root`     | The commit point: the directory of files and records, and what each names |
-//! | `v16/blob/<n>` | One zstd frame, written once and never changed: a chunk, a map node, or a record or log entry |
+//! | Key               | Holds                                                                     |
+//! | ----------------- | ------------------------------------------------------------------------- |
+//! | `v17/root`        | The commit point: the directory of files and records, and what each names |
+//! | `v17/blob/<hash>` | One zstd frame, named by its hash: a chunk, a map node, or a record or log entry |
+//! | `v17/sweep`       | The blobs the last sweep found unnamed, and the version it looked at      |
 //!
 //! A paged file is a row of *chunks* of [`StateOptions::chunk_pages`] pages
 //! each. A chunk is stored as a *base*, a frame of its pages compressed
@@ -15,38 +16,50 @@
 //! [`StateOptions::rebase_ratio`] of the base's size, as a new base. A record of more than
 //! [`StateOptions::inline_record_bytes`] is a blob of its own; smaller ones
 //! are in the root. A log's entries are blobs of their own, one each, from
-//! the first not yet truncated, written once: the root, which every flush
-//! rewrites, holds only their numbers.
+//! the first not yet truncated: the root, which every flush rewrites, holds
+//! only their names.
+//!
+//! **Content-addressed.** A blob's name is the hash of its frame, of what
+//! the frame is compressed against, and of its database's identity
+//! ([`BlobId`]): what a name holds never changes. Writing a name again
+//! writes the same bytes, so a put retried, or an earlier attempt of the
+//! owner that the store fences from the root but not from the blobs (S3
+//! beside Restate), never changes a blob a root names. Equal blobs share a
+//! name, and are stored once.
 //!
 //! **One rule.** A blob is written before the first root that names it, and
 //! deleted only once no root a reader may hold names it. The store keeps
 //! writes in issue order, so a root is stored only with the blobs it names:
 //! whatever prefix of a flush's writes a crash keeps, the root stored names
-//! only blobs that are there. There is no log to replay, nothing is
-//! overwritten, and nothing needs repair after a crash.
+//! only blobs that are there. There is no log to replay, and nothing needs
+//! repair after a crash.
 //!
-//! **Flush.** Delete the blobs that died [`StateOptions::garbage_after`]
-//! flushes ago or earlier; put the flush's blobs, at numbers no durable root
-//! has used; put the root, at the next version, naming them, and listing the
-//! blobs it no longer names as garbage, with its version; sync once.
+//! **Flush.** Put the flush's new blobs, every one, stored already or not;
+//! if the last sweep found any of them unnamed, put the sweep without them;
+//! put the root, at the next version, naming them; sync once.
+//!
+//! **Sweep** (`State::collect_garbage`): mark and sweep, in two phases. List
+//! the blobs, and mark those the root names: the others are unnamed. Delete
+//! those the previous sweep found unnamed too, at least
+//! [`StateOptions::garbage_after`] versions ago (no flush since has named
+//! them, or it would have taken them off), and keep the rest as the next
+//! sweep's candidates. A sweep is a flush: it puts the root again, at the
+//! next version, so a state that opened before it cannot flush after it.
 //!
 //! **Open.** Get the root, and the blobs of its large records (and, cold, of a
 //! small file), in one more round trip. A page read gets its chunk's base and
 //! delta together, in one.
 //!
-//! **Readers and caching.** A blob's content never changes once a durable root
-//! names it, so any state may cache it under its number (and its database's
-//! random identity, which a namespace made again changes) forever, and a
-//! state reads the root it opened as a consistent snapshot while the owner
-//! flushes, for [`StateOptions::garbage_after`] of the owner's flushes. (A
-//! crashed flush's blobs, which no durable root names, are overwritten by
-//! the next flush: nothing caches them, since nothing caches a blob before a
-//! durable root names it.)
+//! **Readers and caching.** What a name holds never changes, so any state
+//! may cache a blob under its name forever, and a state reads the root it
+//! opened as a consistent snapshot while the owner flushes, for
+//! [`StateOptions::garbage_after`] of the owner's versions. A crashed
+//! flush's blobs, which no root names, wait for a sweep.
 use crate::{
     Base, PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
     kv::KvStore,
-    map::{MAX_FANOUT, Map, Node, Nodes, Shape},
+    map::{MAX_FANOUT, Map, Node, Nodes, Shape, Visit},
     zstd,
 };
 use bytes::Bytes;
@@ -60,9 +73,12 @@ use std::{
 /// The root's key: the one key a flush overwrites, and its commit. An open
 /// reads it first, so a host whose store can send keys ahead of the first
 /// read (Restate's eager state) should send this one.
-pub const ROOT_KEY: &str = "v16/root";
-pub(crate) const BLOB_PREFIX: &str = "v16/blob/";
-const ROOT_MAGIC: &[u8; 4] = b"SR16";
+pub const ROOT_KEY: &str = "v17/root";
+pub(crate) const BLOB_PREFIX: &str = "v17/blob/";
+/// What the last sweep found unnamed ([`Sweep`]).
+pub(crate) const SWEEP_KEY: &str = "v17/sweep";
+const ROOT_MAGIC: &[u8; 4] = b"SR17";
+const SWEEP_MAGIC: &[u8; 4] = b"SS17";
 /// Bytes of a record's value, or of a log entry.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Entries a log holds: appending past it is refused, until a truncation
@@ -76,8 +92,10 @@ pub const MAX_FILE_BYTES: u64 = 10 << 30;
 pub(crate) const MAX_CHUNK_PAGES: u64 = 256;
 /// Files and records a root may name.
 const MAX_FILES: u32 = 1 << 16;
-/// Largest version or blob number a root may hold, far from overflow.
+/// Largest version or log index a root may hold, far from overflow.
 const MAX_SEQUENCE: u64 = 1 << 62;
+/// Most candidates a sweep keeps.
+const MAX_CANDIDATES: u64 = 1 << 24;
 /// Largest decoded root.
 const MAX_ROOT_BYTES: usize = 64 << 20;
 /// Chunk images a state keeps decoded before it drops them all.
@@ -93,13 +111,76 @@ const READAHEAD_AFTER: u32 = 2;
 /// Most chunks read ahead at once.
 const MAX_READAHEAD: u64 = 16;
 
-pub(crate) fn blob_key(n: u64) -> String {
-    format!("{BLOB_PREFIX}{n:x}")
+/// A blob's name: the first 16 bytes of the BLAKE3 hash of its database's
+/// identity, what its frame is compressed against, and the frame. The
+/// identity keeps databases apart (a namespace made again included) in a
+/// cache they share; the reference keeps equal frames that hold different
+/// pages apart.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobId(pub(crate) [u8; 16]);
+
+/// What a blob's frame is compressed against.
+#[derive(Clone, Copy)]
+pub(crate) enum Against {
+    /// Nothing: a record's value, a log entry, a map node, or a chunk of a
+    /// file without a base.
+    Nothing,
+    /// Chunk `chunk` of the file base `base` ([`Base::id`]).
+    Base { base: u64, chunk: u64 },
+    /// A chunk's base blob: the frame is a delta.
+    Blob(BlobId),
 }
 
-/// The blob number a key names.
-pub(crate) fn parse_blob_key(key: &str) -> Option<u64> {
-    u64::from_str_radix(key.strip_prefix(BLOB_PREFIX)?, 16).ok()
+impl BlobId {
+    pub(crate) fn of(database: u64, against: Against, frame: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&database.to_le_bytes());
+        match against {
+            Against::Nothing => hasher.update(&[0]),
+            Against::Base { base, chunk } => (hasher.update(&[1]))
+                .update(&base.to_le_bytes())
+                .update(&chunk.to_le_bytes()),
+            Against::Blob(blob) => hasher.update(&[2]).update(&blob.0),
+        };
+        hasher.update(frame);
+        let mut id = [0; 16];
+        id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for BlobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+impl std::fmt::Debug for BlobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+pub(crate) fn blob_key(blob: BlobId) -> String {
+    format!("{BLOB_PREFIX}{blob}")
+}
+
+/// The blob a key names.
+pub(crate) fn parse_blob_key(key: &str) -> Option<BlobId> {
+    let hex = key.strip_prefix(BLOB_PREFIX)?.as_bytes();
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut id = [0; 16];
+    if hex.len() != 32 {
+        return None;
+    }
+    for (byte, pair) in id.iter_mut().zip(hex.chunks(2)) {
+        *byte = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(BlobId(id))
 }
 
 pub(crate) fn put_varint(out: &mut Vec<u8>, mut n: u64) {
@@ -127,31 +208,10 @@ pub(crate) fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid {what}"))
 }
 
-/// Put `value` in `flush` as a blob of its own: its number.
-fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<u64> {
+/// Put `value` in `flush` as a blob of its own: its name.
+fn put_value(flush: &mut Flush, value: &[u8]) -> io::Result<BlobId> {
     let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
-    Ok(flush.put(frame, None))
-}
-
-/// The largest jump [`blob_jump`] makes: 2^24 numbers, so an open costs a
-/// few bytes of the root and the maps, and 2^38 opens fit under
-/// [`MAX_SEQUENCE`].
-const MAX_JUMP: u64 = 1 << 24;
-
-#[cfg(feature = "simulation")]
-thread_local! {
-    /// A jump tests fix: see [`crate::simulation::fix_blob_jump`].
-    pub(crate) static FIXED_JUMP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-}
-
-/// How far past the root's next blob a writer of a store with
-/// [`KvStore::write_once_blobs`] starts numbering: 1 to [`MAX_JUMP`].
-fn blob_jump() -> u64 {
-    #[cfg(feature = "simulation")]
-    if let Some(jump) = FIXED_JUMP.with(|fixed| fixed.get()) {
-        return jump;
-    }
-    1 + crate::cache::random() % MAX_JUMP
+    Ok(flush.put(frame, Against::Nothing, None))
 }
 
 fn refuse<T>(message: String) -> io::Result<T> {
@@ -250,6 +310,63 @@ impl Is {
     }
 }
 
+/// What a sweep found, and did ([`crate::State::collect_garbage`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// Blobs stored.
+    pub listed: usize,
+    /// Blobs the root names.
+    pub named: usize,
+    /// Blobs it deleted: unnamed at this sweep, and at the previous one.
+    pub deleted: usize,
+    /// Blobs it found unnamed and kept, for the next sweep to delete.
+    pub candidates: usize,
+    /// It wrote nothing: the previous sweep's candidates are too recent to
+    /// delete, or there is nothing to delete or mark.
+    pub skipped: bool,
+}
+
+/// What a sweep's mark found, and decided ([`Snapshot::mark`]).
+pub(crate) struct Marked {
+    collected: Collected,
+    deleted: BTreeSet<BlobId>,
+    /// The next sweep; `None` writes nothing.
+    sweep: Option<Sweep>,
+}
+
+/// What the last sweep found unnamed, and at which version: the next sweep
+/// deletes those still unnamed, once [`StateOptions::garbage_after`]
+/// versions have passed. A flush that names one takes it off.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Sweep {
+    /// The version of the root that named none of them.
+    pub marked: u64,
+    pub candidates: BTreeSet<BlobId>,
+}
+
+impl Sweep {
+    pub fn encode(&self) -> Bytes {
+        let mut out = SWEEP_MAGIC.to_vec();
+        put_varint(&mut out, self.marked);
+        put_varint(&mut out, self.candidates.len() as u64);
+        for blob in &self.candidates {
+            out.extend_from_slice(&blob.0);
+        }
+        out.into()
+    }
+
+    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let body = (bytes.strip_prefix(SWEEP_MAGIC)).ok_or_else(|| invalid("sweep"))?;
+        let mut r = Reading::new(body, "sweep");
+        let marked = r.bounded(MAX_SEQUENCE)?;
+        let candidates = (0..r.bounded(MAX_CANDIDATES)?)
+            .map(|_| r.blob())
+            .collect::<io::Result<_>>()?;
+        r.end()?;
+        Ok(Self { marked, candidates })
+    }
+}
+
 /// What a flush wrote.
 #[derive(Clone, Debug, Default)]
 pub struct FlushReport {
@@ -267,17 +384,17 @@ pub struct FlushReport {
 /// chunk with neither is its file's base pages, or zeros.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Chunk {
-    pub base: Option<u64>,
-    pub delta: Option<u64>,
+    pub base: Option<BlobId>,
+    pub delta: Option<BlobId>,
 }
 
 impl Chunk {
     /// The blob holding the chunk's pages now.
-    fn current(self) -> Option<u64> {
+    fn current(self) -> Option<BlobId> {
         self.delta.or(self.base)
     }
 
-    pub(crate) fn blobs(self) -> impl Iterator<Item = u64> {
+    pub(crate) fn blobs(self) -> impl Iterator<Item = BlobId> {
         self.base.into_iter().chain(self.delta)
     }
 }
@@ -285,7 +402,7 @@ impl Chunk {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Value {
     Inline(Bytes),
-    Blob(u64),
+    Blob(BlobId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -302,7 +419,7 @@ pub(crate) enum Kind {
     /// there, in order.
     Log {
         first: u64,
-        entries: Vec<u64>,
+        entries: Vec<BlobId>,
     },
 }
 
@@ -316,20 +433,15 @@ pub(crate) struct Entry {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Root {
     /// The database's identity, drawn at random when its first root was
-    /// made: its blob numbers are unique under it, and the cache keys them
-    /// by both (a namespace emptied and made again counts from 0 again).
+    /// made: every blob's name hashes it ([`BlobId`]).
     pub id: u64,
-    /// The flushes that changed something, ever.
+    /// The flushes that changed something, and the sweeps that wrote, ever.
     pub version: u64,
-    /// The next blob number: none at or past it is named.
-    pub next_blob: u64,
     /// Pages per chunk, set when the namespace was made.
     pub chunk_pages: u64,
     /// Entries per node of a file's chunk map, set when the namespace was
     /// made.
     pub fanout: u64,
-    /// Blobs no root names since the version given, to delete.
-    pub garbage: BTreeMap<u64, u64>,
     pub next_file: u32,
     pub directory: BTreeMap<u32, Entry>,
 }
@@ -354,6 +466,14 @@ impl<'a> Reading<'a> {
 
     pub fn varint(&mut self) -> io::Result<u64> {
         get_varint(self.bytes, &mut self.at).ok_or_else(|| self.invalid())
+    }
+
+    /// A blob's name.
+    pub fn blob(&mut self) -> io::Result<BlobId> {
+        let end = self.at + 16;
+        let bytes = self.bytes.get(self.at..end).ok_or_else(|| self.invalid())?;
+        self.at = end;
+        Ok(BlobId(bytes.try_into().expect("16 bytes")))
     }
 
     /// A varint of at most `max`.
@@ -382,26 +502,23 @@ impl<'a> Reading<'a> {
     }
 }
 
-/// Blob numbers as deltas from the previous one of their stream, zigzagged,
-/// plus one: 0 is none. A row of chunks written together costs a byte
-/// each, and zstd folds runs of them.
-pub(crate) fn put_ref(out: &mut Vec<u8>, previous: &mut u64, n: Option<u64>) {
-    let Some(n) = n else {
-        return out.push(0);
-    };
-    let delta = n.wrapping_sub(*previous) as i64;
-    put_varint(out, ((delta << 1) ^ (delta >> 63)) as u64 + 1);
-    *previous = n;
+/// A blob's name, or none: `0`, or `1` and the name's 16 bytes.
+pub(crate) fn put_ref(out: &mut Vec<u8>, blob: Option<BlobId>) {
+    match blob {
+        None => out.push(0),
+        Some(blob) => {
+            out.push(1);
+            out.extend_from_slice(&blob.0);
+        }
+    }
 }
 
-pub(crate) fn get_ref(r: &mut Reading, previous: &mut u64) -> io::Result<Option<u64>> {
-    let z = r.varint()?;
-    if z == 0 {
-        return Ok(None);
+pub(crate) fn get_ref(r: &mut Reading) -> io::Result<Option<BlobId>> {
+    match r.varint()? {
+        0 => Ok(None),
+        1 => Ok(Some(r.blob()?)),
+        _ => Err(r.invalid()),
     }
-    let delta = ((z - 1) >> 1) as i64 ^ -(((z - 1) & 1) as i64);
-    *previous = previous.wrapping_add(delta as u64);
-    Ok(Some(*previous))
 }
 
 impl Root {
@@ -409,10 +526,8 @@ impl Root {
         Self {
             id: cache::random(),
             version: 0,
-            next_blob: 0,
             chunk_pages,
             fanout,
-            garbage: BTreeMap::new(),
             next_file: 0,
             directory: BTreeMap::new(),
         }
@@ -439,16 +554,8 @@ impl Root {
     pub fn encode(&self) -> Bytes {
         let mut body = self.id.to_le_bytes().to_vec();
         put_varint(&mut body, self.version);
-        put_varint(&mut body, self.next_blob);
         put_varint(&mut body, self.chunk_pages);
         put_varint(&mut body, self.fanout);
-        put_varint(&mut body, self.garbage.len() as u64);
-        let mut previous = 0;
-        for (&n, &since) in &self.garbage {
-            put_varint(&mut body, n - previous);
-            put_varint(&mut body, self.version - since);
-            previous = n;
-        }
         put_varint(&mut body, u64::from(self.next_file));
         put_varint(&mut body, self.directory.len() as u64);
         let mut next = 0;
@@ -463,9 +570,9 @@ impl Root {
                     put_varint(&mut body, bytes.len() as u64);
                     body.extend_from_slice(bytes);
                 }
-                Kind::Record(Value::Blob(n)) => {
+                Kind::Record(Value::Blob(blob)) => {
                     body.push(1);
-                    put_varint(&mut body, *n);
+                    body.extend_from_slice(&blob.0);
                 }
                 Kind::Paged { size, base, map } => {
                     body.push(2);
@@ -477,8 +584,8 @@ impl Root {
                     body.push(3);
                     put_varint(&mut body, *first);
                     put_varint(&mut body, entries.len() as u64);
-                    for n in entries {
-                        put_varint(&mut body, *n);
+                    for blob in entries {
+                        body.extend_from_slice(&blob.0);
                     }
                 }
             }
@@ -496,7 +603,6 @@ impl Root {
         let id = u64::from_le_bytes(*id);
         let mut r = Reading::new(rest, "root");
         let version = r.bounded(MAX_SEQUENCE)?;
-        let next_blob = r.bounded(MAX_SEQUENCE)?;
         let chunk_pages = r.bounded(MAX_CHUNK_PAGES)?;
         let fanout = r.bounded(MAX_FANOUT)?;
         if chunk_pages == 0 || fanout < 2 {
@@ -505,26 +611,8 @@ impl Root {
         let mut root = Root {
             id,
             version,
-            next_blob,
             ..Root::new(chunk_pages, fanout)
         };
-        let blob = |n: u64| {
-            Some(n)
-                .filter(|&n| n < next_blob)
-                .ok_or_else(|| invalid("root"))
-        };
-        let mut previous = 0u64;
-        for _ in 0..r.bounded(next_blob)? {
-            previous = blob(
-                previous
-                    .checked_add(r.varint()?)
-                    .ok_or_else(|| invalid("root"))?,
-            )?;
-            let since = version
-                .checked_sub(r.varint()?)
-                .ok_or_else(|| invalid("root"))?;
-            root.garbage.insert(previous, since);
-        }
         root.next_file = r.bounded(MAX_FILES.into())? as u32;
         let mut next = 0u32;
         for _ in 0..r.bounded(root.next_file.into())? {
@@ -540,7 +628,7 @@ impl Root {
             // A record's value, after its tag.
             let value = |r: &mut Reading, tag: u64| match tag {
                 0 => Ok(Value::Inline(Bytes::copy_from_slice(r.bytes()?))),
-                1 => Ok(Value::Blob(blob(r.varint()?)?)),
+                1 => Ok(Value::Blob(r.blob()?)),
                 _ => Err(invalid("root")),
             };
             let kind = match r.varint()? {
@@ -548,13 +636,13 @@ impl Root {
                 2 => {
                     let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
                     let base = r.varint()?.checked_sub(1);
-                    let map = Map::decode(&mut r, root.shape(size), next_blob)?;
+                    let map = Map::decode(&mut r, root.shape(size))?;
                     Kind::Paged { size, base, map }
                 }
                 3 => {
                     let first = r.bounded(MAX_SEQUENCE)?;
                     let entries = (0..r.bounded(MAX_LOG_ENTRIES)?)
-                        .map(|_| blob(r.varint()?))
+                        .map(|_| r.blob())
                         .collect::<io::Result<_>>()?;
                     Kind::Log { first, entries }
                 }
@@ -629,7 +717,7 @@ pub(crate) struct Image {
 type Fetch = Shared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>;
 /// A fetch held only by its readers: when all of them are dropped, so is
 /// the request.
-type Fetching = HashMap<u64, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>>;
+type Fetching = HashMap<BlobId, WeakShared<BoxFuture<'static, Result<Bytes, Arc<io::Error>>>>>;
 
 /// The committed view a session reads and extends.
 pub(crate) struct Snapshot {
@@ -646,17 +734,16 @@ pub(crate) struct Snapshot {
     bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace.
     pub(crate) unchanged: bool,
-    /// A reader's: it changes nothing in the cache.
+    /// A reader's: it changes nothing in the cache's knowledge of the
+    /// namespace, and neither flushes nor sweeps.
     reader: bool,
-    /// The next flush numbers its blobs from a random jump past the root's
-    /// next blob ([`KvStore::write_once_blobs`]): this writer has not
-    /// flushed yet.
-    jump: bool,
+    /// What the last sweep found unnamed (an owner's; a reader's is empty).
+    sweep: Arc<Sweep>,
     /// Chunk images decoded, by the blob that holds them: blobs never change,
     /// so every view of the state shares them.
-    images: Arc<Mutex<HashMap<u64, Arc<Image>>>>,
+    images: Arc<Mutex<HashMap<BlobId, Arc<Image>>>>,
     /// Map nodes decoded, by blob, shared the same way.
-    nodes: Arc<Mutex<HashMap<u64, Arc<Node>>>>,
+    nodes: Arc<Mutex<HashMap<BlobId, Arc<Node>>>>,
     fetching: Arc<Mutex<Fetching>>,
     readahead: Mutex<Readahead>,
 }
@@ -684,17 +771,26 @@ impl Readahead {
         self.last = Some((file, chunk + self.window));
         self.window
     }
+
+    /// A hit of chunk `chunk` of file `file`, decoded already: right after
+    /// the last chunk a miss fetched (equal chunks share a blob), it carries
+    /// a sequential run on.
+    fn hit(&mut self, file: u32, chunk: u64) {
+        if self.last == Some((file, chunk.wrapping_sub(1))) {
+            self.last = Some((file, chunk));
+        }
+    }
 }
 
-/// A flush being built: the next root, and the blobs it puts and frees.
+/// A flush being built: the next root, and the blobs it puts.
 struct Flush {
     root: Root,
-    /// Blobs to put, with the chunk images they hold.
-    fresh: Vec<(u64, Bytes, Option<Arc<Image>>)>,
-    /// Blobs the next root no longer names.
-    dead: Vec<u64>,
+    /// Blobs to put, each once, with the chunk images they hold.
+    fresh: Vec<(BlobId, Bytes, Option<Arc<Image>>)>,
+    /// The names in `fresh`.
+    named: BTreeSet<BlobId>,
     /// The map nodes it puts, decoded.
-    nodes: Vec<(u64, Arc<Node>)>,
+    nodes: Vec<(BlobId, Arc<Node>)>,
     /// Chunks given a new base in place of their old one.
     rebased: usize,
 }
@@ -706,7 +802,7 @@ impl Flush {
         Self {
             root,
             fresh: Vec::new(),
-            dead: Vec::new(),
+            named: BTreeSet::new(),
             nodes: Vec::new(),
             rebased: 0,
         }
@@ -728,24 +824,24 @@ impl Flush {
         id
     }
 
-    /// Put `frame`, which holds a chunk's `pages` if any, at the next blob
-    /// number: the number.
-    fn put(&mut self, frame: Bytes, pages: Option<Bytes>) -> u64 {
-        let n = self.root.next_blob;
-        self.root.next_blob += 1;
-        let stored = frame.len();
-        let image = pages.map(|pages| Arc::new(Image { pages, stored }));
-        self.fresh.push((n, frame, image));
-        n
+    /// Put `frame`, compressed `against` a reference and holding a chunk's
+    /// `pages` if any: its name.
+    fn put(&mut self, frame: Bytes, against: Against, pages: Option<Bytes>) -> BlobId {
+        let blob = BlobId::of(self.root.id, against, &frame);
+        if self.named.insert(blob) {
+            let stored = frame.len();
+            let image = pages.map(|pages| Arc::new(Image { pages, stored }));
+            self.fresh.push((blob, frame, image));
+        }
+        blob
     }
 
-    /// Put map node `node`, which [`Map::update`] numbered `n`.
-    fn put_node(&mut self, n: u64, node: Arc<Node>) -> io::Result<()> {
-        assert_eq!(n, self.root.next_blob, "map nodes are numbered in order");
-        self.root.next_blob += 1;
-        self.fresh.push((n, node.frame()?, None));
-        self.nodes.push((n, node));
-        Ok(())
+    /// Put map node `node`, which [`Map::update`] named `blob`.
+    fn put_node(&mut self, blob: BlobId, frame: Bytes, node: Arc<Node>) {
+        if self.named.insert(blob) {
+            self.fresh.push((blob, frame, None));
+            self.nodes.push((blob, node));
+        }
     }
 }
 
@@ -780,7 +876,15 @@ impl Snapshot {
                 false => Ok(()),
             }
         };
-        let (root_bytes, ()) = futures::try_join!(store.get(ROOT_KEY), settle)?;
+        // An owner's sweep, beside its root.
+        let sweep = async {
+            match reader {
+                true => Ok(None),
+                false => store.get(SWEEP_KEY).await,
+            }
+        };
+        let (root_bytes, sweep, ()) = futures::try_join!(store.get(ROOT_KEY), sweep, settle)?;
+        let sweep = sweep.as_deref().map(Sweep::decode).transpose()?;
         if let (Some(owner), Some(unknown)) = (owner, unsettled) {
             owner.settled(unknown);
         }
@@ -794,7 +898,6 @@ impl Snapshot {
             }
             None => Root::new(options.chunk_pages, options.fanout),
         };
-        let write_once = store.write_once_blobs();
         let mut snapshot = Self {
             store,
             options: options.clone(),
@@ -806,7 +909,7 @@ impl Snapshot {
             bases: BTreeMap::new(),
             unchanged: false,
             reader,
-            jump: !reader && write_once,
+            sweep: Arc::new(sweep.unwrap_or_default()),
             images: Arc::default(),
             nodes: Arc::default(),
             fetching: Arc::default(),
@@ -821,8 +924,8 @@ impl Snapshot {
                 let mut small = Vec::new();
                 for (&id, entry) in &snapshot.root.directory {
                     match &entry.kind {
-                        Kind::Record(Value::Blob(n)) => {
-                            wanted.insert(*n);
+                        Kind::Record(Value::Blob(blob)) => {
+                            wanted.insert(*blob);
                         }
                         Kind::Log { entries, .. } => wanted.extend(entries),
                         Kind::Paged {
@@ -840,9 +943,9 @@ impl Snapshot {
                         _ => {}
                     }
                 }
-                let wanted: Vec<u64> = wanted.into_iter().collect();
+                let wanted: Vec<BlobId> = wanted.into_iter().collect();
                 let blobs = snapshot.blobs(&wanted).await?;
-                let fetched: HashMap<u64, Bytes> = wanted.into_iter().zip(blobs).collect();
+                let fetched: HashMap<BlobId, Bytes> = wanted.into_iter().zip(blobs).collect();
                 Ok::<_, io::Error>((small, fetched))
             };
             futures::try_join!(small, snapshot.prefetch_maps())?.0
@@ -852,8 +955,8 @@ impl Snapshot {
         }
         let value = |value: &Value| match value {
             Value::Inline(bytes) => Ok(bytes.clone()),
-            Value::Blob(n) => {
-                zstd::decompress_sized(&fetched[n], &[], MAX_RECORD_BYTES).map(Bytes::from)
+            Value::Blob(blob) => {
+                zstd::decompress_sized(&fetched[blob], &[], MAX_RECORD_BYTES).map(Bytes::from)
             }
         };
         for entry in snapshot.root.directory.values() {
@@ -864,7 +967,7 @@ impl Snapshot {
                 }
                 Kind::Log { first, entries } => {
                     let values = (entries.iter())
-                        .map(|&n| value(&Value::Blob(n)))
+                        .map(|&blob| value(&Value::Blob(blob)))
                         .collect::<io::Result<_>>()?;
                     let first = *first;
                     snapshot.logs.insert(name, Entries { first, values });
@@ -946,12 +1049,12 @@ impl Snapshot {
     /// lacked, fetched together (a level of the map a round trip), until it
     /// lacks none.
     async fn with_nodes<T>(&self, mut walk: impl FnMut(&Nodes) -> T) -> io::Result<T> {
-        let mut fetched: HashMap<u64, Arc<Node>> = HashMap::new();
+        let mut fetched: HashMap<BlobId, Arc<Node>> = HashMap::new();
         loop {
             let (out, missing) = {
-                let get = |n: u64| {
-                    let kept = || self.nodes.lock().unwrap().get(&n).cloned();
-                    fetched.get(&n).cloned().or_else(kept)
+                let get = |blob: BlobId| {
+                    let kept = || self.nodes.lock().unwrap().get(&blob).cloned();
+                    fetched.get(&blob).cloned().or_else(kept)
                 };
                 let nodes = Nodes::new(&get);
                 (walk(&nodes), nodes.missing())
@@ -959,7 +1062,7 @@ impl Snapshot {
             if missing.is_empty() {
                 return Ok(out);
             }
-            let blobs: Vec<u64> = missing.iter().map(|need| need.blob).collect();
+            let blobs: Vec<BlobId> = missing.iter().map(|need| need.blob).collect();
             for (need, frame) in missing.into_iter().zip(self.blobs(&blobs).await?) {
                 let node = Arc::new(Node::from_frame(&frame, need)?);
                 fetched.insert(need.blob, node.clone());
@@ -1025,6 +1128,7 @@ impl Snapshot {
     async fn image(&self, id: u32, chunk: u64, stored: Chunk) -> io::Result<Arc<Image>> {
         let current = stored.current().expect("a stored chunk");
         if let Some(image) = self.images.lock().unwrap().get(&current) {
+            self.readahead.lock().unwrap().hit(id, chunk);
             return Ok(image.clone());
         }
         let ahead = self.readahead.lock().unwrap().miss(id, chunk);
@@ -1044,10 +1148,10 @@ impl Snapshot {
         if wanted.is_empty() {
             return Ok(Vec::new());
         }
-        let blobs: Vec<u64> = (wanted.iter())
+        let blobs: Vec<BlobId> = (wanted.iter())
             .flat_map(|(_, stored)| stored.blobs())
             .collect();
-        let fetched: HashMap<u64, Bytes> = blobs
+        let fetched: HashMap<BlobId, Bytes> = blobs
             .iter()
             .copied()
             .zip(self.blobs(&blobs).await?)
@@ -1057,12 +1161,12 @@ impl Snapshot {
             .collect()
     }
 
-    /// The base blob `n` of a chunk, decoded.
-    async fn base_image(&self, id: u32, chunk: u64, n: u64) -> io::Result<Arc<Image>> {
-        if let Some(image) = self.images.lock().unwrap().get(&n) {
+    /// The base blob `blob` of a chunk, decoded.
+    async fn base_image(&self, id: u32, chunk: u64, blob: BlobId) -> io::Result<Arc<Image>> {
+        if let Some(image) = self.images.lock().unwrap().get(&blob) {
             return Ok(image.clone());
         }
-        let frame = self.blob(n).await?;
+        let frame = self.blob(blob).await?;
         let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
         decode_chunk(&frame, &prefix, self.root.chunk_bytes())
     }
@@ -1070,7 +1174,7 @@ impl Snapshot {
     fn has(&self, chunk: Chunk) -> bool {
         chunk
             .current()
-            .is_none_or(|n| self.images.lock().unwrap().contains_key(&n))
+            .is_none_or(|blob| self.images.lock().unwrap().contains_key(&blob))
     }
 
     /// Decode chunk `chunk` of the file `id`, `stored` in blobs that
@@ -1081,19 +1185,19 @@ impl Snapshot {
         id: u32,
         chunk: u64,
         stored: Chunk,
-        fetched: &HashMap<u64, Bytes>,
+        fetched: &HashMap<BlobId, Bytes>,
     ) -> io::Result<Arc<Image>> {
         let size = self.root.chunk_bytes();
-        let decode = |n: u64, prefix: &[u8]| decode_chunk(&fetched[&n], prefix, size);
+        let decode = |blob: BlobId, prefix: &[u8]| decode_chunk(&fetched[&blob], prefix, size);
         let base = match stored.base {
-            Some(n) => {
+            Some(blob) => {
                 let prefix = reference(self.base_of(id)?, self.root.chunk_pages, chunk);
-                Some((n, decode(n, &prefix)?))
+                Some((blob, decode(blob, &prefix)?))
             }
             None => None,
         };
         let delta = match (stored.delta, &base) {
-            (Some(n), Some((_, base))) => Some((n, decode(n, &base.pages)?)),
+            (Some(blob), Some((_, base))) => Some((blob, decode(blob, &base.pages)?)),
             (Some(_), None) => return Err(invalid("chunk: a delta without a base")),
             (None, _) => None,
         };
@@ -1109,67 +1213,66 @@ impl Snapshot {
 
     /// Keep decoded images, dropping them all first once there are
     /// [`KEPT_IMAGES`].
-    fn keep(&self, decoded: impl IntoIterator<Item = (u64, Arc<Image>)>) {
+    fn keep(&self, decoded: impl IntoIterator<Item = (BlobId, Arc<Image>)>) {
         let mut images = self.images.lock().unwrap();
-        for (n, image) in decoded {
+        for (blob, image) in decoded {
             if images.len() >= KEPT_IMAGES {
                 images.clear();
             }
-            images.insert(n, image);
+            images.insert(blob, image);
         }
     }
 
     /// Keep decoded map nodes, dropping them all first once there are
     /// [`KEPT_NODES`].
-    fn keep_nodes(&self, decoded: impl IntoIterator<Item = (u64, Arc<Node>)>) {
+    fn keep_nodes(&self, decoded: impl IntoIterator<Item = (BlobId, Arc<Node>)>) {
         let mut nodes = self.nodes.lock().unwrap();
-        for (n, node) in decoded {
+        for (blob, node) in decoded {
             if nodes.len() >= KEPT_NODES {
                 nodes.clear();
             }
-            nodes.insert(n, node);
+            nodes.insert(blob, node);
         }
     }
 
-    /// Blobs `wanted`, in order: from the cache, or the store, together.
-    async fn blobs(&self, wanted: &[u64]) -> io::Result<Vec<Bytes>> {
-        try_join_all(wanted.iter().map(|&n| self.blob(n))).await
+    /// Blobs `wanted`, in order: from the cache, or the store, together,
+    /// each once (equal chunks share a name).
+    async fn blobs(&self, wanted: &[BlobId]) -> io::Result<Vec<Bytes>> {
+        let unique: BTreeSet<BlobId> = wanted.iter().copied().collect();
+        let fetched = try_join_all(unique.iter().map(|&blob| self.blob(blob))).await?;
+        let fetched: HashMap<BlobId, Bytes> = unique.into_iter().zip(fetched).collect();
+        Ok(wanted.iter().map(|blob| fetched[blob].clone()).collect())
     }
 
-    async fn blob(&self, n: u64) -> io::Result<Bytes> {
+    async fn blob(&self, blob: BlobId) -> io::Result<Bytes> {
         let cache = self.cache.clone();
         if let Some(cache) = &cache
-            && let Some(value) = cache.get(self.root.id, n).await
+            && let Some(value) = cache.get(blob).await
         {
             return Ok(value);
         }
-        // A reader's root may be a write not yet durable (as the store shows
-        // it), whose blobs a crash could lose and the next flush reuse: only
-        // the owner, whose roots are durable, caches what it fetches.
-        let cache = cache.filter(|_| !self.reader);
-        let database = self.root.id;
         let fetch = {
             let mut fetching = self.fetching.lock().unwrap();
-            if let Some(fetch) = fetching.get(&n).and_then(WeakShared::upgrade) {
+            if let Some(fetch) = fetching.get(&blob).and_then(WeakShared::upgrade) {
                 fetch
             } else {
                 let store = self.store.clone();
                 let fetch: Fetch = async move {
-                    let value = store.get(&blob_key(n)).await.map_err(Arc::new)?;
+                    let value = store.get(&blob_key(blob)).await.map_err(Arc::new)?;
                     let value = value.ok_or_else(|| {
                         Arc::new(io::Error::other(format!(
-                            "blob {n} is gone: the owner deleted it since this state opened"
+                            "blob {blob} is gone: the owner deleted it since this state opened"
                         )))
                     })?;
-                    // A durable root names it: it never changes now.
+                    // What a name holds never changes.
                     if let Some(cache) = cache {
-                        cache.insert(database, n, value.clone());
+                        cache.insert(blob, value.clone());
                     }
                     Ok(value)
                 }
                 .boxed()
                 .shared();
-                fetching.insert(n, fetch.downgrade().expect("not polled yet"));
+                fetching.insert(blob, fetch.downgrade().expect("not polled yet"));
                 fetch
             }
         };
@@ -1177,10 +1280,10 @@ impl Snapshot {
         // Gone once no read awaits it, unless a newer fetch took its place.
         let mut fetching = self.fetching.lock().unwrap();
         if fetching
-            .get(&n)
+            .get(&blob)
             .is_some_and(|fetch| fetch.upgrade().is_none())
         {
-            fetching.remove(&n);
+            fetching.remove(&blob);
         }
         drop(fetching);
         value.map_err(|error| io::Error::new(error.kind(), error.to_string()))
@@ -1320,11 +1423,6 @@ impl Snapshot {
             ));
         }
         let mut flush = Flush::new(&self.root);
-        if self.jump {
-            flush.root.next_blob = (flush.root.next_blob.checked_add(blob_jump()))
-                .filter(|&next| next < MAX_SEQUENCE - MAX_JUMP)
-                .ok_or_else(|| io::Error::other("the blob numbers are spent"))?;
-        }
         for (name, written) in &writes {
             self.commit_file(&mut flush, name, written).await?;
         }
@@ -1390,12 +1488,12 @@ impl Snapshot {
         else {
             unreachable!("checked: a paged file");
         };
-        let (map, next) = (map.clone(), flush.root.next_blob);
-        let update = (self.with_nodes(|nodes| map.update(old, new, &changes, nodes, next))).await?;
-        for (n, node) in update.fresh {
-            flush.put_node(n, node)?;
+        let (map, database) = (map.clone(), flush.root.id);
+        let update =
+            (self.with_nodes(|nodes| map.update(old, new, &changes, nodes, database))).await?;
+        for (blob, frame, node) in update.fresh {
+            flush.put_node(blob, frame, node);
         }
-        flush.dead.extend(update.dead);
         let Some(Entry {
             kind:
                 Kind::Paged {
@@ -1428,7 +1526,7 @@ impl Snapshot {
         let (base_image, now) = match stored.current() {
             Some(_) if !file.missing => {
                 let base_image = match stored.base {
-                    Some(n) => Some(self.base_image(file.id, chunk, n).await?),
+                    Some(blob) => Some((blob, self.base_image(file.id, chunk, blob).await?)),
                     None => None,
                 };
                 (
@@ -1451,28 +1549,34 @@ impl Snapshot {
         if pages == now && stored.current().is_some() && !file.missing {
             return Ok(stored);
         }
-        flush.dead.extend(stored.delta);
         if pages == hole || file.missing {
-            flush.dead.extend(stored.base);
             return Ok(Chunk::default());
         }
         let pages = Bytes::from(pages);
-        if let Some(base) = &base_image {
+        if let Some((blob, base)) = &base_image {
             let delta = zstd::compress(&pages, &base.pages, Bytes::copy_from_slice)?;
             if delta.len() as f64 <= self.options.rebase_ratio * base.stored as f64 {
                 return Ok(Chunk {
                     base: stored.base,
-                    delta: Some(flush.put(delta, Some(pages))),
+                    delta: Some(flush.put(delta, Against::Blob(*blob), Some(pages))),
                 });
             }
         }
         // Against its file's base pages, if it has them.
-        let prefix = if file.base.is_some() { &hole[..] } else { &[] };
+        let (prefix, against) = match file.base {
+            Some(base) => (
+                &hole[..],
+                Against::Base {
+                    base: base.id(),
+                    chunk,
+                },
+            ),
+            None => (&[][..], Against::Nothing),
+        };
         let frame = zstd::compress(&pages, prefix, Bytes::copy_from_slice)?;
         flush.rebased += usize::from(stored.base.is_some());
-        flush.dead.extend(stored.base);
         Ok(Chunk {
-            base: Some(flush.put(frame, Some(pages))),
+            base: Some(flush.put(frame, against, Some(pages))),
             delta: None,
         })
     }
@@ -1483,9 +1587,6 @@ impl Snapshot {
         let mut after = self.records.clone();
         for (name, value) in records {
             let id = flush.file(&name, || Kind::Record(Value::Inline(Bytes::new())));
-            if let Kind::Record(Value::Blob(n)) = flush.root.directory[&id].kind {
-                flush.dead.push(n);
-            }
             let stored = self.store_value(flush, &value)?;
             flush.root.directory.get_mut(&id).expect("allocated").kind = Kind::Record(stored);
             after.insert(name, value);
@@ -1523,7 +1624,7 @@ impl Snapshot {
             held.first += dropped as u64;
             // Those appended and dropped at once were never stored.
             let stored_dropped = dropped.min(entries.len());
-            flush.dead.extend(entries.drain(..stored_dropped));
+            entries.drain(..stored_dropped);
             entries.extend(fresh);
             *first = held.first;
         }
@@ -1538,8 +1639,8 @@ impl Snapshot {
         }
     }
 
-    /// Write `flush`: delete the garbage past its grace, put the blobs, then
-    /// the root that names them; then one sync.
+    /// Write `flush`: put its blobs; the sweep without them, if it had any
+    /// as candidates; then the root that names them; then one sync.
     async fn write(
         &self,
         flush: Flush,
@@ -1547,59 +1648,39 @@ impl Snapshot {
         logs: Logs,
     ) -> io::Result<(FlushReport, Self)> {
         let Flush {
-            mut root,
+            root,
             fresh,
-            dead,
+            named,
             nodes,
             rebased,
         } = flush;
-        let cache = self.cache.as_ref();
-        if cache.is_some_and(|cache| !cache.claim(self.version())) {
-            return refuse("another state flushed since this one opened; reopen".into());
-        }
-        let version = root.version;
-        // The garbage old enough that no reader holds a root naming it.
-        let grace = self.options.garbage_after.max(1);
-        let (old, kept): (Vec<_>, Vec<_>) =
-            (root.garbage.iter()).partition(|&(_, &since)| since + grace <= version);
-        let old: Vec<u64> = old.into_iter().map(|(&n, _)| n).collect();
-        root.garbage = kept.into_iter().map(|(&n, &since)| (n, since)).collect();
-        root.garbage.extend(dead.into_iter().map(|n| (n, version)));
-        let write = |key: &str, value: Option<Bytes>| {
-            let queued = match value {
-                Some(value) => self.store.put(key, value),
-                None => self.store.delete(key),
-            };
-            queued.map_err(|error| self.failed(error))
+        // Unnamed at the last sweep, named again now: no sweep deletes them.
+        let sweep = match self.sweep.candidates.is_disjoint(&named) {
+            true => None,
+            false => Some(Sweep {
+                marked: self.sweep.marked,
+                candidates: &self.sweep.candidates - &named,
+            }),
         };
-        for n in old {
-            write(&blob_key(n), None)?;
-        }
-        let mut blob_bytes = 0;
-        for (n, value, _) in &fresh {
-            blob_bytes += value.len();
-            write(&blob_key(*n), Some(value.clone()))?;
-        }
-        let bytes = root.encode();
-        let root_bytes = bytes.len();
-        write(ROOT_KEY, Some(bytes.clone()))?;
-        if let Err(error) = self.store.sync().await {
-            return Err(self.failed(error));
-        }
-        if let Some(cache) = cache {
-            for (n, value, _) in &fresh {
-                cache.insert(root.id, *n, value.clone());
+        let blob_bytes = fresh.iter().map(|(_, value, _)| value.len()).sum();
+        let puts = (fresh.iter()).map(|(blob, value, _)| (*blob, Some(value.clone())));
+        let bytes = self.store_root(puts, sweep.as_ref(), &root).await?;
+        if let Some(cache) = &self.cache {
+            for (blob, value, _) in &fresh {
+                cache.insert(*blob, value.clone());
             }
-            cache.flushed(bytes.clone(), version);
         }
+        let root_bytes = bytes.len();
         let mut after = self.continued(Arc::new(root), Some(bytes));
-        after.jump = false;
+        if let Some(sweep) = sweep {
+            after.sweep = Arc::new(sweep);
+        }
         after.records = records;
         after.logs = logs;
         after.keep(
             fresh
                 .into_iter()
-                .filter_map(|(n, _, image)| Some((n, image?))),
+                .filter_map(|(blob, _, image)| Some((blob, image?))),
         );
         after.keep_nodes(nodes);
         let report = FlushReport {
@@ -1608,6 +1689,136 @@ impl Snapshot {
             rebased,
         };
         Ok((report, after))
+    }
+
+    /// A sweep's first half, which writes nothing: list the blobs, mark
+    /// those the root names, and decide what to delete (see the module
+    /// documentation).
+    pub(crate) async fn mark(&self) -> io::Result<Marked> {
+        let listed: BTreeSet<BlobId> = (self.store.list(BLOB_PREFIX).await?.iter())
+            .filter_map(|key| parse_blob_key(key))
+            .collect();
+        let named = self.named().await?;
+        let unnamed: BTreeSet<BlobId> = listed.difference(&named).copied().collect();
+        let mut collected = Collected {
+            listed: listed.len(),
+            named: named.len(),
+            ..Collected::default()
+        };
+        let version = self.root.version + 1;
+        let held = &self.sweep.candidates;
+        // A sweep whose root a crash lost may have marked this version.
+        let early = version.saturating_sub(self.sweep.marked) < self.options.garbage_after.max(1);
+        if (!held.is_empty() && early) || (held.is_empty() && unnamed.is_empty()) {
+            collected.skipped = true;
+            collected.candidates = held.len();
+            return Ok(Marked {
+                collected,
+                deleted: BTreeSet::new(),
+                sweep: None,
+            });
+        }
+        let deleted: BTreeSet<BlobId> = held.intersection(&unnamed).copied().collect();
+        let sweep = Sweep {
+            marked: version,
+            candidates: &unnamed - &deleted,
+        };
+        (collected.deleted, collected.candidates) = (deleted.len(), sweep.candidates.len());
+        Ok(Marked {
+            collected,
+            deleted,
+            sweep: Some(sweep),
+        })
+    }
+
+    /// A sweep's second half: delete what `marked` says, put the sweep, and
+    /// the root again, at the next version; then one sync.
+    pub(crate) async fn sweep(&self, marked: Marked) -> io::Result<(Collected, Self)> {
+        let Marked {
+            collected,
+            deleted,
+            sweep,
+        } = marked;
+        let Some(sweep) = sweep else {
+            let root_bytes = self.root_bytes.clone();
+            return Ok((collected, self.continued(self.root.clone(), root_bytes)));
+        };
+        let mut root = (*self.root).clone();
+        root.version = sweep.marked;
+        let deletes = deleted.into_iter().map(|blob| (blob, None));
+        let bytes = self.store_root(deletes, Some(&sweep), &root).await?;
+        let mut after = self.continued(Arc::new(root), Some(bytes));
+        after.sweep = Arc::new(sweep);
+        Ok((collected, after))
+    }
+
+    /// Every blob the root names: its large records, its log entries, and
+    /// its files' map nodes and chunks.
+    async fn named(&self) -> io::Result<BTreeSet<BlobId>> {
+        let mut named = BTreeSet::new();
+        let mut maps = Vec::new();
+        for (&id, entry) in &self.root.directory {
+            match &entry.kind {
+                Kind::Record(Value::Blob(blob)) => {
+                    named.insert(*blob);
+                }
+                Kind::Record(Value::Inline(_)) => {}
+                Kind::Log { entries, .. } => named.extend(entries),
+                Kind::Paged { .. } => maps.extend(self.map(id)),
+            }
+        }
+        let met = self
+            .with_nodes(|nodes| {
+                let mut met = BTreeSet::new();
+                for &(map, shape) in &maps {
+                    map.walk(shape, nodes, &mut |visit| match visit {
+                        Visit::Node(blob) => {
+                            met.insert(blob);
+                        }
+                        Visit::Chunk(_, chunk) => met.extend(chunk.blobs()),
+                    });
+                }
+                met
+            })
+            .await?;
+        named.extend(met);
+        Ok(named)
+    }
+
+    /// Put `root`, after `blobs` (each put, or deleted for `None`) and
+    /// `sweep`, if given; then one sync. The root's bytes.
+    async fn store_root(
+        &self,
+        blobs: impl IntoIterator<Item = (BlobId, Option<Bytes>)>,
+        sweep: Option<&Sweep>,
+        root: &Root,
+    ) -> io::Result<Bytes> {
+        let cache = self.cache.as_ref();
+        if cache.is_some_and(|cache| !cache.claim(self.version())) {
+            return refuse("another state flushed since this one opened; reopen".into());
+        }
+        let write = |key: &str, value: Option<Bytes>| {
+            let queued = match value {
+                Some(value) => self.store.put(key, value),
+                None => self.store.delete(key),
+            };
+            queued.map_err(|error| self.failed(error))
+        };
+        for (blob, value) in blobs {
+            write(&blob_key(blob), value)?;
+        }
+        if let Some(sweep) = sweep {
+            write(SWEEP_KEY, Some(sweep.encode()))?;
+        }
+        let bytes = root.encode();
+        write(ROOT_KEY, Some(bytes.clone()))?;
+        if let Err(error) = self.store.sync().await {
+            return Err(self.failed(error));
+        }
+        if let Some(cache) = cache {
+            cache.flushed(bytes.clone(), root.version);
+        }
+        Ok(bytes)
     }
 
     fn failed(&self, error: io::Error) -> io::Error {
@@ -1629,7 +1840,7 @@ impl Snapshot {
             bases: self.bases.clone(),
             unchanged: false,
             reader: self.reader,
-            jump: self.jump,
+            sweep: self.sweep.clone(),
             images: self.images.clone(),
             nodes: self.nodes.clone(),
             fetching: self.fetching.clone(),

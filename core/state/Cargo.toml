@@ -18,6 +18,8 @@ bench = false
 [dependencies]
 futures = "0.3"
 bytes = "1.10"
+# A blob's name: the hash of its database and its frame.
+blake3 = "1.8"
 # Blobs: zstd frames, a delta against its chunk's base as the reference prefix.
 zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
 # Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line

@@ -1,10 +1,11 @@
 //! A paged file's chunk map: a copy-on-write radix tree over its chunk
 //! numbers, like ZFS's indirect blocks. Its top node is in the root; the
-//! nodes below it are blobs, written once, as chunks are.
+//! nodes below it are blobs, named by their hash, as chunks are: a Merkle
+//! tree, whose nodes a flush hashes from the leaves up.
 //!
 //! A node holds up to `fanout` entries: a leaf, the [`Chunk`]s of
-//! consecutive chunk numbers; an inner node, the blob numbers of the nodes
-//! below it, `None` for a subtree of holes. A file of at most `fanout` chunks,
+//! consecutive chunk numbers; an inner node, the names of the nodes below
+//! it, `None` for a subtree of holes. A file of at most `fanout` chunks,
 //! as most are, is a leaf in the root: nothing more to read or write. Each
 //! level more multiplies what the map holds by `fanout`, and costs a cold
 //! read a round trip, and a flush a node on each path it changes.
@@ -12,10 +13,8 @@
 //! A node's place is counted from the leaves: level `k`, index `i` covers
 //! `fanout^(k+1)` chunks from `i * fanout^(k+1)` on, however high the tree,
 //! so a flush that grows or shrinks it keeps every subtree it does not
-//! change. Nodes are encoded as the root encodes chunks (each blob number a
-//! difference from the one before), and zstd folds runs of them, so a file
-//! written in order maps in a few bytes, as an extent map would.
-use crate::store::{Chunk, Reading, get_ref, put_ref, put_varint};
+//! change.
+use crate::store::{Against, BlobId, Chunk, Reading, get_ref, put_ref, put_varint};
 use crate::zstd;
 use bytes::Bytes;
 use std::{cell::RefCell, collections::BTreeMap, io, sync::Arc};
@@ -78,7 +77,7 @@ pub(crate) enum Node {
     /// The chunks of consecutive chunk numbers.
     Leaf(Vec<Chunk>),
     /// The blobs of the nodes below; `None` for a subtree of holes.
-    Inner(Vec<Option<u64>>),
+    Inner(Vec<Option<BlobId>>),
 }
 
 impl Node {
@@ -99,56 +98,49 @@ impl Node {
     fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Node::Leaf(chunks) => {
-                let (mut bases, mut deltas) = (0, 0);
                 for chunk in chunks {
-                    put_ref(out, &mut bases, chunk.base);
-                    put_ref(out, &mut deltas, chunk.delta);
+                    put_ref(out, chunk.base);
+                    put_ref(out, chunk.delta);
                 }
             }
             Node::Inner(children) => {
-                let mut previous = 0;
                 for &child in children {
-                    put_ref(out, &mut previous, child);
+                    put_ref(out, child);
                 }
             }
         }
     }
 
-    /// A node of `slots` entries, naming only blobs below `bound`.
-    fn decode(r: &mut Reading, leaf: bool, slots: u64, bound: u64) -> io::Result<Self> {
-        let mut previous = [0; 2];
-        let mut next = |r: &mut Reading, stream: usize| match get_ref(r, &mut previous[stream])? {
-            Some(n) if n >= bound => Err(r.invalid()),
-            n => Ok(n),
-        };
+    /// A node of `slots` entries.
+    fn decode(r: &mut Reading, leaf: bool, slots: u64) -> io::Result<Self> {
         Ok(match leaf {
             true => Node::Leaf(
                 (0..slots)
                     .map(|_| {
-                        let base = next(r, 0)?;
-                        let delta = next(r, 1)?;
+                        let base = get_ref(r)?;
+                        let delta = get_ref(r)?;
                         Ok(Chunk { base, delta })
                     })
                     .collect::<io::Result<_>>()?,
             ),
-            false => Node::Inner((0..slots).map(|_| next(r, 0)).collect::<io::Result<_>>()?),
+            false => Node::Inner((0..slots).map(|_| get_ref(r)).collect::<io::Result<_>>()?),
         })
     }
 
     /// The blob that holds it.
-    pub fn frame(&self) -> io::Result<Bytes> {
+    pub fn frame(&self) -> Bytes {
         let mut body = Vec::new();
         self.encode(&mut body);
-        zstd::compress(&body, &[], Bytes::copy_from_slice)
+        zstd::compress(&body, &[], Bytes::copy_from_slice).expect("compressing in memory")
     }
 
-    /// The node `frame` holds, as `need` describes it. It names only blobs
-    /// below its own: a node is put after what it names, so no map loops.
+    /// The node `frame` holds, as `need` describes it. A node names the
+    /// hashes of those below it, so no map loops.
     pub fn from_frame(frame: &[u8], need: Need) -> io::Result<Self> {
-        let max = need.slots as usize * 2 * 10;
+        let max = need.slots as usize * 2 * 17;
         let body = zstd::decompress_sized(frame, &[], max)?;
         let mut r = Reading::new(&body, "map node");
-        let node = Node::decode(&mut r, need.leaf, need.slots, need.blob)?;
+        let node = Node::decode(&mut r, need.leaf, need.slots)?;
         r.end()?;
         Ok(node)
     }
@@ -157,7 +149,7 @@ impl Node {
 /// A node blob a walk needs, and its place's shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Need {
-    pub blob: u64,
+    pub blob: BlobId,
     pub leaf: bool,
     pub slots: u64,
 }
@@ -166,12 +158,12 @@ pub(crate) struct Need {
 /// is listed as missing: the caller fetches them and walks again, a level
 /// further each time.
 pub(crate) struct Nodes<'a> {
-    get: &'a dyn Fn(u64) -> Option<Arc<Node>>,
+    get: &'a dyn Fn(BlobId) -> Option<Arc<Node>>,
     missing: RefCell<Vec<Need>>,
 }
 
 impl<'a> Nodes<'a> {
-    pub fn new(get: &'a dyn Fn(u64) -> Option<Arc<Node>>) -> Self {
+    pub fn new(get: &'a dyn Fn(BlobId) -> Option<Arc<Node>>) -> Self {
         Self {
             get,
             missing: RefCell::default(),
@@ -197,7 +189,7 @@ impl<'a> Nodes<'a> {
 /// What a walk of a map meets: a node blob, or a stored chunk and its
 /// number.
 pub(crate) enum Visit {
-    Node(u64),
+    Node(BlobId),
     Chunk(u64, Chunk),
 }
 
@@ -222,14 +214,14 @@ impl Map {
         self.node.encode(out);
     }
 
-    /// A map of `shape`, naming only blobs below `bound`.
-    pub fn decode(r: &mut Reading, shape: Shape, bound: u64) -> io::Result<Self> {
+    /// A map of `shape`.
+    pub fn decode(r: &mut Reading, shape: Shape) -> io::Result<Self> {
         let height = shape.height();
         if r.varint()? != u64::from(height) {
             return Err(r.invalid());
         }
         let slots = shape.slots(height - 1, 0);
-        let node = Node::decode(r, height == 1, slots, bound)?;
+        let node = Node::decode(r, height == 1, slots)?;
         Ok(Self {
             height,
             node: Arc::new(node),
@@ -270,15 +262,15 @@ impl Map {
 
     /// This map of `old` shape, as one of `new` shape with the chunks
     /// `changes` sets (below `new.count`): the nodes on their paths, and
-    /// across the old and new ends, rewritten as blobs numbered from `next`
-    /// on; those past the new end dropped; the others kept.
+    /// across the old and new ends, rewritten as blobs of `database`, from
+    /// the leaves up; those past the new end dropped; the others kept.
     pub fn update(
         &self,
         old: Shape,
         new: Shape,
         changes: &BTreeMap<u64, Chunk>,
         nodes: &Nodes,
-        next: u64,
+        database: u64,
     ) -> Update {
         let mut rebuild = Rebuild {
             held: self,
@@ -286,34 +278,17 @@ impl Map {
             new,
             changes,
             nodes,
-            next,
+            database,
             fresh: Vec::new(),
-            dead: Vec::new(),
         };
         let top = new.height() - 1;
         let node = rebuild.node(top, 0);
-        // A shorter map: the old top's place is in the root now, and the
-        // nodes above it hold only what is past the end.
-        if top < self.top() {
-            rebuild.dead.extend(rebuild.held_blob(top, 0));
-        }
-        for k in top + 1..self.height {
-            rebuild.dead.extend(rebuild.held_blob(k, 0));
-            if let Some(Node::Inner(children)) = rebuild.held_node(k, 0).as_deref() {
-                for (slot, child) in children.iter().enumerate().skip(1) {
-                    if let Some(blob) = *child {
-                        rebuild.drop(k - 1, slot as u64, blob);
-                    }
-                }
-            }
-        }
         Update {
             map: Map {
                 height: top + 1,
                 node,
             },
             fresh: rebuild.fresh,
-            dead: rebuild.dead,
         }
     }
 }
@@ -347,10 +322,8 @@ fn walk(node: &Node, k: u32, i: u64, shape: Shape, nodes: &Nodes, visit: &mut dy
 /// A map a flush made.
 pub(crate) struct Update {
     pub map: Map,
-    /// The nodes to put, with their blob numbers, in order.
-    pub fresh: Vec<(u64, Arc<Node>)>,
-    /// The blobs the old map named and this one does not.
-    pub dead: Vec<u64>,
+    /// The nodes to put: their names, frames and nodes, from the leaves up.
+    pub fresh: Vec<(BlobId, Bytes, Arc<Node>)>,
 }
 
 /// [`Map::update`] at work.
@@ -360,9 +333,8 @@ struct Rebuild<'a> {
     new: Shape,
     changes: &'a BTreeMap<u64, Chunk>,
     nodes: &'a Nodes<'a>,
-    next: u64,
-    fresh: Vec<(u64, Arc<Node>)>,
-    dead: Vec<u64>,
+    database: u64,
+    fresh: Vec<(BlobId, Bytes, Arc<Node>)>,
 }
 
 impl Rebuild<'_> {
@@ -381,7 +353,7 @@ impl Rebuild<'_> {
 
     /// The blob of the old map's node at level `k`, index `i`, if one
     /// holds it (the top is in the root).
-    fn held_blob(&self, k: u32, i: u64) -> Option<u64> {
+    fn held_blob(&self, k: u32, i: u64) -> Option<BlobId> {
         if k >= self.held.top() {
             return None;
         }
@@ -416,9 +388,6 @@ impl Rebuild<'_> {
                 Some(Node::Leaf(chunks)) => &chunks[..],
                 _ => &[],
             };
-            for chunk in held.iter().skip(slots as usize) {
-                self.dead.extend(chunk.blobs());
-            }
             Node::Leaf(
                 (0..slots)
                     .map(|slot| match self.changes.get(&(first + slot)) {
@@ -432,11 +401,6 @@ impl Rebuild<'_> {
                 Some(Node::Inner(children)) => &children[..],
                 _ => &[],
             };
-            for (slot, child) in held.iter().enumerate().skip(slots as usize) {
-                if let Some(blob) = *child {
-                    self.drop(k - 1, first + slot as u64, blob);
-                }
-            }
             Node::Inner(
                 (0..slots)
                     .map(|slot| match self.changes(k - 1, first + slot) {
@@ -450,38 +414,16 @@ impl Rebuild<'_> {
     }
 
     /// The node at level `k`, index `i`, below the top, which changes: a
-    /// new blob, or none if it holds only holes. The old one's blob dies.
-    fn child(&mut self, k: u32, i: u64) -> Option<u64> {
+    /// new blob, named by its hash, or none if it holds only holes.
+    fn child(&mut self, k: u32, i: u64) -> Option<BlobId> {
         let node = self.node(k, i);
-        self.dead.extend(self.held_blob(k, i));
         if node.is_holes() {
             return None;
         }
-        let blob = self.next;
-        self.next += 1;
-        self.fresh.push((blob, node));
+        let frame = node.frame();
+        let blob = BlobId::of(self.database, Against::Nothing, &frame);
+        self.fresh.push((blob, frame, node));
         Some(blob)
-    }
-
-    /// The old subtree at level `k`, index `i`, in `blob`, all of it past
-    /// the new end: every blob in it dies.
-    fn drop(&mut self, k: u32, i: u64, blob: u64) {
-        self.dead.push(blob);
-        let need = Need {
-            blob,
-            leaf: k == 0,
-            slots: self.old.slots(k, i),
-        };
-        match &*self.nodes.node(need) {
-            Node::Leaf(chunks) => self.dead.extend(chunks.iter().flat_map(|c| c.blobs())),
-            Node::Inner(children) => {
-                for (slot, child) in children.iter().enumerate() {
-                    if let Some(child) = *child {
-                        self.drop(k - 1, i * self.old.fanout + slot as u64, child);
-                    }
-                }
-            }
-        }
     }
 }
 

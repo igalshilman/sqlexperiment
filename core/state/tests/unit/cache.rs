@@ -1,6 +1,10 @@
 use super::*;
 use crate::simulation::{fresh_namespace_cache, shared_cache};
 
+fn blob(n: u8) -> BlobId {
+    BlobId([n; 16])
+}
+
 fn value(n: usize) -> Bytes {
     Bytes::from(vec![n as u8; n])
 }
@@ -9,14 +13,13 @@ fn value(n: usize) -> Bytes {
 fn namespaces_never_share_blobs() {
     futures::executor::block_on(async {
         let (a, b) = (fresh_namespace_cache(), fresh_namespace_cache());
-        a.insert(0, 1, value(4));
-        assert_eq!(a.get(0, 1).await, Some(value(4)));
-        assert_eq!(b.get(0, 1).await, None, "same number, other namespace");
-        assert_eq!(a.get(9, 1).await, None, "same number, other database");
+        a.insert(blob(1), value(4));
+        assert_eq!(a.get(blob(1)).await, Some(value(4)));
+        assert_eq!(b.get(blob(1)).await, None, "same name, other namespace");
         // A handle by the same key is the same namespace.
-        shared_cache().namespace("by-key").insert(0, 7, value(7));
+        shared_cache().namespace("by-key").insert(blob(7), value(7));
         assert_eq!(
-            shared_cache().namespace("by-key").get(0, 7).await,
+            shared_cache().namespace("by-key").get(blob(7)).await,
             Some(value(7))
         );
     })
@@ -34,14 +37,14 @@ fn another_root_forgets_the_flush_not_the_blobs() {
         assert!(cache.validate(None), "an absent root, as recorded");
         assert!(!cache.validate(Some(&root(1))), "not after another");
         cache.record(Some(root(1)), Some(3));
-        cache.insert(0, 1, value(4));
+        cache.insert(blob(1), value(4));
         assert!(cache.validate(Some(&root(1))));
         assert_eq!(cache.committed(), Some(3));
 
         // Another writer flushed: the blobs stay.
         assert!(!cache.validate(Some(&root(2))));
         assert_eq!(cache.committed(), None);
-        assert_eq!(cache.get(0, 1).await, Some(value(4)));
+        assert_eq!(cache.get(blob(1)).await, Some(value(4)));
 
         // A flush with an unknown outcome forgets the root, and makes the
         // next open sync.
@@ -96,8 +99,8 @@ fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
         let buffer = Bytes::from(vec![9; 1 << 20]);
         let inside = |value: &Bytes| buffer.as_ptr_range().contains(&value.as_ptr());
         let slice = buffer.slice(4096..8192);
-        cache.insert(0, 1, slice.clone());
-        let cached = cache.get(0, 1).await.expect("cached");
+        cache.insert(blob(1), slice.clone());
+        let cached = cache.get(blob(1)).await.expect("cached");
         assert_eq!(cached, slice);
         assert!(!inside(&cached));
         cache.record(Some(slice.clone()), None);

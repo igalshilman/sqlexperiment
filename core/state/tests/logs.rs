@@ -95,10 +95,10 @@ fn a_truncation_drops_a_prefix_the_mutations_appends_included() -> Result<()> {
     })
 }
 
-/// A truncated entry's blob is garbage: deleted [`StateOptions::garbage_after`]
-/// flushes later.
+/// A truncated entry's blob is garbage: a sweep finds it unnamed, and one
+/// [`StateOptions::garbage_after`] versions later deletes it.
 #[test]
-fn a_truncated_entrys_blob_is_deleted_later() -> Result<()> {
+fn a_truncated_entrys_blob_is_swept_later() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let options = StateOptions {
@@ -115,12 +115,15 @@ fn a_truncated_entrys_blob_is_deleted_later() -> Result<()> {
         let mut mutation = state.mutation();
         mutation.truncate(&log, 1)?;
         mutation.flush().await?;
+        let swept = state.collect_garbage().await?;
+        assert_eq!((swept.deleted, swept.candidates), (0, 1));
+        assert!(state.collect_garbage().await?.skipped, "too soon");
         assert_eq!(store.blob_count(), 2, "a reader may still read it");
-        for n in 0..2 {
-            let mut mutation = state.mutation();
-            mutation.set(&state.record("n"), Bytes::from(vec![n]))?;
-            mutation.flush().await?;
-        }
+        let mut mutation = state.mutation();
+        mutation.set(&state.record("n"), Bytes::from_static(b"1"))?;
+        mutation.flush().await?;
+        let swept = state.collect_garbage().await?;
+        assert_eq!((swept.deleted, swept.candidates), (1, 0));
         assert_eq!(store.blob_count(), 1);
         assert_eq!(log.entries(), vec![large(2)]);
         Ok(())

@@ -8,16 +8,12 @@
 //!
 //! # Blobs
 //!
-//! A blob never changes once a durable root names it (see [`crate::store`]),
-//! so it is cached under its number, for as long as the cache keeps it:
-//! there is nothing to invalidate. A blob is cached only once a durable root
-//! names it (after this owner's flush synced, or when a state read it as
-//! named by the root it opened), so a crashed flush's blobs, which the next
-//! flush overwrites, are never cached. Keys are the namespace's identity, its
-//! database's (random, in the root: a namespace emptied and made again
-//! numbers its blobs from 0 again, under another) and the number; a
-//! namespace's identity comes from a process-wide counter, and the disk tier
-//! starts empty in every process.
+//! A blob is named by its hash (see [`crate::store::BlobId`]): what a name
+//! holds never changes, so it is cached under it, for as long as the cache
+//! keeps it, by any state that reads or writes it: there is nothing to
+//! invalidate. Keys are the namespace's identity and the blob's name; a
+//! namespace's identity comes from a process-wide counter, and the disk
+//! tier starts empty in every process.
 //!
 //! # Durability knowledge
 //!
@@ -31,6 +27,7 @@
 //! Namespace states are kept for a bounded number of namespaces, and parked
 //! values within a byte budget, least recently used first; forgetting either
 //! only makes a namespace cold.
+use crate::store::BlobId;
 use bytes::Bytes;
 use foyer::{
     BlockEngineConfig, Cache, CacheBuilder, Code, DeviceBuilder, FileDeviceBuilder, HybridCache,
@@ -355,17 +352,16 @@ impl NamespaceCache {
         parked.lock().unwrap().take_all(self.id)
     }
 
-    fn key(&self, database: u64, blob: u64) -> BlobKey {
+    fn key(&self, blob: BlobId) -> BlobKey {
         BlobKey {
             namespace: self.id,
-            database,
             blob,
         }
     }
 
-    /// Blob `n` of `database`, from memory or disk. A disk error is a miss.
-    pub(crate) async fn get(&self, database: u64, n: u64) -> Option<Bytes> {
-        let key = self.key(database, n);
+    /// Blob `blob`, from memory or disk. A disk error is a miss.
+    pub(crate) async fn get(&self, blob: BlobId) -> Option<Bytes> {
+        let key = self.key(blob);
         // A hit in memory without a hop to the disk's threads.
         if let Some(entry) = self.shared.blobs.memory().get(&key) {
             return Some(entry.value().clone());
@@ -376,11 +372,9 @@ impl NamespaceCache {
         }
     }
 
-    /// Keep blob `n` of `database`, which a durable root names.
-    pub(crate) fn insert(&self, database: u64, n: u64, value: Bytes) {
-        self.shared
-            .blobs
-            .insert(self.key(database, n), owned(&value));
+    /// Keep blob `blob`, which holds `value`.
+    pub(crate) fn insert(&self, blob: BlobId, value: Bytes) {
+        self.shared.blobs.insert(self.key(blob), owned(&value));
     }
 }
 
@@ -493,26 +487,29 @@ impl Parked {
     }
 }
 
-/// A blob's key: its namespace's identity, its database's, and its number.
+/// A blob's key: its namespace's identity, and its name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BlobKey {
     namespace: u64,
-    database: u64,
-    blob: u64,
+    blob: BlobId,
 }
 
 impl Code for BlobKey {
     fn encode(&self, writer: &mut impl std::io::Write) -> foyer::Result<()> {
         self.namespace.encode(writer)?;
-        self.database.encode(writer)?;
-        self.blob.encode(writer)
+        let (high, low) = self.blob.0.split_at(8);
+        u64::from_le_bytes(high.try_into().unwrap()).encode(writer)?;
+        u64::from_le_bytes(low.try_into().unwrap()).encode(writer)
     }
 
     fn decode(reader: &mut impl std::io::Read) -> foyer::Result<Self> {
+        let namespace = u64::decode(reader)?;
+        let mut blob = [0; 16];
+        blob[..8].copy_from_slice(&u64::decode(reader)?.to_le_bytes());
+        blob[8..].copy_from_slice(&u64::decode(reader)?.to_le_bytes());
         Ok(Self {
-            namespace: u64::decode(reader)?,
-            database: u64::decode(reader)?,
-            blob: u64::decode(reader)?,
+            namespace,
+            blob: BlobId(blob),
         })
     }
 

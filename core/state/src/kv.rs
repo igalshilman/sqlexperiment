@@ -17,9 +17,13 @@
 //!
 //! A store may keep blobs where an earlier attempt of the owner, still
 //! running, can write too: S3 beside Restate, say ([`crate::blobs`]), where
-//! Restate fences the root but nothing fences the blobs. It says so
-//! ([`KvStore::write_once_blobs`]), and the state then never writes a blob
-//! key twice.
+//! Restate fences the root but nothing fences the blobs. A blob's key is
+//! its content's hash, so such a write puts what is there already, or a
+//! blob no root names, which a sweep deletes.
+//!
+//! A store that can list its keys ([`KvStore::list`]) can be swept
+//! ([`crate::State::collect_garbage`]); one that cannot keeps every blob a
+//! flush wrote.
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::io;
@@ -36,13 +40,16 @@ pub trait KvStore: Send + Sync {
     fn delete(&self, key: &str) -> io::Result<()>;
     /// Wait until every write issued so far is durable.
     fn sync(&self) -> BoxFuture<'_, io::Result<()>>;
-    /// Whether the store refuses to write a blob key that holds a value. The
-    /// state then numbers the blobs of each writer's first flush from a
-    /// random jump past the root's next blob, so that another writer of the
-    /// same root (an attempt fenced from the root, or one whose flush failed)
-    /// is unlikely to have used the numbers; if one did, the store refuses,
-    /// the flush fails, and the next open jumps again. A wrapper forwards it.
-    fn write_once_blobs(&self) -> bool {
-        false
+    /// Every key under `prefix`, as reads see them, in any order. A store
+    /// that cannot list fails with [`io::ErrorKind::Unsupported`]. A wrapper
+    /// forwards it.
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        let _ = prefix;
+        Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this store cannot list its keys",
+            ))
+        })
     }
 }

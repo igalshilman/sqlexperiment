@@ -90,7 +90,8 @@ mod zstd;
 pub use cache::{PageCache, PageCacheConfig};
 use store::Is;
 pub use store::{
-    FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, ROOT_KEY,
+    Collected, FlushReport, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES,
+    ROOT_KEY,
 };
 
 use crate::cache::{NamespaceCache, ParkedValue};
@@ -448,6 +449,51 @@ impl State {
     /// Whether the state can flush: a failed or cancelled flush ends it.
     pub fn is_usable(&self) -> bool {
         !self.shared.poisoned.load(Ordering::SeqCst)
+    }
+
+    /// Delete the blobs no root names: mark and sweep, in two phases. List
+    /// the store's blobs, and mark those the root names; delete those that
+    /// the previous sweep, at least [`StateOptions::garbage_after`] versions
+    /// ago, found unnamed too, and that no flush named since; keep the
+    /// others unnamed for the next sweep. So a reader that opened that many
+    /// versions ago still reads its root. Call it now and then: every
+    /// [`StateOptions::garbage_after`] flushes, say.
+    ///
+    /// A sweep that writes is a flush, at the next version: refused, and
+    /// ending the state when it fails, as [`Mutation::flush`] is. One that
+    /// fails before it writes (a store that cannot list its keys,
+    /// [`KvStore::list`]) leaves the state as it was.
+    pub async fn collect_garbage(&self) -> Result<Collected> {
+        let shared = &self.shared;
+        if shared.poisoned.load(Ordering::SeqCst) {
+            return Err(ENDED.into());
+        }
+        if self.is_reader() {
+            return Err("a reader writes nothing".into());
+        }
+        if shared.flushing.swap(true, Ordering::SeqCst) {
+            return Err("a flush of this state is running".into());
+        }
+        let mut running = Flushing {
+            shared,
+            returned: false,
+            done: false,
+        };
+        let snapshot = shared.snapshot();
+        let marked = match snapshot.mark().await {
+            Ok(marked) => marked,
+            Err(error) => {
+                // Nothing written: the state goes on.
+                (running.returned, running.done) = (true, true);
+                return Err(error.into());
+            }
+        };
+        let result = snapshot.sweep(marked).await;
+        running.returned = true;
+        let (collected, after) = result?;
+        *shared.snapshot.lock().unwrap() = Arc::new(after);
+        running.done = true;
+        Ok(collected)
     }
 }
 

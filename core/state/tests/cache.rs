@@ -46,6 +46,13 @@ async fn flush(
     Ok(())
 }
 
+/// Sweep the store as the owner: the version after it.
+async fn sweep(store: &Arc<dyn KvStore>, cache: Option<&Namespace>) -> Result<u64> {
+    let session = Session::open(store.clone(), options(cache)).await?;
+    session.state.collect_garbage().await?;
+    Ok(session.state.version())
+}
+
 /// Owner A's flush fails at its sync; A reopens and reads what the failed
 /// flush wrote (visible, but synced by that open). A crash loses whatever is
 /// not durable. Another process, B, takes over and flushes, at blob numbers
@@ -222,13 +229,16 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
             let reader = Session::reader(store.clone(), lazy).await?;
             let opened = model.clone();
             // Past the grace sometimes: then blobs it reads may be gone.
-            let flushes = rng.pick(&[0, 1, 3, grace - 1, grace + 4]);
+            let flushes = rng.pick(&[0, 1, 3, grace / 2 - 1, grace + 4]);
+            let mut version = reader.state.version();
             for _ in 0..flushes {
-                // Pages the reader reads often, and anything else.
+                // Pages the reader reads often, and anything else; a sweep.
                 let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
                 let ops = [hot, Op::random(&mut rng)];
                 flush(&store, Some(&owner), &mut model, &ops).await?;
+                version = sweep(&store, Some(&owner)).await?;
             }
+            let may_be_gone = version >= reader.state.version() + grace;
             for _ in 0..16 {
                 let name = rng.pick(&FILES);
                 let index = rng.below(opened.len(name).div_ceil(4096) + 1);
@@ -237,7 +247,7 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                         assert_eq!(page, opened.page(name, index), "round {round}");
                         read += 1;
                     }
-                    Err(error) if flushes >= grace => {
+                    Err(error) if may_be_gone => {
                         assert!(error.to_string().contains("is gone"), "{error}");
                         gone += 1;
                     }

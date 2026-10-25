@@ -1,28 +1,32 @@
 //! A protocol monitor: checks every request the code issues against the
-//! rule of [`crate::store`]: a blob is written before the first root that
-//! names it, and deleted only once no root names it.
+//! rules of [`crate::store`]: a blob is written before the first root that
+//! names it, never changes, and is deleted only by a sweep, once no root
+//! names it.
 //!
 //! The store keeps writes in issue order, and a crash keeps a prefix of them,
 //! so a write may rely on every write issued before it. The monitor wraps a
 //! store and keeps the state those writes make: each write applied as it is
 //! issued, and values it read (after a crash, a read learns what was kept).
-//! A write that fails makes its key unknown until a read learns it; a read
-//! of the root forgets the blobs at or past its next blob, which a crash may
-//! have lost (a flush issues its blobs and root with nothing between). Each
-//! write is checked when it is issued:
+//! A write that fails makes its key unknown until a read learns it. A read
+//! of the root makes every blob it does not name uncertain, since a crash
+//! may have lost it, until a put, a read or a listing settles it. Each write
+//! is checked when it is issued:
 //!
 //! 1. **Name only what is written**: a root names only blobs that are there.
 //! 2. **Build on the root**: a root is the next version of the root, with
-//!    the same identity and chunk size, and a next blob never lower.
-//! 3. **Never overwrite**: a blob is put only at a number the root has not
-//!    allocated.
-//! 4. **Delete only garbage**: a blob is deleted only if the root lists it
-//!    as garbage, and names it no more.
-//! 5. **Leak nothing**: a blob the root named and the next one does not is
-//!    its garbage, and stays garbage until deleted.
-//! 6. **Decodable**: every root decodes, and every map node, chunk and
-//!    record and log entry blob it names decodes: a chunk's base against its file's golden
-//!    pages, its delta against its base.
+//!    the same identity, chunk size and fanout.
+//! 3. **Never change a name**: a blob put where one is holds the same bytes.
+//! 4. **Names are hashes**: every blob a root names is named by its hash
+//!    ([`BlobId::of`]), against what it is compressed against.
+//! 5. **Revive before naming**: a root names none of the sweep's candidates
+//!    (a flush takes those it names off, before the root).
+//! 6. **Delete only candidates**: a blob is deleted only if the sweep lists
+//!    it as a candidate, and the root names it no more.
+//! 7. **Leak nothing**: a sweep's root comes with every blob it does not
+//!    name either deleted or a candidate.
+//! 8. **Decodable**: every root and sweep decodes, and every map node, chunk
+//!    and record and log entry blob a root names decodes: a chunk's base
+//!    against its file's golden pages, its delta against its base.
 //!
 //! What a root names it learns by walking each file's map through the node
 //! blobs it knows; a node a failed write left unknown is not walked.
@@ -31,8 +35,8 @@ use crate::{
     kv::KvStore,
     map::{Map, Node, Nodes, Shape, Visit},
     store::{
-        Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, Value, decode_chunk, parse_blob_key,
-        reference,
+        Against, BlobId, Chunk, Kind, MAX_RECORD_BYTES, ROOT_KEY, Root, SWEEP_KEY, Sweep, Value,
+        decode_chunk, parse_blob_key, reference,
     },
     zstd,
 };
@@ -61,12 +65,20 @@ impl<S> Deref for MonitorKv<S> {
 /// The state the writes issued so far make.
 #[derive(Default)]
 struct Known {
-    blobs: BTreeMap<u64, Bytes>,
+    blobs: BTreeMap<BlobId, Bytes>,
     /// Blobs a failed write may or may not have changed.
-    unknown: BTreeSet<u64>,
+    unknown: BTreeSet<BlobId>,
+    /// Blobs a crash may have lost: in `blobs`, but not named by the root
+    /// read since.
+    uncertain: BTreeSet<BlobId>,
     /// The root, unless a failed write left it unknown.
     root: Option<Root>,
     root_unknown: bool,
+    /// The sweep, unless a failed write left it unknown.
+    sweep: Option<Sweep>,
+    sweep_unknown: bool,
+    /// The version of the root a sweep just put its sweep for.
+    swept: Option<u64>,
     violations: Vec<String>,
     /// The bases of files made with one, by name.
     bases: BTreeMap<String, Arc<dyn Base>>,
@@ -78,91 +90,171 @@ impl Known {
         self.violations.push(message);
     }
 
+    fn root(&self) -> Option<&Root> {
+        self.root.as_ref().filter(|_| !self.root_unknown)
+    }
+
+    fn sweep(&self) -> Option<&Sweep> {
+        match self.sweep_unknown {
+            true => None,
+            false => Some(self.sweep.as_ref().unwrap_or(&EMPTY)),
+        }
+    }
+
+    /// `value` read at `key`.
+    fn read(&mut self, key: &str, value: Option<Bytes>) {
+        self.learn(key, value);
+        self.swept = None;
+        if key == ROOT_KEY {
+            let named = match &self.root {
+                Some(root) => self.named(root),
+                None => BTreeSet::new(),
+            };
+            let unnamed = self.blobs.keys().filter(|blob| !named.contains(blob));
+            self.uncertain = unnamed.copied().collect();
+        }
+    }
+
     fn learn(&mut self, key: &str, value: Option<Bytes>) {
         if key == ROOT_KEY {
             self.root = value.and_then(|bytes| Root::decode(&bytes).ok());
             self.root_unknown = false;
-            let next = self.root.as_ref().map_or(0, |root| root.next_blob);
-            self.blobs.retain(|&n, _| n < next);
-            self.unknown.retain(|&n| n < next);
-        } else if let Some(n) = parse_blob_key(key) {
-            self.unknown.remove(&n);
+        } else if key == SWEEP_KEY {
+            self.sweep = value.and_then(|bytes| Sweep::decode(&bytes).ok());
+            self.sweep_unknown = false;
+        } else if let Some(blob) = parse_blob_key(key) {
+            self.unknown.remove(&blob);
+            self.uncertain.remove(&blob);
             match value {
-                Some(value) => self.blobs.insert(n, value),
-                None => self.blobs.remove(&n),
+                Some(value) => self.blobs.insert(blob, value),
+                None => self.blobs.remove(&blob),
             };
         }
+    }
+
+    /// The blobs stored are `listed`, of those under `prefix`.
+    fn listed(&mut self, prefix: &str, listed: &[String]) {
+        let listed: BTreeSet<BlobId> = listed.iter().filter_map(|k| parse_blob_key(k)).collect();
+        let gone: Vec<BlobId> = (self.uncertain.iter().chain(&self.unknown))
+            .filter(|blob| crate::store::blob_key(**blob).starts_with(prefix))
+            .filter(|blob| !listed.contains(blob))
+            .copied()
+            .collect();
+        for blob in gone {
+            self.learn(&crate::store::blob_key(blob), None);
+        }
+        self.uncertain.retain(|blob| !listed.contains(blob));
     }
 
     fn forget(&mut self, key: &str) {
         if key == ROOT_KEY {
             self.root_unknown = true;
-        } else if let Some(n) = parse_blob_key(key) {
-            self.unknown.insert(n);
+        } else if key == SWEEP_KEY {
+            self.sweep_unknown = true;
+            self.swept = None;
+        } else if let Some(blob) = parse_blob_key(key) {
+            self.unknown.insert(blob);
         }
     }
 
     fn check_put(&mut self, key: &str, value: &Bytes) {
         self.checked += 1;
-        if let Some(n) = parse_blob_key(key) {
-            if let Some(root) = self.root.as_ref().filter(|_| !self.root_unknown)
-                && n < root.next_blob
-            {
-                self.violation(format!("blob {n} put, below the root's next blob"));
+        if let Some(blob) = parse_blob_key(key) {
+            if (self.blobs.get(&blob)).is_some_and(|held| held != value) {
+                self.violation(format!("blob {blob} changed"));
             }
             return;
         }
+        if key == SWEEP_KEY {
+            return self.check_sweep(value);
+        }
         if key != ROOT_KEY {
-            return self.violation(format!("a put of {key:?}, neither root nor blob"));
+            return self.violation(format!("a put of {key:?}: no root, sweep or blob"));
         }
         let root = match Root::decode(value) {
             Ok(root) => root,
             Err(error) => return self.violation(format!("a root that does not decode: {error}")),
         };
+        let version = root.version;
         let named = self.named(&root);
-        if let Some(held) = self.root.clone().filter(|_| !self.root_unknown) {
-            if root.version != held.version + 1
+        if let Some(held) = self.root()
+            && (root.version != held.version + 1
                 || root.id != held.id
                 || root.chunk_pages != held.chunk_pages
-                || root.fanout != held.fanout
-                || root.next_blob < held.next_blob
-            {
-                let (v, held_v) = (root.version, held.version);
-                self.violation(format!("root {v} does not build on root {held_v}"));
-            }
-            let dropped = (self.named(&held).into_iter()).filter(|n| !named.contains(n));
-            let kept = held
-                .garbage
-                .keys()
-                .copied()
-                .filter(|n| self.blobs.contains_key(n));
-            let leaked: Vec<u64> = dropped
-                .chain(kept)
-                .filter(|n| !root.garbage.contains_key(n))
-                .collect();
-            for n in leaked {
-                self.violation(format!("root {} leaks blob {n}", root.version));
+                || root.fanout != held.fanout)
+        {
+            let held = held.version;
+            self.violation(format!("root {version} does not build on root {held}"));
+        }
+        for blob in &named {
+            let written = self.blobs.contains_key(blob) && !self.uncertain.contains(blob);
+            if !written && !self.unknown.contains(blob) {
+                self.violation(format!("root {version} names blob {blob}, not written"));
             }
         }
-        for n in named {
-            if !self.blobs.contains_key(&n) && !self.unknown.contains(&n) {
-                self.violation(format!("root {} names blob {n}, not written", root.version));
+        if let Some(sweep) = self.sweep() {
+            let revived = sweep.candidates.intersection(&named);
+            let mut violations: Vec<String> = revived
+                .map(|blob| format!("root {version} names candidate {blob}"))
+                .collect();
+            // A sweep's root: every blob it does not name is a candidate
+            // (known only if every map node is).
+            if self.swept == Some(version) && self.walks_fully(&root) {
+                let leaked = (self.blobs.keys())
+                    .filter(|blob| !self.uncertain.contains(blob) && !self.unknown.contains(blob))
+                    .filter(|blob| !named.contains(blob) && !sweep.candidates.contains(blob));
+                violations.extend(leaked.map(|blob| format!("sweep {version} leaks blob {blob}")));
             }
+            self.violations.extend(violations);
         }
         if let Err(error) = self.decode(&root) {
-            self.violation(format!("root {}: {error}", root.version));
+            self.violation(format!("root {version}: {error}"));
+        }
+        self.swept = None;
+    }
+
+    /// A sweep put: the next sweep, of the root's next version, whose
+    /// candidates the root does not name; or the sweep with candidates
+    /// taken off.
+    fn check_sweep(&mut self, value: &Bytes) {
+        let sweep = match Sweep::decode(value) {
+            Ok(sweep) => sweep,
+            Err(error) => return self.violation(format!("a sweep that does not decode: {error}")),
+        };
+        let (Some(root), Some(held)) = (self.root(), self.sweep()) else {
+            return;
+        };
+        let next = root.version + 1;
+        let revived = sweep.marked == held.marked && sweep.candidates.is_subset(&held.candidates);
+        if !revived && sweep.marked == next {
+            let named = self.named(root);
+            let named: Vec<BlobId> = sweep.candidates.intersection(&named).copied().collect();
+            for blob in named {
+                self.violation(format!(
+                    "sweep {next} lists blob {blob}, which the root names"
+                ));
+            }
+            self.swept = Some(next);
+        } else if !revived {
+            let marked = sweep.marked;
+            self.violation(format!("sweep {marked}: neither the next one nor revivals"));
         }
     }
 
     fn check_delete(&mut self, key: &str) {
         self.checked += 1;
-        let Some(n) = parse_blob_key(key) else {
+        let Some(blob) = parse_blob_key(key) else {
             return self.violation(format!("a delete of {key:?}, not a blob"));
         };
-        if let Some(root) = self.root.as_ref().filter(|_| !self.root_unknown)
-            && (self.named(root).contains(&n) || !root.garbage.contains_key(&n))
+        if let Some(root) = self.root()
+            && self.named(root).contains(&blob)
         {
-            self.violation(format!("blob {n} deleted, not the root's garbage"));
+            self.violation(format!("blob {blob} deleted, which the root names"));
+        }
+        if let Some(sweep) = self.sweep()
+            && !sweep.candidates.contains(&blob)
+        {
+            self.violation(format!("blob {blob} deleted, not a candidate"));
         }
     }
 
@@ -170,13 +262,13 @@ impl Known {
     /// as the walk needs them: what it meets, and the nodes that do not
     /// decode.
     fn walk(&self, map: &Map, shape: Shape) -> (Vec<Visit>, Vec<String>) {
-        let mut decoded: HashMap<u64, Arc<Node>> = HashMap::new();
+        let mut decoded: HashMap<BlobId, Arc<Node>> = HashMap::new();
         let mut lacking = BTreeSet::new();
         let mut errors = Vec::new();
         loop {
             let mut met = Vec::new();
             let missing = {
-                let get = |n: u64| decoded.get(&n).cloned();
+                let get = |blob: BlobId| decoded.get(&blob).cloned();
                 let nodes = Nodes::new(&get);
                 map.walk(shape, &nodes, &mut |visit| met.push(visit));
                 nodes.missing()
@@ -208,21 +300,36 @@ impl Known {
         }
     }
 
+    /// Whether every map node `root` names is known.
+    fn walks_fully(&self, root: &Root) -> bool {
+        root.directory.values().all(|entry| match &entry.kind {
+            Kind::Paged { size, map, .. } => {
+                let (met, errors) = self.walk(map, root.shape(*size));
+                errors.is_empty()
+                    && met.iter().all(|visit| match visit {
+                        Visit::Node(blob) => self.blobs.contains_key(blob),
+                        Visit::Chunk(..) => true,
+                    })
+            }
+            _ => true,
+        })
+    }
+
     /// Every blob `root` names, through the map nodes known.
-    fn named(&self, root: &Root) -> BTreeSet<u64> {
+    fn named(&self, root: &Root) -> BTreeSet<BlobId> {
         let mut named = BTreeSet::new();
         for entry in root.directory.values() {
             match &entry.kind {
-                Kind::Record(Value::Blob(n)) => {
-                    named.insert(*n);
+                Kind::Record(Value::Blob(blob)) => {
+                    named.insert(*blob);
                 }
                 Kind::Record(Value::Inline(_)) => {}
                 Kind::Log { entries, .. } => named.extend(entries),
                 Kind::Paged { size, map, .. } => {
                     for visit in self.walk(map, root.shape(*size)).0 {
                         match visit {
-                            Visit::Node(n) => {
-                                named.insert(n);
+                            Visit::Node(blob) => {
+                                named.insert(blob);
                             }
                             Visit::Chunk(_, chunk) => named.extend(chunk.blobs()),
                         }
@@ -233,26 +340,41 @@ impl Known {
         named
     }
 
-    /// Decode every chunk, record and log entry blob `root` names (those a failed write
-    /// left unknown aside).
+    /// Check the name of `blob`, compressed `against` a reference, if known:
+    /// its frame.
+    fn hashed(&self, root: &Root, blob: BlobId, against: Against) -> io::Result<Option<&Bytes>> {
+        let Some(frame) = self.blobs.get(&blob) else {
+            return Ok(None);
+        };
+        match BlobId::of(root.id, against, frame) == blob {
+            true => Ok(Some(frame)),
+            false => Err(io::Error::other(format!(
+                "blob {blob} is not named by its hash"
+            ))),
+        }
+    }
+
+    /// Check the names of, and decode, every map node, chunk, record and log
+    /// entry blob `root` names (those a failed write left unknown aside).
     fn decode(&self, root: &Root) -> io::Result<()> {
         let size = (root.chunk_pages * PAGE) as usize;
-        let blob = |n: u64| self.blobs.get(&n);
+        let value = |blob: BlobId| -> io::Result<()> {
+            if let Some(frame) = self.hashed(root, blob, Against::Nothing)? {
+                zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
+            }
+            Ok(())
+        };
         for entry in root.directory.values() {
             let (bytes, map, base) = match &entry.kind {
-                Kind::Paged { size, map, base } => (*size, map, base),
-                Kind::Record(Value::Blob(n)) => {
-                    if let Some(frame) = blob(*n) {
-                        zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
-                    }
+                Kind::Paged { size, map, base } => (*size, map, *base),
+                Kind::Record(Value::Blob(blob)) => {
+                    value(*blob)?;
                     continue;
                 }
                 Kind::Record(Value::Inline(_)) => continue,
                 Kind::Log { entries, .. } => {
-                    for &n in entries {
-                        if let Some(frame) = blob(n) {
-                            zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES)?;
-                        }
+                    for &blob in entries {
+                        value(blob)?;
                     }
                     continue;
                 }
@@ -262,33 +384,49 @@ impl Known {
                 return Err(io::Error::other(error));
             }
             let golden = self.bases.get(&entry.name);
-            if base.is_some() && golden.is_none() {
-                continue;
-            }
-            let chunks = met.into_iter().filter_map(|visit| match visit {
-                Visit::Chunk(chunk, stored) => Some((chunk, stored)),
-                Visit::Node(_) => None,
-            });
-            for (chunk, stored) in chunks {
-                let stored: Chunk = stored;
+            for visit in met {
+                let (chunk, stored): (u64, Chunk) = match visit {
+                    Visit::Chunk(chunk, stored) => (chunk, stored),
+                    Visit::Node(blob) => {
+                        self.hashed(root, blob, Against::Nothing)?;
+                        continue;
+                    }
+                };
                 if stored.base.is_none() && stored.delta.is_some() {
                     return Err(io::Error::other(format!(
                         "chunk {chunk}: a delta without a base"
                     )));
                 }
-                let Some(frame) = stored.base.and_then(blob) else {
+                let Some(blob) = stored.base else { continue };
+                let against = match base {
+                    Some(base) => Against::Base { base, chunk },
+                    None => Against::Nothing,
+                };
+                let frame = self.hashed(root, blob, against)?;
+                let delta = match stored.delta {
+                    Some(delta) => self.hashed(root, delta, Against::Blob(blob))?,
+                    None => None,
+                };
+                // A file made with a base decodes only against it.
+                let (Some(frame), false) = (frame, base.is_some() && golden.is_none()) else {
                     continue;
                 };
                 let prefix = reference(golden, root.chunk_pages, chunk);
-                let base = decode_chunk(frame, &prefix, size)?;
-                if let Some(frame) = stored.delta.and_then(blob) {
-                    decode_chunk(frame, &base.pages, size)?;
+                let pages = decode_chunk(frame, &prefix, size)?;
+                if let Some(frame) = delta {
+                    decode_chunk(frame, &pages.pages, size)?;
                 }
             }
         }
         Ok(())
     }
 }
+
+/// The sweep of a store that holds none.
+static EMPTY: Sweep = Sweep {
+    marked: 0,
+    candidates: BTreeSet::new(),
+};
 
 impl<S: KvStore> MonitorKv<S> {
     pub fn new(inner: S) -> Self {
@@ -333,7 +471,7 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
             let value = self.inner.get(key).await?;
-            self.known.lock().unwrap().learn(key, value.clone());
+            self.known.lock().unwrap().read(key, value.clone());
             Ok(value)
         })
     }
@@ -363,7 +501,11 @@ impl<S: KvStore> KvStore for MonitorKv<S> {
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
         self.inner.sync()
     }
-    fn write_once_blobs(&self) -> bool {
-        self.inner.write_once_blobs()
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
+        Box::pin(async move {
+            let listed = self.inner.list(prefix).await?;
+            self.known.lock().unwrap().listed(prefix, &listed);
+            Ok(listed)
+        })
     }
 }

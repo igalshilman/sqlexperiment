@@ -1,7 +1,7 @@
 //! A crash at every write of every flush of a sequence that sets records
 //! (inline and in blobs), writes several files (one with a base), shrinks
-//! one, rebases chunks and deletes garbage: each flush is atomic, durable
-//! once its root is, and the state goes on.
+//! one, rebases chunks, and sweeps now and then, deleting garbage: each
+//! flush is atomic, durable once its root is, and the state goes on.
 #![cfg(feature = "simulation")]
 mod support;
 
@@ -55,6 +55,19 @@ fn changes(step: u64) -> Vec<Op> {
     ops
 }
 
+/// Whether step `step` sweeps, rather than flush its changes.
+fn sweeps(step: u64) -> bool {
+    step % 3 == 2
+}
+
+/// Run step `step` in `session`: sweep, or flush `ops`.
+async fn run(session: &Session, step: u64, ops: &[Op]) -> Result<()> {
+    match sweeps(step) {
+        true => session.state.collect_garbage().await.map(drop),
+        false => session.flush(ops).await.map(drop),
+    }
+}
+
 /// Open a session and read a few pages, so that a flush finds their chunks
 /// decoded.
 async fn session(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
@@ -72,7 +85,10 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
         let mut model = Model::default();
         let (mut cases, mut kinds) = (0, std::collections::BTreeSet::new());
         for step in 0..STEPS {
-            let ops = changes(step);
+            let ops = match sweeps(step) {
+                true => Vec::new(),
+                false => changes(step),
+            };
             let new = model.applied(&ops);
             for cached in [false, true] {
                 // The flush fails at its sync, every write queued.
@@ -86,7 +102,7 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
                     effect: Effect::None,
                     cancel: false,
                 });
-                assert!(failing.flush(&ops).await.is_err());
+                assert!(run(&failing, step, &ops).await.is_err());
                 fault.disarm();
                 drop(failing);
                 let writes = fault.inner.unsynced();
@@ -137,12 +153,12 @@ fn a_flush_is_atomic_at_every_write_of_a_sequence() -> Result<()> {
             }
             // The sequence goes on from the flush acknowledged.
             let store: Arc<dyn KvStore> = Arc::new(durable.clone());
-            session(store, None).await?.flush(&ops).await?;
+            run(&session(store, None).await?, step, &ops).await?;
             model = new;
         }
         // The sequence covers every kind of write a flush makes.
         let kinds: Vec<_> = kinds.into_iter().collect();
-        let expected = ["blob delete", "blob put", "root put"];
+        let expected = ["blob delete", "blob put", "root put", "sweep put"];
         assert_eq!(kinds, expected);
         println!("crashed flushes: {cases} cases");
         Ok(())
