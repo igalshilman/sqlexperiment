@@ -106,5 +106,6 @@ are mostly what each turn writes to Restate, not the JavaScript. Which parts
 are QuickJS's, and which engines could replace it:
 [docs/ENGINES.md](docs/ENGINES.md).
 
-Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md). Tests:
+Details, formats and measurements: [docs/DESIGN.md](docs/DESIGN.md).
+Writing an extension of your own: [docs/EXTENSIONS.md](docs/EXTENSIONS.md). Tests:
 `make test-functions` (with a Restate server), `make lint-functions`.
