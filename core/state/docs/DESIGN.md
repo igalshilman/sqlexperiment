@@ -255,6 +255,10 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
 - **Fencing.** Restate provides it for the head and the tail: a former
   attempt's writes never land after a newer owner's. Packs beside Restate
   are not fenced; their unique names keep attempts apart.
+- **Concurrency.** A state has at most 32 reads of packs (or of the
+  pages a flush compresses against) in flight at once: an open of many
+  large values, or a checkpoint of many frames, waits for some rather
+  than asking the store for all of them together.
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. A state keeps the tail since its checkpoint in

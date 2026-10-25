@@ -35,7 +35,10 @@ use crate::{
     zstd,
 };
 use bytes::Bytes;
-use futures::future::{BoxFuture, FutureExt, Shared, WeakShared, try_join_all};
+use futures::{
+    StreamExt, TryStreamExt,
+    future::{BoxFuture, FutureExt, Shared, WeakShared, try_join_all},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io,
@@ -44,6 +47,31 @@ use std::{
 
 /// Decoded frames a state keeps before it drops them all.
 const KEPT_FRAMES: usize = 256;
+/// Reads of packs, or of pages' references, a state has in flight at once:
+/// an open of many large values, or a checkpoint of many frames, waits
+/// for some rather than asking the store for all of them together.
+const CONCURRENT_READS: usize = 32;
+/// Bytes a checkpoint's compaction moves at most, sparsest packs first
+/// (one pack at least): the rest move at the checkpoints after it.
+const MAX_MOVED_BYTES: u64 = 64 << 20;
+/// Ranges a compaction moves from one pack are fetched together while the
+/// dead bytes between them are at most this many...
+const RUN_GAP: u64 = 64 << 10;
+/// ... and the whole fetch is at most this many.
+const MAX_RUN: u64 = 8 << 20;
+
+/// The outputs of `futures`, in order, with at most [`CONCURRENT_READS`]
+/// of them running at once; the first error. They are collected first, so
+/// that the future returned holds them and not the iterator that made
+/// them (whose closures would keep it from being `Send`).
+fn bounded<T, F: Future<Output = io::Result<T>>>(
+    futures: impl IntoIterator<Item = F>,
+) -> impl Future<Output = io::Result<Vec<T>>> {
+    let futures: Vec<F> = futures.into_iter().collect();
+    (futures::stream::iter(futures))
+        .buffered(CONCURRENT_READS)
+        .try_collect()
+}
 
 fn refuse<T>(message: String) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message))
@@ -529,7 +557,7 @@ impl Snapshot {
             )
             .chain(small.iter().flat_map(|file| file.patches.values().copied()))
             .collect();
-        let fetched = try_join_all(wanted.iter().copied().map(|at| self.raw(at))).await?;
+        let fetched = bounded(wanted.iter().copied().map(|at| self.raw(at))).await?;
         let fetched: HashMap<Location, Bytes> = wanted.into_iter().zip(fetched).collect();
         for file in &small {
             let frames: Vec<Option<Arc<Bytes>>> = (file.frames.iter())
@@ -804,6 +832,42 @@ impl Snapshot {
         Ok(joined.slice(start..end))
     }
 
+    /// The bytes at each of `ats`, sorted by pack and offset, for a
+    /// compaction: ranges of a pack close together are fetched as one run,
+    /// which is not cached whole (each range is, where it moves to).
+    async fn raw_runs(&self, ats: &[Location]) -> io::Result<Vec<Bytes>> {
+        let mut runs: Vec<(Location, Vec<usize>)> = Vec::new();
+        for (i, at) in ats.iter().enumerate() {
+            match runs.last_mut() {
+                Some((run, members))
+                    if run.pack == at.pack
+                        && at.offset <= run.range().end + RUN_GAP
+                        && at.range().end - run.offset <= MAX_RUN =>
+                {
+                    run.len = run.len.max(at.range().end - run.offset);
+                    members.push(i);
+                }
+                _ => runs.push((*at, vec![i])),
+            }
+        }
+        let fetched = bounded(runs.iter().map(|&(run, _)| async move {
+            match self.tiered.block() {
+                // In parts, which the cache keeps: a range of them.
+                Some(_) => self.raw(run).await,
+                None => self.tiered.get(run.pack, run.range()).await,
+            }
+        }))
+        .await?;
+        let mut out = vec![Bytes::new(); ats.len()];
+        for ((run, members), bytes) in runs.iter().zip(fetched) {
+            for &i in members {
+                let start = (ats[i].offset - run.offset) as usize;
+                out[i] = bytes.slice(start..start + ats[i].len as usize);
+            }
+        }
+        Ok(out)
+    }
+
     /// The range, or with `block` the block, `at` of a pack: from the
     /// cache, or fetched, once for every read that awaits it, and cached.
     async fn fetch(&self, at: Location, block: bool) -> io::Result<Bytes> {
@@ -1019,7 +1083,7 @@ impl Snapshot {
                     references.push(self.reference(manifest, images, &name, *page));
                 }
             }
-            let references = try_join_all(references).await?;
+            let references = bounded(references).await?;
             let mut references = references.into_iter();
             let mut pages = Vec::with_capacity(written.len());
             for (page, image) in written {
@@ -1194,7 +1258,7 @@ impl Snapshot {
                 }
             }
         }
-        let olds = try_join_all(rebuilt.iter().cloned().map(
+        let olds = bounded(rebuilt.iter().cloned().map(
             |(name, _, index, stored, patches)| async move {
                 let old = match stored {
                     Some(at) => Some(self.frame(name, index, at).await?),
@@ -1249,7 +1313,7 @@ impl Snapshot {
             };
             manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
         }
-        let images = try_join_all(patching.iter().map(|&(name, page, frame)| async move {
+        let images = bounded(patching.iter().map(|&(name, page, frame)| async move {
             let reference = self.reference(old, None, name, page);
             let stored = self.stored_page(old, None, name, page);
             let (reference, stored) = futures::try_join!(reference, stored)?;
@@ -1306,16 +1370,28 @@ impl Snapshot {
         for at in manifest.locations().filter(|at| at.pack != pack) {
             *live.entry(at.pack).or_default() += at.len;
         }
-        let sparse: BTreeSet<PackId> = (live.iter())
+        let mut sparse: Vec<(u64, PackId)> = (live.iter())
             .filter(|&(held, &live)| live * 2 < old.sizes.get(held).copied().unwrap_or(0))
-            .map(|(&held, _)| held)
+            .map(|(&held, &live)| (live, held))
+            .collect();
+        // The cheapest to move first, up to a budget, so that no checkpoint
+        // copies a large pack's worth at once.
+        sparse.sort();
+        let mut budget = 0;
+        let sparse: BTreeSet<PackId> = (sparse.into_iter())
+            .take_while(|&(live, _)| {
+                let first = budget == 0;
+                budget += live;
+                first || budget <= MAX_MOVED_BYTES
+            })
+            .map(|(_, held)| held)
             .collect();
         let moving: BTreeSet<Location> = (manifest.locations())
             .filter(|at| sparse.contains(&at.pack))
             .copied()
             .collect();
         let moving: Vec<Location> = moving.into_iter().collect();
-        let fetched = try_join_all(moving.iter().copied().map(|at| self.raw(at))).await?;
+        let fetched = self.raw_runs(&moving).await?;
         let mut moved = HashMap::new();
         for (at, raw) in moving.into_iter().zip(fetched) {
             moved.insert(at, put(&mut body, &raw));
