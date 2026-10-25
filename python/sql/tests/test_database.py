@@ -450,7 +450,7 @@ async def packs_after_commits(keys):
 
 async def test_a_store_that_lists_its_keys_is_collected_and_one_that_cannot_keeps_its_packs():
     swept, kept = await packs_after_commits(True), await packs_after_commits(False)
-    assert swept < 10 and kept > 40, (swept, kept)
+    assert swept < 5 and kept > 10, (swept, kept)
 
 
 def raises():
@@ -468,11 +468,11 @@ async def test_a_listing_that_fails_fails_the_commit_that_collects_which_landed(
     store = backend.request()
     store.keys = keys
     db = await restate_sql.open(ns, store)
-    await db.execute("CREATE TABLE t(n INTEGER)")
+    await db.execute("CREATE TABLE t(b BLOB)")
     committed = 1
-    # A commit that checkpoints collects.
+    # A commit that checkpoints collects: once the tail holds a few rows.
     with pytest.raises(Exception, match="listing failed"):
         for committed in range(1, 40):
-            await db.execute(f"INSERT INTO t VALUES ({committed})")
+            await db.execute("INSERT INTO t VALUES (randomblob(3000))")
     reopened = await restate_sql.open(ns, backend.request())
     assert await reopened.query("SELECT count(*) FROM t") == [[committed]]
