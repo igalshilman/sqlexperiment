@@ -56,11 +56,12 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
     futures::executor::block_on(async {
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
-            // Two pages in a frame each, checkpointed by the next publish,
-            // and no prefetch at open: the reads under test reach the pack.
+            // Two pages in a frame each, checkpointed by every publish, and
+            // no prefetch at open: the reads under test reach the pack.
             let all = state::StateOptions {
                 frame_pages: 1,
                 prefetch_pages: 0,
+                checkpoint_bytes: 1,
                 ..Default::default()
             };
             let initial = KvIo::mount_with_options(base.clone(), all.clone()).await?;

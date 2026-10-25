@@ -88,8 +88,8 @@ durable; before, it doesn't exist.
 
 **Checkpoint.** Once the tail holds `checkpoint_entries` (128) entries or
 `checkpoint_bytes` (1 MiB) since the last checkpoint (with packs in Restate,
-at most the bytes the checkpoint holds, its packs and its manifest, so a
-small database's tail stays short), a flush first writes a checkpoint, as does any flush of a
+at most the bytes the checkpoint holds, its packs and its manifest, but at
+least a frame's, so a small database's tail stays short), a flush first writes a checkpoint, as does any flush of a
 mutation marked `mutation.checkpoint()`. It rewrites each frame the tail
 changed, from the old frame and the tail's pages; or, where the tail changed
 only a few of a frame's pages (their patches stay within half the frame's

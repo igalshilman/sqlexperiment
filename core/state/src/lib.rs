@@ -162,9 +162,8 @@ pub struct StateOptions {
     pub checkpoint_entries: u64,
     /// ... or this many bytes; 0 never does by size. With packs kept in
     /// Restate too, at most the bytes the checkpoint holds (its packs and its
-    /// manifest): there a checkpoint costs only its bytes, and spares the
-    /// tail's. Before the first checkpoint that is 0: the second flush
-    /// checkpoints.
+    /// manifest), but at least a frame's: there a checkpoint costs only its
+    /// bytes, and spares the tail's, though a round trip or two too.
     pub checkpoint_bytes: u64,
 }
 

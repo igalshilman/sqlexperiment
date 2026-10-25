@@ -900,10 +900,13 @@ impl Snapshot {
         // due once the tail passes what the checkpoint holds (its packs and
         // its manifest), as it costs more to read, and to write against its
         // pages, than a checkpoint.
+        // A tail under a frame's bytes is never worth one: a checkpoint, and
+        // the collection after it, costs a round trip or two.
         let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
         let held: u64 = self.durable.manifest.sizes.values().sum::<u64>() + manifest;
+        let frame = head.frame_pages * PAGE;
         let limit = match self.tiered.packs_in_restate {
-            true => bytes.min(held),
+            true => bytes.min(held.max(frame)),
             false => bytes,
         };
         head.version > 0

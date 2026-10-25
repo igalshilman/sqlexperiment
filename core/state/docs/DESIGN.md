@@ -148,7 +148,8 @@ A flush that writes anything checkpoints first once the tail holds
 `checkpoint_entries` (128) entries since the head's checkpoint, or
 `checkpoint_bytes` (1 MiB); with packs in Restate, where a checkpoint costs
 only its bytes, once it holds the bytes the checkpoint holds (its packs
-and its manifest), if fewer, so a small database's tail stays short. A mutation marked with
+and its manifest), if fewer, but at least a frame's (16 KiB), so a small
+database's tail stays short. A mutation marked with
 `Mutation::checkpoint` checkpoints however short the tail is. A checkpoint
 writes the state as of the head, into one new pack:
 
