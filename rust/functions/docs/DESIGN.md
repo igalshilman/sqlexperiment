@@ -1080,48 +1080,64 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 (~3 KiB). The model is a conversation of the host's gateway
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
-there for each request. Measured on 24 October 2026 (4 vCPUs), with the
-memory's turns logged (§5.3):
+there for each request. Measured on 25 October 2026 (4 vCPUs), on the
+state's frame packs (v20: a tail in Restate, checkpoints now and then):
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |    0.63 ms |             9.4 KB |    3.87 ms |   2.03 ms |
-|   10 |               31 KiB |    0.48 ms |             8.0 KB |    1.25 ms |   1.53 ms |
-|   41 |              136 KiB |    0.78 ms |              12 KB |    1.74 ms |   1.52 ms |
-|   98 |              327 KiB |    1.23 ms |             8.2 KB |    1.34 ms |   1.36 ms |
-|  190 |              636 KiB |    2.34 ms |             8.8 KB |    1.49 ms |   1.39 ms |
+|    1 |              1.7 KiB |    0.51 ms |             9.3 KB |    1.60 ms |   1.75 ms |
+|   10 |               31 KiB |    0.50 ms |             9.2 KB |    1.34 ms |   1.29 ms |
+|   41 |              136 KiB |    0.88 ms |              10 KB |    1.13 ms |   1.65 ms |
+|   98 |              327 KiB |    1.40 ms |             9.0 KB |    1.36 ms |   1.28 ms |
+|  190 |              636 KiB |    2.46 ms |             9.8 KB |    1.29 ms |   1.47 ms |
 
-- **Per step:** 11 KB at the median, 7.8–22 KB for nine steps in ten,
-  whatever the conversation's length: the rows of its new messages, the
-  heap's changed pages as one log entry, and a root of 390–610 B. A step
-  that folds the log into the memory's file stores up to 24 KB.
-- **The session:** 2.25 MiB stored over 200 steps. Neither the heap nor
-  Restate's journal holds the requests.
+- **Per step:** 11 KB at the median, whatever the conversation's length: a
+  tail entry with the rows of its new messages and the heap's changed pages,
+  and a head of 20–150 B. A step that folds the memory's log into its file
+  stores up to 24 KB.
+- **Checkpoints:** 17 in 200 steps, further apart as the state grows (steps
+  4, 7, 12, … 167, 196): one is due once the tail holds as many bytes as
+  the packs. Each stores what changed since the one before, 25–98 KB.
+- **The session:** 2.91 MiB stored over 200 steps: 2.01 MiB of tail, 0.90
+  MiB of checkpoints. Neither the heap nor Restate's journal holds the
+  requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in
-  1.1–1.4 ms, reading the file's pages and replaying up to 15 turns.
-- **Against the alternatives** (the same bench, the same day): writing the
-  heap's pages into the file each turn (copy-on-write, from 21 October)
-  stored 21 KB a step and 4.0 MiB in all, in 2.1–2.3 ms turns: a chunk's
-  delta holds every change since its base, so a chunk each turn changes is
-  written whole again each turn, up to a quarter of the base, and each
-  changed chunk is a blob and a put. The state's log before copy-on-write
-  stored 8.8 KB a step plus a 31–41 KB checkpoint every 16 steps or so,
-  2.5 MiB in all, with restores of 1–12 ms.
+  1.2–1.5 ms, reading the checkpoint's frames and replaying the tail. The
+  first restore of a process sometimes takes about 10 ms.
+- **Against the state before frame packs** (6ea9e1e, the same bench, the
+  same machine, the same day), whose log kept each turn's changes and whose
+  file was copy-on-write chunks: 11 KB a step too, 2.25 MiB in all, no step
+  above 24 KB, roots of 390–610 B, and the same turns and restores. Frame
+  packs store 29% more over the session, in their checkpoints, for reads of
+  a large database at a few round trips and a few keys per checkpoint
+  ([the state's architecture](../../../core/state/docs/ARCHITECTURE.md)).
+- **Before that** (24 October): writing the heap's pages into the file each
+  turn (copy-on-write) stored 21 KB a step and 4.0 MiB in all, in 2.1–2.3
+  ms turns; the state's log before copy-on-write stored 8.8 KB a step plus a
+  31–41 KB checkpoint every 16 steps or so, 2.5 MiB in all.
 
-`cargo bench --bench checkpoints`, medians of a turn, the same day:
+`cargo bench --bench checkpoints`, medians of a turn after the first, the
+same day:
 
-| Workload    | Turn, copy-on-write | Turn, logged | Bytes a turn, copy-on-write | Bytes a turn, logged | Puts a turn, copy-on-write | Puts a turn, logged |
-| ----------- | ------------------: | -----------: | --------------------------: | -------------------: | -------------------------: | ------------------: |
-| scalar      |             1.08 ms |      0.49 ms |                       3,576 |                1,318 |                         18 |                   2 |
-| sparse-8m   |             1.16 ms |      0.53 ms |                       3,834 |                1,483 |                         20 |                   2 |
-| growth-3m   |             2.20 ms |      1.29 ms |                       3,228 |                2,326 |                         18 |                   2 |
-| heap-churn  |             5.45 ms |      5.69 ms |                      56,272 |               52,015 |                         38 |                   2 |
-| write-heavy |             3.91 ms |      3.26 ms |                      10,664 |                3,611 |                         26 |                   2 |
+| Workload    | Turn, before | Turn, frame packs | Restored, before | Restored, frame packs | Bytes a turn, before | Bytes a turn, frame packs | Puts a turn, before | Puts a turn, frame packs |
+| ----------- | -----------: | ----------------: | ---------------: | --------------------: | -------------------: | ------------------------: | ------------------: | -----------------------: |
+| scalar      |      0.48 ms |           0.42 ms |          1.25 ms |               1.20 ms |                1,128 |                       986 |                   2 |                        2 |
+| sparse-256k |      0.38 ms |           0.40 ms |          1.14 ms |               1.20 ms |                1,161 |                     1,312 |                   2 |                        2 |
+| sparse-8m   |      0.54 ms |           0.64 ms |          1.27 ms |               1.24 ms |                  910 |                     1,015 |                   2 |                        2 |
+| growth-3m   |      0.44 ms |           0.52 ms |          1.46 ms |               1.54 ms |                1,187 |                     1,303 |                   2 |                        2 |
+| heap-churn  |      5.51 ms |           5.52 ms |          7.40 ms |               7.79 ms |               49,872 |                   104,104 |                   2 |                        4 |
+| write-heavy |      3.42 ms |           3.42 ms |          4.63 ms |               4.85 ms |                1,741 |                     7,458 |                   2 |                        2 |
 
-Restored turns (a new VM each turn) are 1.1–1.3 ms on the small workloads,
-against 1.6–1.8 ms. An entry XORing each page with its previous image,
-instead of a Zstd frame against it, took 0.33 ms a scalar turn, but stored
-1.5 times as much on heap-churn, whose changes move.
+These runs are three or four turns long, too short for checkpoints to
+spread out: a heap that changes most of its pages each turn
+(heap-churn) checkpoints at its second turn and again when it settles, each
+time about as much as a turn's entry, so its median turn stores twice as
+much. Over a long run checkpoints add up to about what the tail stored, and
+less as pages change again before it.
+
+An entry XORing each page with its previous image, instead of a Zstd frame
+against it, took 0.33 ms a scalar turn, but stored 1.5 times as much on
+heap-churn, whose changes move.
 
 ## 11. Scope limits, provenance and references
 
