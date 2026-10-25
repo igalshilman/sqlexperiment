@@ -201,7 +201,12 @@ checkpoint, and the collection after it, costs a round trip or two.
   stored as a patch, compressed against the frame's page, while the
   frame's patches stay within half the frame's stored bytes. A one-row update in a
   large database touches a frame or two, so a checkpoint of 128 such
-  flushes is about 28 KB of patches.
+  flushes is about 28 KB of patches. Patches are per page so that a
+  change rewrites only its page's: one patch per frame (the frame as it
+  is now, against the frame as stored) keeps the manifest smaller, but
+  rewrites every page the frame changed since it was written at each
+  change, and on an aged database put 2,187 bytes a flush against 1,172
+  (branch `claude/frame-patches`).
 - **Rebuild it** otherwise: read the old frame and its patches, apply the
   overlay's pages, compress it again without patches.
 
@@ -482,11 +487,19 @@ Per flush, with a warm cache:
 | Small, update 1    | 20 KiB   | 675 (489 + 90 + 3 + 93)                              | 34 KiB            | 61    | 3 round trips, 26 gets     |
 | 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
 | 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
+| 100k rows, aged    | 27 MiB   | 1172 (225 + 470 + 235 + 242)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
 | 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |
 
 The pack and manifest columns are spread over the flushes: a 1M-row
 database's checkpoint, every 128 flushes, writes about 28 KB of patches
 and a 30 KiB manifest.
+
+The other rows are young, a few hundred flushes old. An aged database
+costs more: its patches pile up, one per page changed since its frame was
+written, and its manifest, written whole, grows with them. After 16,384
+one-row updates, a 100k-row database's manifest is about 7× its first
+(235 bytes a flush against 32), and its packs carry more dead bytes
+before compaction moves them.
 
 Cold reads, at 2 ms a round trip:
 
@@ -504,6 +517,7 @@ Cold reads, at 2 ms a round trip:
 | Small, update 1    | 1735                           | 150 KiB           | 0.01 MiB     | $0.07 / $0.60                                  |
 | 10k rows, update 1 | 436                            | 34 KiB            | 1.15 MiB     | $0.08 / $2.73                                  |
 | 1M rows, update 1  | 653                            | 93 KiB            | 108 MiB      | $0.08 / $3.86                                  |
+| 100k rows, aged    | 702                            | 108 KiB           | 14 MiB       | $0.08 / $4.35                                  |
 | 1M rows, update 10 | 1078                           | 153 KiB           | 108 MiB      | $0.08 / $28.70                                 |
 
 Warm, the cost is the checkpoints' PUT and LIST, once in 128 flushes; cold,

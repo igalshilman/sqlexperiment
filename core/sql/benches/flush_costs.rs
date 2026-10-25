@@ -127,7 +127,7 @@ struct Workload {
     flushes: u64,
 }
 
-const WORKLOADS: [Workload; 10] = [
+const WORKLOADS: [Workload; 11] = [
     // A restate-fns object: a message row, and its sends as effects.
     Workload {
         name: "chat+effects",
@@ -164,6 +164,13 @@ const WORKLOADS: [Workload; 10] = [
         rows: 100_000,
         payload: 256,
         flushes: 256,
+    },
+    // Aged: most of its pages patched, a manifest about 7× as large.
+    Workload {
+        name: "100k aged: update 1",
+        rows: 100_000,
+        payload: 256,
+        flushes: 16_384,
     },
     // 56 MB: a manifest of about 6 KiB.
     Workload {
