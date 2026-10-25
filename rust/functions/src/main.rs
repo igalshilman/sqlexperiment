@@ -15,6 +15,7 @@ use std::time::Duration;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     give_back_freed_memory()?;
+    functions::no_huge_pages()?;
     let programs = functions::embedded()?;
     let mut names: Vec<&str> = programs.names().collect();
     names.sort();

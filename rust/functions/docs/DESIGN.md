@@ -1102,9 +1102,12 @@ state's frame packs (v20: a tail in Restate, checkpoints now and then):
   MiB of checkpoints. Neither the heap nor Restate's journal holds the
   requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in
-  1.1–1.6 ms, reading the checkpoint's frames and replaying the tail. About
-  one in eight takes 10–13 ms instead, with the packs in Restate or in S3
-  alike; why is not known yet.
+  0.8–1.7 ms (0.98 ms at the median), reading the checkpoint's frames and
+  replaying the tail. Before the process turned transparent huge pages off
+  (`no_huge_pages`), one in eight took 10–13 ms and the median was 1.27 ms:
+  the SQL engine maps a 3 MiB buffer arena for each database it opens, asks
+  for huge pages, and its first read then waited for the kernel to zero a
+  2 MiB page.
 - **With the packs in S3** (`cargo bench --bench agent -- s3`, an S3 in
   memory, without its latency): a checkpoint is due once the tail holds 1
   MiB, so 3 in 200 steps (at 64, 128 and 192), each a pack of 73–75 KB in S3

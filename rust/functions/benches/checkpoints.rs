@@ -18,6 +18,8 @@ fn main() -> Result<()> {
         !cfg!(feature = "verify-dirty"),
         "Benchmarks must not include the verification scan"
     );
+    // As the server runs: see no_huge_pages.
+    functions::no_huge_pages()?;
     let before = Instant::now();
     let runtime = Arc::new(Runtime::new()?);
     let mode = if cfg!(feature = "full-scan") {

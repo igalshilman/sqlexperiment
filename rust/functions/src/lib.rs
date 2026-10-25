@@ -52,7 +52,7 @@ pub use files::Files;
 pub use llm::{Llm, Provider};
 pub use model::{GuestError, Operation, Outcome, Progress, RpcTarget, Status, View};
 pub use program::{Program, Programs};
-pub use restate::{bind, embedded, endpoint, faults, page_cache};
+pub use restate::{bind, embedded, endpoint, faults, no_huge_pages, page_cache};
 pub use run::Run;
 pub use signals::{FunctionSignals, Resolved, Signal, Waiting};
 pub use store::Scope;

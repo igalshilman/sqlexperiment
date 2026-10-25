@@ -125,3 +125,19 @@ which LiteLLM 1.106.2 does not take.
 **Then:** check the new LiteLLM release (its source and its wheels' files:
 no `.pth` or `sitecustomize.py`), pin it exactly, and lift the
 `openai-agents` pin (its `TODO:`).
+
+## The SQL engine's huge pages, in the bindings
+
+**Waits on:** a turso release whose buffer arena can do without
+`MADV_HUGEPAGE`, or takes its size (now 3 MiB, 1 MiB under `TESTING=true`).
+
+**Now:** `turso_core` maps a 3 MiB arena for each database it opens and
+asks for transparent huge pages: where the kernel grants them on request
+(`madvise`, the usual default), a cold open's first read waits for a
+2 MiB page to be zeroed, up to 15 ms on a virtual machine. The durable
+functions' server turns them off for its process (`no_huge_pages` in
+`rust/functions/src/restate.rs`, its `TODO:`); the Node.js addon and the
+Python extension run in their users' processes, which they leave alone.
+
+**Then:** open the engine without huge pages in `core/sql` (`open_engine`),
+for every host, and drop `no_huge_pages`.
