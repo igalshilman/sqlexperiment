@@ -68,13 +68,66 @@ chosen instead.
   on `MemoryKv::unfenced`, which panics on a blob key put twice, include
   failpoints at the claim, the sweep's record and the listing.
 
+## What it costs
+
+Measured with `S3=1 cargo bench --features simulation --bench flush_costs`
+(in `core/sql`): SQL workloads of 300 flushes (200 for 10k rows and up, 100
+past 100k), a session per flush as the hosts make, blobs unfenced (so each
+session claims first), a sweep every 16 versions; S3 at US East prices
+(Standard: $0.005 per 1,000 PUTs and LISTs, $0.023 per GB-month; Express One
+Zone: $0.00113 per 1,000 PUTs, $0.0032 per GB uploaded, $0.11 per GB-month;
+deletes are free).
+
+| Workload                   | S3 PUTs per flush | Mean PUT | Upload per flush | LIST pages per flush | Standard, per million flushes | Express, per million flushes |
+| -------------------------- | ----------------- | -------- | ---------------- | -------------------- | ----------------------------- | ---------------------------- |
+| A chat message and effects | 1.2               | 1,000 B  | 1.1 KB           | 0.06                 | $6.1                          | $1.4                         |
+| 100 rows, update 1         | 1.5               | 520 B    | 0.8 KB           | 0.06                 | $7.9                          | $1.8                         |
+| 10k rows, update 1         | 3.0               | 130 B    | 0.4 KB           | 0.06                 | $15                           | $3.5                         |
+| 10k rows, update 10        | 21.7              | 120 B    | 2.7 KB           | 0.11                 | $109                          | $25                          |
+| 100k rows, update 1        | 3.0               | 85 B     | 0.2 KB           | 0.12                 | $16                           | $3.5                         |
+| 200k rows, update 10       | 28.9              | 64 B     | 1.5 KB           | 0.31                 | $146                          | $33                          |
+
+- **Requests are the whole bill.** Storage is not: the 200k-row database
+  (22 MB in S3) costs $0.0005 a month in Standard. A flush puts a blob per
+  changed chunk (a delta) and per changed map node, and past a small
+  database nearly every one is under 512 bytes (64 to 130 on average): S3
+  bills the same for a 100-byte PUT as for a 5 GB one. An object that
+  flushes once a second, a single-row update each, costs about $39 a month
+  in PUTs on Standard, $9 on Express.
+- **Sweeps grow with the database.** A sweep lists every key, a LIST page
+  per 1,000: under 0.3 pages a flush here, but a database of a million keys
+  would cost about 60 pages a flush at a sweep every 16 versions (some $300
+  per million flushes on Standard). Sweeps should follow the garbage made,
+  not the versions.
+- **Claims cost latency, not money.** Every session claims at its first
+  flush: one more Restate round trip (3.2 a flush, cached, where Restate
+  alone takes 2.2).
+- **Cold reads are cheap but slow.** A cold open of the 200k-row database
+  gets 59 blobs ($0.00002), in a few rounds of S3's first-byte latency.
+
+What would change the bill:
+
+1. **A pack per flush.** Put a flush's blobs as one object, and name a blob
+   by its pack and range: one PUT a flush whatever it changed (Standard about
+   $5 per million flushes; the 10-row updates 22 to 29 times less). A pack
+   is deleted only once all its blobs are dead, so long-lived blobs pin old
+   packs: a sweep must compact them, rewriting the live blobs.
+2. **Small blobs in Restate, large ones in S3.** Restate is not billed per
+   request: keep the deltas and nodes (under a few KiB) there, fenced, and
+   put only bases in S3. Steady-state flushes then make next to no S3
+   requests; S3 holds the bulk of the bytes. A blob's reference must say
+   where it is (a bit of its number, say), and a delta that grows past the
+   threshold moves with its next rebase.
+3. **Both, as a log-structured tier.** Flushes write to Restate only; now
+   and then, a batch of their blobs moves to S3 as one pack, and Restate
+   keeps only what is recent: about one PUT per batch.
+4. **S3 Express One Zone**: 4.4 times cheaper per PUT, 4.8 times dearer to
+   store, one zone.
+
 ## Not done
 
-- **Latency and cost are not measured.** A flush is two round trips: S3,
-  then Restate; an attempt's first flush adds one, the claim's sync. A sweep
-  lists the blobs (one S3 request per 1000 keys) every 16 flushes. Today's
-  chunks of 4 pages are a few KiB compressed, and S3 bills per request, so
-  larger chunks may suit S3 better.
+- **Latency is not measured** against real S3: a flush is two round trips,
+  S3 then Restate, and a session's first adds the claim's sync.
 - **Not run against real S3.** `ObjectStoreBlobs` is tested on
   `object_store`'s `InMemory` only.
 - **A zombie in the owner's process costs a retry.** It shares the owner's
