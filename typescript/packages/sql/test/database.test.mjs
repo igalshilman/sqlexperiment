@@ -382,6 +382,33 @@ test('a store that lists its keys is swept now and then; one that cannot keeps i
   assert.ok(swept < 60 && kept > 100, `${swept} blobs swept, ${kept} kept`);
 });
 
+for (const [how, keys] of [
+  ['rejects', async () => Promise.reject(new Error('listing failed'))],
+  [
+    'throws',
+    () => {
+      throw new Error('listing failed');
+    },
+  ],
+]) {
+  test(`a listing that ${how} fails the commit that sweeps, which landed`, async () => {
+    const backend = new Backend();
+    const ns = fresh();
+    const store = backend.request();
+    store.keys = keys;
+    const db = await open(ns, store);
+    await db.execute('CREATE TABLE t(n INTEGER)');
+    let committed = 1;
+    // A commit sweeps every 16 versions.
+    await assert.rejects(async () => {
+      for (; committed < 40; committed++) await db.execute(`INSERT INTO t VALUES (${committed})`);
+    }, /listing failed/);
+    const reopened = await open(ns, backend.request());
+    assert.deepEqual(await reopened.query('SELECT count(*) FROM t'), [[committed]]);
+    await reopened.close();
+  });
+}
+
 /** A reader's view of `backend`: what is stored and written so far, and no writes. */
 const readerOf = (backend) => ({
   async get(key) {

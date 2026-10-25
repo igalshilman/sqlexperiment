@@ -426,3 +426,52 @@ async def test_a_reader_reads_the_state_it_opened_on_beside_the_writer():
     assert await again.query("SELECT n FROM t ORDER BY n") == [[1], [2]]
     await again.close()
     await writer.save()
+
+
+def listing(backend):
+    """As the object's ctx.state_keys(): every key, those not yet synced too."""
+    return lambda: [*backend.stored, *(key for key, _ in backend.unconfirmed)]
+
+
+async def blobs_after_commits(keys):
+    """The blobs left after 100 commits that each replace a row."""
+    backend = Backend()
+    store = backend.request()
+    if keys:
+        store.keys = listing(backend)
+    db = await restate_sql.open(fresh(), store)
+    await db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, b BLOB)")
+    for _ in range(100):
+        await db.execute("INSERT OR REPLACE INTO t VALUES(1, randomblob(3000))")
+    await db.save()
+    return sum(key.startswith("v17/blob/") for key in backend.stored)
+
+
+async def test_a_store_that_lists_its_keys_is_swept_and_one_that_cannot_keeps_its_garbage():
+    swept, kept = await blobs_after_commits(True), await blobs_after_commits(False)
+    assert swept < 60 and kept > 100, (swept, kept)
+
+
+def raises():
+    raise RuntimeError("listing failed")
+
+
+async def rejects():
+    raise RuntimeError("listing failed")
+
+
+@pytest.mark.parametrize("keys", [raises, rejects])
+async def test_a_listing_that_fails_fails_the_commit_that_sweeps_which_landed(keys):
+    backend = Backend()
+    ns = fresh()
+    store = backend.request()
+    store.keys = keys
+    db = await restate_sql.open(ns, store)
+    await db.execute("CREATE TABLE t(n INTEGER)")
+    committed = 1
+    # A commit sweeps every 16 versions.
+    with pytest.raises(Exception, match="listing failed"):
+        for committed in range(1, 40):
+            await db.execute(f"INSERT INTO t VALUES ({committed})")
+    reopened = await restate_sql.open(ns, backend.request())
+    assert await reopened.query("SELECT count(*) FROM t") == [[committed]]
