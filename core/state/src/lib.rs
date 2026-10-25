@@ -806,15 +806,20 @@ impl Mutation {
         let mut logs = std::mem::take(&mut self.logs);
         self.taken = true;
         // Only a flush that writes a head adopts a checkpoint. A failed
-        // checkpoint fails nothing: the next flush tries again.
+        // checkpoint fails nothing: the report says why, and the next flush
+        // tries again.
         let due = self.checkpoint || snapshot.due();
-        let staged = match snapshot.changes(&mut files, &mut records, &mut logs) && due {
-            true => snapshot.checkpoint().await.ok(),
-            false => None,
+        let (staged, failed) = match snapshot.changes(&mut files, &mut records, &mut logs) && due {
+            true => match snapshot.checkpoint().await {
+                Ok(staged) => (Some(staged), None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+            false => (None, None),
         };
         let result = snapshot.commit(files, records, logs, staged).await;
         running.returned = true;
         let (mut report, after) = result?;
+        report.checkpoint_failed = failed;
         *shared.snapshot.lock().unwrap() = Arc::new(after);
         running.done = true;
         for receipt in &self.receipts {

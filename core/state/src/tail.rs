@@ -145,14 +145,24 @@ impl Tiered {
         let Some(previous) = head.previous else {
             return Ok(0);
         };
-        // A store that cannot list keeps its garbage.
-        let listed = futures::try_join!(self.packs.list(PACK_PREFIX), self.manifests.list(""));
-        let (packs, manifests) = match listed {
-            Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(0),
-            listed => listed?,
+        // One listing of Restate's keys finds the manifests, and the packs
+        // kept there; S3's, the packs kept there. A store that cannot list
+        // keeps its garbage.
+        let in_s3 = async {
+            match self.packs_in_restate {
+                true => Ok(Vec::new()),
+                false => unlisted(self.packs.list(PACK_PREFIX).await),
+            }
+        };
+        let (keys, in_s3) =
+            futures::try_join!(async { unlisted(self.restate.keys().await) }, in_s3)?;
+        let in_restate = KvBlobs::new(self.restate.clone());
+        let packs = match self.packs_in_restate {
+            true => in_restate.listed(&keys, PACK_PREFIX).into_iter().collect(),
+            false => in_s3,
         };
         let older = |id: &PackId| id.version < previous.version();
-        let manifests: Vec<String> = (manifests.into_iter())
+        let manifests: BTreeSet<String> = (self.manifests.listed(&keys, "").into_iter())
             .filter(|name| PackId::parse_name(name).is_some_and(|id| older(&id)))
             .collect();
         let older: Vec<(PackId, String)> = (packs.into_iter())
@@ -169,10 +179,33 @@ impl Tiered {
                     .collect()
             }
         };
-        futures::try_join!(
-            self.packs.delete(&garbage),
-            self.manifests.delete(&manifests)
-        )?;
+        // Restate's deletes are queued, and stored by one sync.
+        let mut queued = (self.manifests).queue_delete(&keys, |name| manifests.contains(name))?;
+        let delete_in_s3 = async {
+            match self.packs_in_restate {
+                true => Ok(()),
+                false => self.packs.delete(&garbage).await,
+            }
+        };
+        if self.packs_in_restate {
+            let doomed: BTreeSet<&str> = garbage.iter().map(String::as_str).collect();
+            queued |= in_restate.queue_delete(&keys, |key| doomed.contains(key))?;
+        }
+        let sync = async {
+            match queued {
+                true => self.restate.sync().await,
+                false => Ok(()),
+            }
+        };
+        futures::try_join!(sync, delete_in_s3)?;
         Ok(garbage.len())
+    }
+}
+
+/// A listing; nothing, from a store that cannot list.
+fn unlisted(listed: io::Result<Vec<String>>) -> io::Result<Vec<String>> {
+    match listed {
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(Vec::new()),
+        listed => listed,
     }
 }

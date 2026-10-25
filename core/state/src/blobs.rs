@@ -74,19 +74,37 @@ impl KvBlobs {
         format!("{}{key}/{part}", self.prefix)
     }
 
-    /// The parts' keys of every blob under `prefix`.
-    async fn parts(&self, prefix: &str) -> io::Result<Vec<String>> {
-        let ours = format!("{}{prefix}", self.prefix);
-        let keys = self.store.keys().await?;
-        Ok(keys
-            .into_iter()
-            .filter(|key| key.starts_with(&ours))
-            .collect())
-    }
-
     /// The blob's key, of a part's key.
     fn blob<'k>(&self, part: &'k str) -> Option<&'k str> {
         Some(part.strip_prefix(self.prefix)?.rsplit_once('/')?.0)
+    }
+
+    /// The keys of the blobs under `prefix` whose parts are among `keys`, a
+    /// listing of the store.
+    pub(crate) fn listed(&self, keys: &[String], prefix: &str) -> BTreeSet<String> {
+        (keys.iter())
+            .filter_map(|part| self.blob(part))
+            .filter(|blob| blob.starts_with(prefix))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Queue the deletes of the parts among `keys`, a listing of the store,
+    /// of the blobs `doomed` picks: durable with the store's next sync.
+    /// Whether it queued any.
+    pub(crate) fn queue_delete(
+        &self,
+        keys: &[String],
+        doomed: impl Fn(&str) -> bool,
+    ) -> io::Result<bool> {
+        let mut queued = false;
+        for part in keys {
+            if self.blob(part).is_some_and(&doomed) {
+                self.store.delete(part)?;
+                queued = true;
+            }
+        }
+        Ok(queued)
     }
 }
 
@@ -143,22 +161,16 @@ impl BlobStore for KvBlobs {
             if keys.is_empty() {
                 return Ok(());
             }
-            let keys: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
-            for part in self.parts("").await? {
-                if self.blob(&part).is_some_and(|key| keys.contains(key)) {
-                    self.store.delete(&part)?;
-                }
-            }
+            let blobs: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+            self.queue_delete(&self.store.keys().await?, |blob| blobs.contains(blob))?;
             self.store.sync().await
         })
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>> {
         Box::pin(async move {
-            let keys: BTreeSet<String> = (self.parts(prefix).await?.iter())
-                .filter_map(|part| Some(self.blob(part)?.to_owned()))
-                .collect();
-            Ok(keys.into_iter().collect())
+            let keys = self.store.keys().await?;
+            Ok(self.listed(&keys, prefix).into_iter().collect())
         })
     }
 }

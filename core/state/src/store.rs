@@ -143,6 +143,9 @@ pub struct FlushReport {
     /// What the checkpoint its head names did, if it named a new one
     /// ([`crate::StateOptions::checkpoint_entries`]).
     pub checkpoint: Option<Checkpointed>,
+    /// Why the checkpoint that was due failed: the flush went on without
+    /// it, the tail grows, and the next flush tries again.
+    pub checkpoint_failed: Option<String>,
 }
 
 /// What a checkpoint did ([`FlushReport::checkpoint`]).
@@ -209,6 +212,27 @@ pub(crate) struct Durable {
 }
 
 impl Durable {
+    /// About the bytes it takes in memory: the values and pages it holds,
+    /// and the manifest's locations.
+    pub fn estimated_bytes(&self) -> usize {
+        const LOCATION: usize = 40;
+        let files = (self.manifest.files.values())
+            .map(|file| (file.frames.len() + file.patches.len()) * LOCATION)
+            .sum::<usize>();
+        let pages = (self.files.values())
+            .flat_map(|file| file.pages.values())
+            .map(|page| page.as_ref().map_or(0, Bytes::len) + LOCATION)
+            .sum::<usize>();
+        let records = (self.records.iter())
+            .map(|(name, value)| name.len() + value.len() + LOCATION)
+            .sum::<usize>();
+        let logs = (self.logs.values())
+            .flat_map(|log| &log.values)
+            .map(|value| value.len() + LOCATION)
+            .sum::<usize>();
+        files + pages + records + logs
+    }
+
     /// The state of `head` with nothing in it.
     pub fn empty(head: Head) -> Self {
         Self {
@@ -725,7 +749,6 @@ impl Snapshot {
         frames.insert(at, image);
     }
 
-    /// The bytes at `at`, in a pack: from the cache, or the pack store.
     /// The manifest of `checkpoint`, from the cache or Restate.
     async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
         if let Some(cache) = &self.cache
@@ -740,6 +763,7 @@ impl Snapshot {
         Manifest::decode(&encoded)
     }
 
+    /// The bytes at `at`, in a pack: from the cache, or the pack store.
     async fn raw(&self, at: Location) -> io::Result<Bytes> {
         let cache = self.cache.clone();
         if let Some(cache) = &cache
@@ -872,9 +896,11 @@ impl Snapshot {
             self.options.checkpoint_bytes,
         );
         // With packs in Restate, a checkpoint costs only its bytes: one is
-        // due once the tail passes what the checkpoint holds, as it costs
-        // more to read, and to write against its pages, than a checkpoint.
-        let held: u64 = self.durable.manifest.sizes.values().sum();
+        // due once the tail passes what the checkpoint holds (its packs and
+        // its manifest), as it costs more to read, and to write against its
+        // pages, than a checkpoint.
+        let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
+        let held: u64 = self.durable.manifest.sizes.values().sum::<u64>() + manifest;
         let limit = match self.tiered.packs_in_restate {
             true => bytes.min(held),
             false => bytes,
@@ -1001,6 +1027,7 @@ impl Snapshot {
             entry_bytes,
             head_bytes: head_bytes.len(),
             checkpoint: staged.map(|staged| staged.report),
+            checkpoint_failed: None,
         };
         Ok((report, self.continued(next)))
     }
