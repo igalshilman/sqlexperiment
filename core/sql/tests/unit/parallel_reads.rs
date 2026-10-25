@@ -4,9 +4,11 @@ use futures::{channel::oneshot, future::BoxFuture};
 use state::{kv::KvStore, simulation::MemoryKv};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Pack reads held until their gate opens, in the order they come.
 struct GatedReads {
     inner: MemoryKv,
-    gates: Mutex<BTreeMap<String, oneshot::Receiver<()>>>,
+    gates: Mutex<VecDeque<oneshot::Receiver<()>>>,
+    gated: AtomicUsize,
     active: AtomicUsize,
     maximum: AtomicUsize,
     fail_first: bool,
@@ -20,13 +22,17 @@ impl Drop for Active<'_> {
 impl KvStore for GatedReads {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
         Box::pin(async move {
-            let gate = self.gates.lock().unwrap().remove(key);
+            let pack = key.starts_with(state::blobs::KV_PREFIX);
+            let gate = pack
+                .then(|| self.gates.lock().unwrap().pop_front())
+                .flatten();
             if let Some(gate) = gate {
+                let first = self.gated.fetch_add(1, Ordering::SeqCst) == 0;
                 let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 let _active = Active(&self.active);
                 self.maximum.fetch_max(n, Ordering::SeqCst);
                 gate.await.map_err(io::Error::other)?;
-                if self.fail_first && key == state::simulation::blob_key(0) {
+                if self.fail_first && first {
                     return Err(io::Error::other("injected read error"));
                 }
                 return self.inner.get(key).await;
@@ -50,10 +56,10 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
     futures::executor::block_on(async {
         for mode in ["success", "error", "cancel"] {
             let base = Arc::new(MemoryKv::default());
-            // Two pages in a blob each, and no prefetch at open: the reads
-            // under test reach the backend.
+            // Two pages in a frame each, checkpointed by the next publish,
+            // and no prefetch at open: the reads under test reach the pack.
             let all = state::StateOptions {
-                chunk_pages: 1,
+                frame_pages: 1,
                 prefetch_pages: 0,
                 ..Default::default()
             };
@@ -62,19 +68,23 @@ fn parallel_reads_preserve_barriers_and_retire_on_error_or_cancel() -> crate::Re
                 .write(0, 0, &buffers(&vec![7; 2 * BLOCK_SIZE]))
                 .await?;
             initial.publish().await?;
+            initial
+                .write(0, 2 * BLOCK_SIZE as u64, &buffers(&vec![7; BLOCK_SIZE]))
+                .await?;
+            initial.publish().await?;
             let (send_a, recv_a) = oneshot::channel();
             let (send_b, recv_b) = oneshot::channel();
             let store = Arc::new(GatedReads {
                 inner: base.fork(),
-                gates: Mutex::new(BTreeMap::from([
-                    (state::simulation::blob_key(0), recv_a),
-                    (state::simulation::blob_key(1), recv_b),
-                ])),
+                gates: Mutex::new(VecDeque::new()),
+                gated: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
                 fail_first: mode == "error",
             });
             let io = KvIo::mount_with_options(store.clone(), all).await?;
+            // Mounted (its manifest read), the next two pack reads wait.
+            store.gates.lock().unwrap().extend([recv_a, recv_b]);
             let file = MountedIo(io.clone()).open_file(DB_PATH, OpenFlags::Create, false)?;
             let outputs: Vec<_> = (0..4)
                 .map(|_| Arc::new(Buffer::new_temporary(BLOCK_SIZE)))

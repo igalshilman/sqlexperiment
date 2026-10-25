@@ -1,5 +1,5 @@
-//! End-to-end SQL campaign: every backend mutation of a save and the sweep
-//! after it fails in every outcome, with and without a crash and an owner
+//! End-to-end SQL campaign: every backend mutation of a save and the garbage
+//! collection after it fails in every outcome, with and without a crash and an owner
 //! cache. The save is atomic, the database stays consistent and the next
 //! save works.
 use crate::host::Db;
@@ -14,15 +14,17 @@ use std::sync::Arc;
 fn options(cache: Option<&Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            garbage_after: 1,
+            checkpoint_entries: 1,
             ..StateOptions::default()
         },
         cache: cache.cloned(),
+        packs: None,
     }
 }
 
-/// Two saves: the second leaves garbage, which a sweep marks for the next to
-/// delete.
+/// Two sessions, a checkpoint each flush, and a collection: the next save
+/// deletes the tail its checkpoint covers, and the collection after it the
+/// packs no checkpoint needs.
 async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
@@ -36,7 +38,7 @@ async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     db.execute("UPDATE t SET n = n + 100 WHERE id % 3 = 0")
         .await?;
     db.flush().await?;
-    assert!(db.state().collect_garbage().await?.dead > 0);
+    db.state().collect_garbage().await?;
     Ok(store)
 }
 
@@ -110,8 +112,8 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                 }
             }
         }
-        // Blob puts, a root put, a sweep put and garbage deletes, cached or not.
-        assert!(cases >= 40, "{cases}");
+        // Pack, tail and head puts, and tail and pack deletes, cached or not.
+        assert!(cases >= 30, "{cases}");
         println!("SQL save failpoints: {cases} cases");
         Ok(())
     })

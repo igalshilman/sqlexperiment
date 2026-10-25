@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    // A page per blob: each query reads blobs of its own.
+    // A page per frame: each query reads frames of its own.
     let options = StateOptions {
-        chunk_pages: 1,
+        frame_pages: 1,
         ..StateOptions::default()
     };
     let mut db = Db::open(Arc::new(store.clone()), options).await?;
@@ -22,12 +22,12 @@ async fn baseline() -> Result<MemoryKv> {
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30) INSERT INTO t SELECT x,x,printf('%09000d',x) FROM n").await?;
-    db.save().await?;
+    db.save_checkpointed().await?;
     Ok(store)
 }
 fn collecting() -> StateOptions {
     StateOptions {
-        garbage_after: 1,
+        checkpoint_entries: 1,
         ..StateOptions::default()
     }
 }
@@ -160,22 +160,23 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
-/// A flush that fails, at a write of a blob or at its sync, has an
+/// A flush that fails, at the put of its tail entry or at its sync, has an
 /// unknown outcome: after a crash it is there only if the sync stored it.
 #[test]
 fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (operation, prefix) in [(Operation::Put, "v17/blob/"), (Operation::Sync, "")] {
+        for (operation, prefix) in [(Operation::Put, "v19/tail/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
-                // The save puts its blobs, then its root.
+                // The save puts its tail entry, then its head.
                 let mut db = Db::open(store.clone(), collecting()).await?;
                 db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
                     .await?;
                 let _gate = store.arm(plan(operation, prefix, 1, effect, false));
-                assert!(db.save().await.is_err());
+                let saved = db.save().await;
+                assert!(saved.is_err());
                 assert_eq!(store.active(), 0, "the failed sync must settle");
                 store.disarm();
                 store.inner.crash();
@@ -206,7 +207,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
                 .filter(|e| e.operation == Operation::Get)
                 .count()
         };
-        assert!(reads >= 2, "the root, then blobs");
+        assert!(reads >= 3, "the head, the tail, the manifest, then frames");
         for nth in 1..=reads {
             for effect in [Effect::None, Effect::After] {
                 for cancel in [false, true] {
@@ -244,7 +245,7 @@ fn open_read_failures_are_retryable() -> Result<()> {
 fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let key = "v17/blob/1";
+        let key = &format!("{}0-1/0", state::blobs::KV_PREFIX);
         assert!(store.get(key).await?.is_none());
         store.put(key, vec![1; 4096].into())?;
         store.get(key).await?;
@@ -252,7 +253,7 @@ fn counters_distinguish_request_bytes_reclamation_and_missing_keys() -> Result<(
         store.delete(key)?;
         store.delete(key)?;
         let s = store.stats();
-        let t = &s.by_kind["blob"];
+        let t = &s.by_kind["pack"];
         assert_eq!((t.gets, t.misses, t.puts, t.deletes), (3, 1, 1, 2));
         assert_eq!(
             (t.bytes_read, t.bytes_written, t.bytes_deleted),

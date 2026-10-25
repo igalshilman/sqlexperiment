@@ -17,11 +17,12 @@ use std::sync::Arc;
 fn options(cache: Option<Namespace>) -> StateSetup {
     StateSetup {
         options: StateOptions {
-            garbage_after: 3,
+            checkpoint_entries: 3,
             prefetch_pages: 0,
             ..StateOptions::default()
         },
         cache,
+        packs: None,
     }
 }
 
@@ -312,9 +313,9 @@ async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
 
 /// A reader beside its owner, who flushes meanwhile, some flushes failing,
 /// while some of the reader's reads fail too. What a reader reads is the
-/// state it opened on, however the owner flushes: the blobs its root names
-/// stay for `garbage_after` flushes. Every other reader reads through the
-/// owner's cache, which it changes nothing in.
+/// state it opened on, however the owner flushes: the tail and the packs
+/// its head names stay for a checkpoint more. Every other reader reads
+/// through the owner's cache, which it changes nothing in.
 #[test]
 fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
     futures::executor::block_on(async {
@@ -351,7 +352,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             if round % 5 == 0 {
                 let plan = failpoint(
                     Operation::Get,
-                    "v17/blob/",
+                    state::blobs::KV_PREFIX,
                     1 + round as usize % 3,
                     Effect::None,
                     round % 2 == 0,
@@ -381,7 +382,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                 if k == 1 {
                     let plan = failpoint(
                         Operation::Put,
-                        "v17/root",
+                        state::HEAD_KEY,
                         1,
                         [Effect::None, Effect::After][round as usize % 2],
                         false,

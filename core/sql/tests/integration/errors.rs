@@ -109,7 +109,10 @@ fn a_duplicate_request_rolls_back_and_the_session_goes_on() -> Result<()> {
 #[test]
 fn storage_errors_end_the_session() -> Result<()> {
     futures::executor::block_on(async {
-        for (operation, prefix) in [(Operation::Get, "v17/blob/"), (Operation::Put, "v17/root")] {
+        for (operation, prefix) in [
+            (Operation::Get, state::blobs::KV_PREFIX),
+            (Operation::Put, "v19/head"),
+        ] {
             let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
             let mut db = Db::open(store.clone(), options(Durability::Commit)).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, pad BLOB)")

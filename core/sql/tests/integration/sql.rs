@@ -95,10 +95,11 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, label TEXT, payload TEXT)")
             .await?;
         db.execute("CREATE INDEX t_label ON t(label)").await?;
-        // Incompressible payloads make this a large save, which checkpoints itself.
+        // Incompressible payloads make this a large save, checkpointed in
+        // frames of pages.
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4000) INSERT INTO t SELECT x, printf('label-%06d',x), randomblob(400) FROM n").await?;
         db.checkpoint().await?;
-        db.save().await?;
+        db.save_checkpointed().await?;
         let total = store.stored_bytes();
         store.reset_stats();
         let mut db = Db::open(store.clone(), StateOptions::default()).await?;
@@ -106,7 +107,13 @@ fn cold_indexed_lookup_is_lazy() -> Result<()> {
         let rows = db.query(sql).await?;
         assert_eq!(rows[0][0].to_string(), "2341");
         let stats = store.stats();
-        assert!(stats.by_kind["blob"].gets < store.blob_count() as u64 / 10);
+        let parts = (store.keys().iter())
+            .filter(|key| key.starts_with(state::blobs::KV_PREFIX))
+            .count();
+        assert!(
+            stats.by_kind["pack"].gets < parts as u64 / 4,
+            "{parts} parts: {stats:?}"
+        );
         assert!(stats.bytes_read < total as u64 / 10, "{stats:?}");
         assert!(stats.gets > 0);
         store.reset_stats();
@@ -147,7 +154,7 @@ fn repeated_local_commits_publish_only_final_database_blocks() -> Result<()> {
         db.save().await?;
         let stats = store.stats();
         // A blob per chunk of the final pages, then the root.
-        let chunks = database_len.div_ceil(4096 * state::CHUNK_PAGES);
+        let chunks = database_len.div_ceil(4096 * state::FRAME_PAGES);
         assert_eq!(stats.puts, chunks + 1);
         assert!(database_len.div_ceil(4096) >= 2);
         assert!(stats.bytes_written < engine_wal / 10);

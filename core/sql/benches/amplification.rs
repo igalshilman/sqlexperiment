@@ -33,7 +33,7 @@ struct Sample {
 impl Sample {
     fn emit(&self, phase: &str, store: &MemoryKv, local_db: u64, local_wal: u64) {
         let s = store.stats();
-        for kind in ["all", "blob", "root", "other"] {
+        for kind in ["all", "head", "tail", "pack", "other"] {
             let t = if kind == "all" {
                 sum(&s)
             } else {
