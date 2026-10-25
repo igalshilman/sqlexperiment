@@ -495,6 +495,66 @@ fn a_checkpoint_that_fails_is_reported_and_the_flush_goes_on() -> Result<()> {
     })
 }
 
+/// A checkpoint that keeps failing (its store down) is tried at the next
+/// flush, then at fewer and fewer of them, not at every one; the states
+/// the namespace opens next in the same cache wait as well. One that
+/// succeeds again ends the wait.
+#[test]
+fn a_checkpoint_that_keeps_failing_is_tried_less_and_less() -> Result<()> {
+    futures::executor::block_on(async {
+        let packs = MemoryBlobs::default();
+        let store = Arc::new(MemoryKv::default());
+        let cache = open_cache(cache_config(4 << 20, 4 << 20));
+        let options = state::StateOptions {
+            checkpoint_entries: 1,
+            ..Default::default()
+        };
+        let open = || {
+            State::open(store.clone())
+                .checkpoints(Arc::new(packs.clone()))
+                .options(options.clone())
+                .cached(&cache, "db")
+        };
+        // Whether a flush tried a checkpoint, and whether it made one. Never
+        // a page of zeros, which a checkpoint stores nothing of (no put).
+        let flush = async |state: &State, n: u8| -> Result<(bool, bool)> {
+            let mut mutation = state.mutation();
+            mutation.write(&state.file("db")?, 0, Some(page(n % 250 + 1)))?;
+            let report = mutation.flush().await?;
+            let made = report.checkpoint.is_some();
+            Ok((made || report.checkpoint_failed.is_some(), made))
+        };
+        let state = open().await?;
+        flush(&state, 1).await?;
+        packs.fail_after(Some(0));
+        let mut tried = Vec::new();
+        for n in 0..40 {
+            if flush(&state, n).await?.0 {
+                tried.push(n);
+            }
+        }
+        // At 0, then 1, 3, 7, 15 and 31 flushes after it: twice the wait each time.
+        assert_eq!(tried, [0, 1, 3, 7, 15, 31], "the flushes that tried");
+
+        // A state opened next in the cache waits out the same backoff.
+        drop(state);
+        let state = open().await?;
+        assert!(!flush(&state, 40).await?.0, "still waiting");
+
+        packs.fail_after(None);
+        let mut made = None;
+        for n in 41..120 {
+            if flush(&state, n).await?.1 {
+                made = Some(n);
+                break;
+            }
+        }
+        assert!(made.is_some(), "a checkpoint once the store is back");
+        assert!(flush(&state, 0).await?.1, "and at every flush again");
+        Ok(())
+    })
+}
+
 /// With packs in Restate, a collection lists the keys once, and stores its
 /// deletes, of packs and manifests together, with one sync.
 #[test]

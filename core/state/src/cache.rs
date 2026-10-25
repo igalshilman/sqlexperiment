@@ -255,6 +255,37 @@ struct Owner {
     /// has settled since.
     unknown: u64,
     settled: u64,
+    /// When the next checkpoint may be tried, after some failed.
+    backoff: Backoff,
+}
+
+/// Checkpoints that failed in a row, and the version from which the next
+/// may be tried: the first retry is at the next flush, and each failure
+/// after it doubles the flushes to wait, up to 64. A checkpoint that fails
+/// for good (its store down, say) then costs one flush in 64, not each.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Backoff {
+    failures: u32,
+    next: u64,
+}
+
+impl Backoff {
+    /// Whether a checkpoint due before the flush of a state at `version`
+    /// may be tried.
+    pub(crate) fn allows(&self, version: u64) -> bool {
+        version >= self.next
+    }
+
+    /// A checkpoint tried at `version` failed.
+    pub(crate) fn failed(&mut self, version: u64) {
+        self.failures += 1;
+        self.next = version + (1 << (self.failures - 1).min(6));
+    }
+
+    /// A checkpoint succeeded.
+    pub(crate) fn succeeded(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl NamespaceCache {
@@ -404,6 +435,16 @@ impl NamespaceCache {
         claimed
     }
 
+    /// When the namespace's next checkpoint may be tried.
+    pub(crate) fn backoff(&self) -> Backoff {
+        self.owner().backoff
+    }
+
+    /// Keep `backoff` for the namespace's next states.
+    pub(crate) fn set_backoff(&self, backoff: Backoff) {
+        self.owner().backoff = backoff;
+    }
+
     /// The version of this owner's last durable flush, if still known.
     pub(crate) fn committed(&self) -> Option<u64> {
         self.owner().committed
@@ -489,6 +530,7 @@ impl Owner {
             generation: 0,
             unknown: 0,
             settled: 0,
+            backoff: Backoff::default(),
         }
     }
 }

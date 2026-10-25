@@ -172,7 +172,8 @@ pub struct FlushReport {
     /// ([`crate::StateOptions::checkpoint_entries`]).
     pub checkpoint: Option<Checkpointed>,
     /// Why the checkpoint that was due failed: the flush went on without
-    /// it, the tail grows, and the next flush tries again.
+    /// it, the tail grows, and the next flush tries again; after more
+    /// failures in a row, fewer and fewer flushes do (one in 64 at most).
     pub checkpoint_failed: Option<String>,
 }
 
