@@ -44,6 +44,16 @@ fn namespaces_never_share_ranges() {
     })
 }
 
+/// What an open does: validate the head it read, then record it, and, if
+/// it was not known, that a flush may build on `version`. Whether it was
+/// known.
+fn open(cache: &NamespaceCache, head: Option<Bytes>, version: u64) -> bool {
+    let validated = cache.validate(head.as_deref());
+    let committed = (!validated.known).then_some(version);
+    cache.record(&validated, head, committed, durable());
+    validated.known
+}
+
 /// The same head is known; another one forgets this owner's flush, and
 /// keeps the ranges, which never change.
 #[test]
@@ -51,40 +61,73 @@ fn another_head_forgets_the_flush_not_the_ranges() {
     futures::executor::block_on(async {
         let head = |n: u8| Bytes::from(vec![b'S', b'H', b'2', b'0', n]);
         let cache = fresh_namespace_cache();
-        assert!(!cache.validate(None), "a fresh owner knows nothing");
-        cache.record(None, Some(0), durable());
-        assert!(cache.validate(None), "an absent head, as recorded");
-        assert!(!cache.validate(Some(&head(1))), "not after another");
-        cache.record(Some(head(1)), Some(3), durable());
+        assert!(!open(&cache, None, 0), "a fresh owner knows nothing");
+        assert!(open(&cache, None, 0), "an absent head, as recorded");
+        assert!(!open(&cache, Some(head(1)), 3), "not after another");
         cache.insert(at(0, 1), value(4));
-        assert!(cache.validate(Some(&head(1))));
+        assert!(cache.validate(Some(&head(1))).known);
         assert_eq!(cache.committed(), Some(3));
 
         // Another writer flushed: the ranges stay.
-        assert!(!cache.validate(Some(&head(2))));
+        assert!(!cache.validate(Some(&head(2))).known);
         assert_eq!(cache.committed(), None);
         assert_eq!(cache.get(at(0, 1)).await, Some(value(4)));
 
         // A flush with an unknown outcome forgets the head, and makes the
         // next open sync.
-        cache.record(Some(head(3)), Some(5), durable());
+        open(&cache, Some(head(3)), 5);
         cache.forget();
-        assert!(!cache.validate(Some(&head(3))));
+        assert!(!cache.validate(Some(&head(3))).known);
         assert_eq!(cache.unsettled(), Some(1));
         cache.settled(1);
         assert_eq!(cache.unsettled(), None);
 
         // A flush runs: an open syncs, and does not let another flush build
         // on the head it reads, until the flush ends.
-        cache.record(Some(head(4)), Some(6), durable());
+        open(&cache, Some(head(4)), 6);
         assert!(cache.claim(6));
         assert_eq!(cache.unsettled(), Some(1));
-        cache.record(Some(head(5)), Some(7), durable());
+        open(&cache, Some(head(5)), 7);
         assert!(!cache.claim(7));
         cache.flushed(head(5), 7, durable());
         assert_eq!(cache.unsettled(), None);
         assert!(cache.claim(7));
     })
+}
+
+/// An open whose load overlapped another state's flush records nothing:
+/// the head it read is stale, and a flush on top of it would overwrite the
+/// one that landed.
+#[test]
+fn a_stale_open_records_nothing() {
+    let head = |n: u8| Bytes::from(vec![b'S', b'H', b'2', b'0', n]);
+    let cache = fresh_namespace_cache();
+    // A slow open reads the head of version 1, and loads.
+    let slow = cache.validate(Some(&head(1)));
+    // Meanwhile another state opens on it, and flushes version 2.
+    open(&cache, Some(head(1)), 1);
+    assert!(cache.claim(1));
+    cache.flushed(head(2), 2, durable());
+    // The slow open's load ends.
+    cache.record(&slow, Some(head(1)), Some(1), durable());
+    assert_eq!(cache.committed(), Some(2));
+    assert!(!cache.claim(1), "no flush on the stale head");
+    assert!(cache.validate(Some(&head(2))).known);
+}
+
+/// A flush dropped before it claimed leaves another state's flush running.
+#[test]
+fn a_flush_that_never_claimed_leaves_the_running_one() {
+    let cache = crate::simulation::open_cache(crate::simulation::cache_config(1 << 20, 4 << 20));
+    let (flushing, dropped) = (cache.namespace("a"), cache.namespace("a"));
+    open(&flushing, None, 1);
+    assert!(flushing.claim(1));
+    dropped.forget();
+    dropped.settled(1);
+    assert_eq!(flushing.unsettled(), Some(1), "an open still syncs");
+    flushing.forget();
+    flushing.settled(2);
+    assert_eq!(flushing.unsettled(), None);
 }
 
 /// Idle state that refers back to its namespace's handle (as a parked SQL
@@ -122,7 +165,7 @@ fn values_read_as_slices_of_a_larger_buffer_are_kept_alone() {
         let cached = cache.get(at(0, 1)).await.expect("cached");
         assert_eq!(cached, slice);
         assert!(!inside(&cached));
-        cache.record(Some(slice.clone()), None, durable());
+        cache.record(&cache.validate(None), Some(slice.clone()), None, durable());
         assert!(!inside(cache.owner().head.as_ref().unwrap()));
     })
 }
@@ -159,9 +202,9 @@ fn namespaces_are_kept_by_the_bytes_of_their_states() {
         state
             .records
             .insert("value".into(), Bytes::from(vec![0; 16 << 10]));
-        cache
-            .namespace(&n.to_string())
-            .record(None, Some(1), Arc::new(state));
+        let namespace = cache.namespace(&n.to_string());
+        let validated = namespace.validate(None);
+        namespace.record(&validated, None, Some(1), Arc::new(state));
     }
     let kept = (0..64)
         .filter(|n| cache.namespace(&n.to_string()).durable().is_some())

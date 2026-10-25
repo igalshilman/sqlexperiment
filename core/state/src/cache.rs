@@ -21,7 +21,8 @@
 //! of it (so that an open that reads the same head reads nothing more), its
 //! last durable flush (so a state can tell another flushed since it
 //! opened), and the values parked at that flush (SQL's engine, say), for the
-//! next state. A flush
+//! next state. An open records what it read only if nothing changed while
+//! it loaded: a flush that landed meanwhile made it stale. A flush
 //! whose outcome is unknown leaves writes this owner can read but a crash
 //! can still lose, so the next open syncs first
 //! ([`NamespaceCache::unsettled`]): what it reads, and caches, is durable.
@@ -199,6 +200,7 @@ impl PageCache {
             parked: Arc::downgrade(&self.parked),
             key: key.to_owned(),
             id,
+            handle: self.shared.ids.fetch_add(1, Relaxed),
             owner,
         }
     }
@@ -217,7 +219,18 @@ pub struct NamespaceCache {
     key: String,
     /// The owner's identity, which keys its ranges and parked values.
     id: u64,
+    /// This handle's identity: the state whose flush holds the right to
+    /// flush ([`Owner::flushing`]).
+    handle: u64,
     owner: Arc<Mutex<Owner>>,
+}
+
+/// What [`NamespaceCache::validate`] found, for the open's
+/// [`NamespaceCache::record`].
+pub(crate) struct Validated {
+    /// The head the open read is the one the owner last saw.
+    pub(crate) known: bool,
+    generation: u64,
 }
 
 /// Per-namespace state.
@@ -231,9 +244,13 @@ struct Owner {
     durable: Option<Arc<Durable>>,
     /// The version of this owner's last durable flush.
     committed: Option<u64>,
-    /// A state's flush took the right to flush ([`NamespaceCache::claim`])
-    /// and has not ended: its writes may be visible, and not durable yet.
-    flushing: bool,
+    /// The handle whose flush took the right to flush
+    /// ([`NamespaceCache::claim`]) and has not ended: its writes may be
+    /// visible, and not durable yet.
+    flushing: Option<u64>,
+    /// Counts the changes above: an open records what it read only if
+    /// nothing changed since it validated ([`NamespaceCache::record`]).
+    generation: u64,
     /// Flushes with an unknown outcome so far, and how many of them a sync
     /// has settled since.
     unknown: u64,
@@ -246,18 +263,25 @@ impl NamespaceCache {
     }
 
     /// Compare the head that open read (`bytes`) to what this owner last
-    /// saw: whether it is the same.
-    pub(crate) fn validate(&self, bytes: Option<&[u8]>) -> bool {
+    /// saw: whether it is the same, as of what the owner is now.
+    pub(crate) fn validate(&self, bytes: Option<&[u8]>) -> Validated {
         let mut owner = self.owner();
         // An absent head is an empty namespace; a real head is never empty.
         if owner.head.as_deref() == Some(bytes.unwrap_or_default()) {
-            return true;
+            return Validated {
+                known: true,
+                generation: owner.generation,
+            };
         }
         let stale = self.forget_locked(&mut owner);
+        let generation = owner.generation;
         // Parked values may hold state handles, whose drop takes this lock.
         drop(owner);
         drop(stale);
-        false
+        Validated {
+            known: false,
+            generation,
+        }
     }
 
     /// The state as of the head this owner last saw.
@@ -266,19 +290,26 @@ impl NamespaceCache {
     }
 
     /// Record the durable head `bytes` an open read, and the state as of
-    /// it, and, if `committed`, that a flush may build on it, unless a flush
-    /// runs: that one's outcome decides.
+    /// it, and, if `committed`, that a flush may build on it unless a flush
+    /// runs (that one's outcome decides); nothing, if the owner changed
+    /// since the open's [`Self::validate`]: another state flushed, or failed
+    /// to, and what the open read may be stale.
     pub(crate) fn record(
         &self,
+        validated: &Validated,
         bytes: Option<Bytes>,
         committed: Option<u64>,
         durable: Arc<Durable>,
     ) {
         let mut owner = self.owner();
+        if owner.generation != validated.generation {
+            return;
+        }
+        owner.generation += 1;
         // An absent head is a real state: an empty namespace.
         owner.head = Some(owned(&bytes.unwrap_or_default()));
         owner.durable = Some(durable);
-        if committed.is_some() && !owner.flushing {
+        if committed.is_some() && owner.flushing.is_none() {
             owner.committed = committed;
         }
         drop(owner);
@@ -292,7 +323,8 @@ impl NamespaceCache {
         owner.head = Some(bytes);
         owner.durable = Some(durable);
         owner.committed = Some(version);
-        owner.flushing = false;
+        owner.flushing = None;
+        owner.generation += 1;
         drop(owner);
         self.reweigh();
     }
@@ -303,14 +335,16 @@ impl NamespaceCache {
         (self.shared.namespaces).insert(self.key.clone(), self.owner.clone());
     }
 
-    /// Forget the head after a flush whose outcome is unknown.
+    /// Forget the head after a flush whose outcome is unknown, this
+    /// handle's: it no longer runs.
     pub(crate) fn forget(&self) {
         let mut owner = self.owner();
-        owner.flushing = false;
+        if owner.flushing == Some(self.handle) {
+            owner.flushing = None;
+        }
         owner.unknown += 1;
         let stale = self.forget_locked(&mut owner);
-        drop(owner);
-        drop(stale);
+        // Under the owner's lock, which a sync settling it takes too.
         let mut unsettled = self.shared.unsettled.lock().unwrap();
         if !unsettled
             .iter()
@@ -318,6 +352,9 @@ impl NamespaceCache {
         {
             unsettled.push(self.owner.clone());
         }
+        drop(unsettled);
+        drop(owner);
+        drop(stale);
     }
 
     /// The flushes with an unknown outcome so far, if a sync has not settled
@@ -325,7 +362,7 @@ impl NamespaceCache {
     /// durable, so an open syncs before it reads (and caches).
     pub(crate) fn unsettled(&self) -> Option<u64> {
         let owner = self.owner();
-        (owner.unknown != owner.settled || owner.flushing).then_some(owner.unknown)
+        (owner.unknown != owner.settled || owner.flushing.is_some()).then_some(owner.unknown)
     }
 
     /// A sync succeeded after the first `unknown` flushes with an unknown
@@ -334,7 +371,7 @@ impl NamespaceCache {
         let mut owner = self.owner();
         owner.settled = owner.settled.max(unknown);
         if owner.settled == owner.unknown {
-            drop(owner);
+            // Under the owner's lock: a flush failing now stays unsettled.
             let mut unsettled = self.shared.unsettled.lock().unwrap();
             unsettled.retain(|owner| !Arc::ptr_eq(owner, &self.owner));
         }
@@ -347,6 +384,7 @@ impl NamespaceCache {
         owner.head = None;
         owner.durable = None;
         owner.committed = None;
+        owner.generation += 1;
         self.take_parked()
     }
 
@@ -360,7 +398,8 @@ impl NamespaceCache {
         let claimed = owner.committed == Some(version);
         if claimed {
             owner.committed = None;
-            owner.flushing = true;
+            owner.flushing = Some(self.handle);
+            owner.generation += 1;
         }
         claimed
     }
@@ -445,7 +484,8 @@ impl Owner {
             head: None,
             durable: None,
             committed: None,
-            flushing: false,
+            flushing: None,
+            generation: 0,
             unknown: 0,
             settled: 0,
         }

@@ -472,7 +472,8 @@ impl Snapshot {
             Some(bytes) => Head::decode(bytes)?,
             None => Head::new(cache::random(), options.frame_pages),
         };
-        let known = owner.is_some_and(|owner| owner.validate(head_bytes.as_deref()));
+        let validated = owner.map(|owner| owner.validate(head_bytes.as_deref()));
+        let known = validated.as_ref().is_some_and(|validated| validated.known);
         let reused = owner.filter(|_| known).and_then(NamespaceCache::durable);
         let mut snapshot = Self {
             tiered,
@@ -489,11 +490,11 @@ impl Snapshot {
             Some(durable) => durable,
             None => Arc::new(snapshot.load(head).await?),
         };
-        if let Some(owner) = owner {
+        if let (Some(owner), Some(validated)) = (owner, validated) {
             let version = snapshot.version();
             snapshot.unchanged = known && owner.committed() == Some(version);
             let committed = (!known).then_some(version);
-            owner.record(head_bytes, committed, snapshot.durable.clone());
+            owner.record(&validated, head_bytes, committed, snapshot.durable.clone());
         }
         Ok(snapshot)
     }
