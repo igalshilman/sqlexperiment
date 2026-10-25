@@ -118,3 +118,57 @@ fn synchronous_engine_waits_use_only_resident_data_or_fail() -> crate::Result<()
         Ok(())
     })
 }
+
+/// A leaf table page: `cells` cells of 8 bytes at the end, a freeblock of 16
+/// bytes before them, and junk everywhere else.
+fn leaf_page(at: usize, cells: usize) -> Vec<u8> {
+    let mut page = vec![0xAB; BLOCK_SIZE];
+    let content = BLOCK_SIZE - 8 * cells - 16;
+    page[at] = 13;
+    page[at + 1..at + 3].copy_from_slice(&(content as u16).to_be_bytes()); // freeblock
+    page[at + 3..at + 5].copy_from_slice(&(cells as u16).to_be_bytes());
+    page[at + 5..at + 7].copy_from_slice(&(content as u16).to_be_bytes());
+    page[at + 7] = 0;
+    page[content..content + 2].copy_from_slice(&0u16.to_be_bytes()); // last freeblock
+    page[content + 2..content + 4].copy_from_slice(&16u16.to_be_bytes());
+    for cell in 0..cells {
+        let offset = (content + 16 + 8 * cell) as u16;
+        page[at + 8 + 2 * cell..at + 10 + 2 * cell].copy_from_slice(&offset.to_be_bytes());
+        page[offset as usize..offset as usize + 8].fill(cell as u8 + 1);
+    }
+    page
+}
+
+#[test]
+fn a_btree_page_is_written_without_the_bytes_no_btree_reads() {
+    for (first, at) in [(false, 0), (true, 100)] {
+        let page = leaf_page(at, 3);
+        let tidy = tidied(&Page::from(page.clone()), first).expect("a b-tree page");
+        let content = BLOCK_SIZE - 3 * 8 - 16;
+        // The header and cell pointers, the freeblock's header and the cells
+        // stay; the space between and the freeblock's body are zeros.
+        assert_eq!(tidy[..at + 8 + 6], page[..at + 8 + 6]);
+        assert!(tidy[at + 8 + 6..content].iter().all(|&b| b == 0));
+        assert_eq!(tidy[content..content + 4], page[content..content + 4]);
+        assert!(tidy[content + 4..content + 16].iter().all(|&b| b == 0));
+        assert_eq!(tidy[content + 16..], page[content + 16..]);
+        assert!(tidied(&tidy, first) == Some(tidy.clone()), "tidy already");
+    }
+}
+
+#[test]
+fn a_page_that_is_not_a_btree_page_or_does_not_add_up_is_left_as_is() {
+    // An overflow or freelist page: it starts with a page number.
+    let mut overflow = vec![0xAB; BLOCK_SIZE];
+    overflow[..4].copy_from_slice(&7u32.to_be_bytes());
+    assert!(tidied(&Page::from(overflow), false).is_none());
+    // More cell pointers than fit before the cells.
+    let mut crowded = leaf_page(0, 3);
+    crowded[3..5].copy_from_slice(&2100u16.to_be_bytes());
+    assert!(tidied(&Page::from(crowded), false).is_none());
+    // A freeblock past the page's end.
+    let mut runaway = leaf_page(0, 3);
+    let content = BLOCK_SIZE - 3 * 8 - 16;
+    runaway[content + 2..content + 4].copy_from_slice(&4000u16.to_be_bytes());
+    assert!(tidied(&Page::from(runaway), false).is_none());
+}

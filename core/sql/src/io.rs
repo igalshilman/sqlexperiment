@@ -86,11 +86,67 @@ fn writable(page: Page) -> BytesMut {
 /// Blocks of the first database page `first` starts: as many as its page
 /// size takes.
 fn header_blocks(first: &Page) -> u64 {
-    let page_size = match u16::from_be_bytes([first[16], first[17]]) {
+    page_size(first).div_ceil(BLOCK_SIZE).max(1) as u64
+}
+/// The database's page size, from its first page.
+fn page_size(first: &Page) -> usize {
+    match u16::from_be_bytes([first[16], first[17]]) {
         1 => 65536,
         size => usize::from(size),
+    }
+}
+/// `page` (of [`BLOCK_SIZE`] bytes; the first page if `first`) with the
+/// bytes no b-tree reads zeroed: its unallocated space, between the cell
+/// pointers and the cells, and its freeblocks' bodies. The engine leaves there
+/// whatever its buffer held before (a recycled buffer's old page), which
+/// compresses badly; SQLite's `secure_delete` would zero them too. `None` for
+/// a page that is not a b-tree page, or whose header does not add up.
+fn tidied(page: &Page, first: bool) -> Option<Page> {
+    let u16_at = |at: usize| usize::from(u16::from_be_bytes([page[at], page[at + 1]]));
+    let at = if first { 100 } else { 0 };
+    let header = match page[at] {
+        2 | 5 => 12,
+        10 | 13 => 8,
+        _ => return None,
     };
-    page_size.div_ceil(BLOCK_SIZE).max(1) as u64
+    let content = match u16_at(at + 5) {
+        0 => 65536,
+        content => content,
+    };
+    let pointers = at + header + 2 * u16_at(at + 3);
+    if pointers > content || content > page.len() {
+        return None;
+    }
+    let mut zeroed = Vec::new();
+    zeroed.push(pointers..content);
+    // Freeblocks: ascending, within the cells, each at least 4 bytes.
+    let mut next = u16_at(at + 1);
+    while next != 0 {
+        if next < content || next + 4 > page.len() {
+            return None;
+        }
+        let size = u16_at(next + 2);
+        if size < 4 || next + size > page.len() {
+            return None;
+        }
+        zeroed.push(next + 4..next + size);
+        let after = u16_at(next);
+        if after != 0 && after < next + size {
+            return None;
+        }
+        next = after;
+    }
+    if zeroed
+        .iter()
+        .all(|range| page[range.clone()].iter().all(|&b| b == 0))
+    {
+        return Some(page.clone());
+    }
+    let mut tidy = page.to_vec();
+    for range in zeroed {
+        tidy[range].fill(0);
+    }
+    Some(tidy.into())
 }
 /// Split `len` bytes at `pos` into per-block pieces:
 /// `(block index, offset in block, offset in buffer, piece length)`.
@@ -673,7 +729,15 @@ impl KvIo {
             (std::mem::take(&mut private.dirty).into_iter())
                 .partition(|((file, _), _)| *file == DB);
         private.dirty = rest;
+        // Pages a block each (the default page size): tidied.
+        let first = database.get(&(DB, 0)).cloned().flatten();
+        let first = first.or_else(|| private.header.first().cloned());
+        let tidy = first.is_some_and(|first| page_size(&first) == BLOCK_SIZE);
         for ((_, block), page) in database {
+            let page = match page {
+                Some(page) if tidy => Some(tidied(&page, block == 0).unwrap_or(page)),
+                page => page,
+            };
             private.flushed.insert(block, page);
         }
         for (block, page) in &private.flushed {
