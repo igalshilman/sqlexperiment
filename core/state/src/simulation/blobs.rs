@@ -52,6 +52,8 @@ type Write = (String, Option<Bytes>);
 struct Inner {
     values: BTreeMap<String, Bytes>,
     puts: u64,
+    /// Bytes the puts stored.
+    uploaded: u64,
     gets: u64,
     lists: u64,
     /// Puts of a blob key that held a value.
@@ -87,6 +89,7 @@ impl Inner {
         match value {
             Some(value) => {
                 self.puts += 1;
+                self.uploaded += value.len() as u64;
                 let pack = key.starts_with(PACK_PREFIX);
                 if self.values.insert(key, value).is_some() && pack {
                     self.overwrites += 1;
@@ -150,6 +153,16 @@ impl MemoryBlobs {
     /// Puts that stored a value, late ones included.
     pub fn puts(&self) -> u64 {
         self.inner.lock().unwrap().puts
+    }
+
+    /// Bytes the puts stored.
+    pub fn uploaded(&self) -> u64 {
+        self.inner.lock().unwrap().uploaded
+    }
+
+    /// Bytes stored now.
+    pub fn stored_bytes(&self) -> usize {
+        self.inner.lock().unwrap().values.values().map(Bytes::len).sum()
     }
 
     /// Gets (of a range) asked, failed ones included.
