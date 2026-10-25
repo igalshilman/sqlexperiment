@@ -218,7 +218,7 @@ class _ContextHost:
 
     def sql_get(self, key: str) -> Awaitable[bytes | None]:
         # Each entry is named after its key, so that tooling can hide a
-        # database's root and blobs by name.
+        # database's head, tail and packs by name.
         # TODO: read with protocol v8's ephemeral get, left out of the journal,
         # once a Restate release ships v8 and the SDK exposes the get (FUTURE.md
         # at the repository's root). Restate 1.8 negotiates v7 at most.

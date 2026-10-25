@@ -1,7 +1,7 @@
 //! A seeded random campaign over the public API: mutations of changes to several
-//! files (one with a base), records and logs, flushed with small chunks, random
-//! rebase ratios and random checkpoint thresholds so that deltas, rebases,
-//! checkpoints, compactions and garbage collection all happen, and random
+//! files (one with a base), records and logs, flushed with small frames and
+//! random checkpoint thresholds so that checkpoints, patches, compactions and
+//! garbage collection all happen, and random
 //! faults, cancellations, crashes and reopens by owners with and without a
 //! cache, every request checked by the protocol monitor. Even seeds keep
 //! checkpoints in the store; odd ones in an S3 that fails as S3 does, its

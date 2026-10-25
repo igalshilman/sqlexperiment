@@ -134,7 +134,7 @@ class AttemptEnd {
 }
 
 // A state command is named after its key, so that tooling can hide the
-// database's root and blobs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
+// database's head, tail and packs by name (`dev.restate.tooling.journal.hidden.name.prefix`).
 const named = (key: string): restate.EntryOptions => ({ name: key });
 
 // A shared handler's reader writes nothing.

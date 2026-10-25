@@ -24,7 +24,7 @@
 //! |---|---|---|
 //! | SQL working state | Dirty 4096-byte pages and the private engine WAL | No |
 //! | A mutation of the state | The pages SQL flushed into it, and its records | No |
-//! | The state | Its root and blobs (see [`state`]) | Yes, after an acknowledged flush |
+//! | The state | Its head, tail and packs (see [`state`]) | Yes, after an acknowledged flush |
 //!
 //! An SQL error (syntax, a constraint, a missing table) undoes just that
 //! statement, as in SQLite, and the session goes on. A storage error, a

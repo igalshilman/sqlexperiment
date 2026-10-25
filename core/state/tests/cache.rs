@@ -1,5 +1,5 @@
 //! The owner cache across owners, crashes and readers: no session reads a
-//! blob of a flush that was lost, and a reader reads the state it opened
+//! page of a flush that was lost, and a reader reads the state it opened
 //! while the owner flushes.
 #![cfg(feature = "simulation")]
 mod support;

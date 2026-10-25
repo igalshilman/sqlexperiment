@@ -1,5 +1,5 @@
-//! The host's records: named values a turn flushes with its SQL, in one
-//! root.
+//! The host's records: named values a turn flushes with its SQL, under one
+//! head.
 use crate::host::StateSetup;
 use crate::host::{Db, Durability, Setup};
 use bytes::Bytes;
