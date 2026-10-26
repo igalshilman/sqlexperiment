@@ -19,7 +19,7 @@ import { Teller } from '../fakes/langgraph.ts';
 import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
 
-vi.mock('@langchain/anthropic', () => import('../fakes/langgraph.ts'));
+vi.mock('@langchain/openai', () => import('../fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {

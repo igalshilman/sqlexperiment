@@ -10,9 +10,9 @@
 //
 //   review: (ctx, task) => withOpenCode(ctx, { tools }, async ({ prompt }) => [await prompt(task), await prompt('Review it')]),
 //
-// The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5,
+// The model is `model`, MODEL, or else openai/gpt-6-sol,
 // which OpenCode's own providers serve, with the provider's API key (such as
-// ANTHROPIC_API_KEY).
+// OPENAI_API_KEY).
 //
 // It runs `work` over a database of the key's own, beside `ctx.db`
 // (`databaseOf`): OpenCode's tables are alone there (db.ts), as OpenCode
@@ -106,7 +106,7 @@ export interface OpenCodeSession {
 
 /** An agent's options: `chat`, `prompt` and `withOpenCode` take them. */
 export interface Options {
-  /** The model of the session, as `provider/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
+  /** The model of the session, as `provider/model-id`: MODEL, or else openai/gpt-6-sol. */
   model?: string | ModelRef;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;

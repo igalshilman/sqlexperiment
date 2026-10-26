@@ -1222,6 +1222,21 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-openai"
+version = "1.7.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "langchain-core" },
+    { name = "openai" },
+    { name = "tiktoken" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/ca/b64799a9f2ee688aa6c238f5230b20d150b19cc5892bdcb6faf2b59866f1/langchain_openai-1.7.2.tar.gz", hash = "sha256:e1fcbc7a96f7c8c94679d61639a979bba88f27889c0a68dfa225b8057345328d", size = 3405949, upload-time = "2026-10-14T13:50:59.956Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/5d/8c4888a21087e4cd1c32965613a1a17cfc8e90e41ba5205c3dad302f3410/langchain_openai-1.7.2-py3-none-any.whl", hash = "sha256:9be7980edf355ca2dd595b795a5125836ccf04515ef9377228913246156e59f5", size = 146367, upload-time = "2026-10-14T13:50:58.697Z" },
+]
+
+[[package]]
 name = "langchain-protocol"
 version = "0.0.19"
 source = { registry = "https://pypi.org/simple" }
@@ -2376,6 +2391,7 @@ dependencies = [
     { name = "hypercorn" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
+    { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "litellm" },
     { name = "openai-agents" },
@@ -2392,6 +2408,7 @@ requires-dist = [
     { name = "hypercorn", specifier = ">=0.17" },
     { name = "langchain-anthropic", specifier = ">=1.7" },
     { name = "langchain-core", specifier = ">=1.6" },
+    { name = "langchain-openai", specifier = ">=1.1" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "litellm", specifier = "==1.106.2" },
     { name = "openai-agents", specifier = ">=0.20,<0.21" },

@@ -11,7 +11,7 @@ import { agentOf, type Steer, signals, signalsOf } from './signals.ts';
  * A value, or a function of the invocation's context that gives it: the
  * same for every message, or each user's (from the object's database, say).
  *
- *   pi.chat({ model: 'anthropic/claude-sonnet-5-5' })
+ *   pi.chat({ model: 'openai/gpt-6-sol' })
  *   pi.chat(async (ctx) => ({ model: await userModel(ctx) }))
  */
 export type Configure<T> = T | ((ctx: restate.ObjectContext) => T | Promise<T>);
@@ -34,11 +34,14 @@ export const nextPromptId = (ctx: restate.ObjectContext) => {
   return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
 };
 
-/** The default model of the frameworks that take Anthropic's (all but the DeepSeek Harness). */
-export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5-5';
+/** The default model of pi, OpenCode and LangGraph, with OPENAI_API_KEY. */
+export const DEFAULT_MODEL = 'openai/gpt-6-sol';
+
+/** The default model of Claude agents, with ANTHROPIC_API_KEY. */
+export const CLAUDE_MODEL = 'anthropic/claude-sonnet-5-5';
 
 /**
- * The model, as `provider/model-id` (such as `anthropic/claude-sonnet-5-5`):
+ * The model, as `provider/model-id` (such as `openai/gpt-6-sol`):
  * `model`, or else MODEL, or else the framework's default.
  */
 export const modelOf = (model: string | undefined, fallback = DEFAULT_MODEL) => model || process.env.MODEL || fallback;
@@ -70,9 +73,7 @@ export class ModelError extends Error {
 /** `model`, the explicit `model` option of `framework`'s agent, if it is not `provider/model-id`. */
 export const checkModelName = (framework: string, model: string | undefined) => {
   if (model !== undefined && !/^[^/\s]+\/\S+$/.test(model)) {
-    throw new ModelError(
-      `${framework}: the model "${model}" is not provider/model-id, such as anthropic/claude-sonnet-5-5`,
-    );
+    throw new ModelError(`${framework}: the model "${model}" is not provider/model-id, such as openai/gpt-6-sol`);
   }
 };
 

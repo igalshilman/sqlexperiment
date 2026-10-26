@@ -56,13 +56,16 @@ from pydantic import ValidationError
 from restate_fns import ObjectContext
 
 from restate_agents import conversation, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of
+from restate_agents.common import CLAUDE_MODEL, Transcript, configured, model_id_of, model_of
 from restate_agents.conversation import Conversation, answer_of, idle, pending_of
 from restate_agents.object import Object
 from restate_agents.tools import Tool, text_of
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DECLINED", "DEFAULT_MODEL", "REQUEST", "agent", "compact", "prompt", "reset"]
+
+DEFAULT_MODEL = CLAUDE_MODEL
+"""The model of an agent given none, and no MODEL."""
 
 # What each request has unless ``request`` says otherwise, as the host's
 # ``claude.messages`` binding sends it: a declined request is retried on
@@ -111,7 +114,7 @@ def agent(
     with ``@agent.handler``.
     """
     if not callable(model):
-        model_id_of(model_of(model), "anthropic")
+        model_id_of(model_of(model, DEFAULT_MODEL), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         return await prompt(
@@ -285,7 +288,7 @@ class _Run:
         """A run of ``conversation``, with the options of ``prompt``: over ``REQUEST``, and the shared client."""
         return cls(
             client=client or _client(),
-            model=model_id_of(model_of(model), "anthropic"),
+            model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
             system=system,
             tools=list(tools),
             request={**REQUEST, **(request or {})},

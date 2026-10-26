@@ -8,9 +8,9 @@
 // or a prompt of your own handler: `langgraph.prompt(ctx, text, options)`
 //
 // The graph is the usual tool-calling loop: a model node, a tools node, and
-// back to the model until it answers. The model is `model` (a chat model, or
-// `anthropic/model-id`), or else MODEL, or else anthropic/claude-sonnet-5-5,
-// with ANTHROPIC_API_KEY.
+// back to the model until it answers. The model is `model` (a chat model,
+// `openai/model-id` or `anthropic/model-id`), or else MODEL, or else
+// openai/gpt-6-sol, with OPENAI_API_KEY.
 //
 // The handler is not replayed: a retried attempt (a crash, a lost connection)
 // runs again from the start, and LangGraph carries on from the last step it
@@ -28,6 +28,7 @@ import * as restate from 'restate-fns';
 import type { SqlSession } from 'restate-fns';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { ChatAnthropic } from '@langchain/anthropic';
+import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
@@ -40,9 +41,10 @@ import {
   type Configure,
   configured,
   messagesHandler,
-  modelIdOf,
+  ModelError,
   modelOf,
   nextPromptId,
+  providerOf,
   toolCallEnded,
   toolCallStarted,
   type Transcript,
@@ -113,6 +115,22 @@ function runTools(tools: StructuredToolInterface[]) {
   };
 }
 
+/** `provider/model-id` as its provider and model id, for a provider the usual graph takes. */
+const providerOfModel = (named: string) => {
+  const [provider, id] = providerOf(named);
+  if ((provider !== 'openai' && provider !== 'anthropic') || !id) {
+    const from = process.env.MODEL === named ? ' (from MODEL)' : '';
+    throw new ModelError(`the model "${named}"${from} is neither openai/<model-id> nor anthropic/<model-id>`);
+  }
+  return [provider, id] as const;
+};
+
+/** The chat model `provider/model-id` names: OpenAI's or Anthropic's. */
+const chatModel = (named: string): BaseChatModel => {
+  const [provider, id] = providerOfModel(named);
+  return provider === 'openai' ? new ChatOpenAI({ model: id }) : new ChatAnthropic({ model: id });
+};
+
 /** The agent's graph: `model`, calling `tools`. */
 function graph(ctx: restate.ObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
@@ -141,7 +159,7 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): StructuredToolInterface
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options {
-  /** The model: `anthropic/model-id` (MODEL, or else anthropic/claude-sonnet-5-5), or a chat model that calls tools. */
+  /** The model: `openai/model-id` or `anthropic/model-id` (MODEL, or else openai/gpt-6-sol), or a chat model that calls tools. */
   model?: string | BaseChatModel;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
@@ -165,7 +183,7 @@ const answerOnce = async (
   text: string,
   { model, system, tools = [] }: Options,
 ): Promise<string> => {
-  const llm = typeof model === 'object' ? model : new ChatAnthropic({ model: modelIdOf(modelOf(model), 'anthropic') });
+  const llm = typeof model === 'object' ? model : chatModel(modelOf(model));
   const app = graph(
     ctx,
     llm,
@@ -234,7 +252,7 @@ async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, conf
  * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object' && typeof options.model !== 'object') modelIdOf(modelOf(options.model), 'anthropic');
+  if (typeof options === 'object' && typeof options.model !== 'object') providerOfModel(modelOf(options.model));
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 

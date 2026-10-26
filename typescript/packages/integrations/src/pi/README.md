@@ -17,13 +17,13 @@ const assistant = pi.agent({ name: 'assistant', system: 'Answer briefly.', tools
 await serve(assistant);
 ```
 
-| Option      | What                                                                                                                           |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `model`     | `provider/model-id`, of any provider pi-ai knows; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`) |
-| `models`    | A pi-ai model registry, for a provider of your own                                                                             |
-| `system`    | The system prompt                                                                                                              |
-| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or pi-durable's `defineTool`s                                               |
-| `workspace` | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox           |
+| Option      | What                                                                                                                 |
+| ----------- | -------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `provider/model-id`, of any provider pi-ai knows; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)     |
+| `models`    | A pi-ai model registry, for a provider of your own                                                                   |
+| `system`    | The system prompt                                                                                                    |
+| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or pi-durable's `defineTool`s                                     |
+| `workspace` | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox |
 
 For an object of your own, `pi.chat(options)` and `pi.messages()` are the
 handlers; `options` may be a function of the invocation's context, such as
@@ -73,7 +73,7 @@ told it was interrupted).
 ## Run
 
 ```sh
-cd examples-typescript && ANTHROPIC_API_KEY=… node chat.ts
+cd examples-typescript && OPENAI_API_KEY=… node chat.ts
 ```
 
 With a Restate server, and the agent registered with it: see

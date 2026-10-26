@@ -13,8 +13,8 @@ object's database, stored a step at a time::
     serve(assistant)
 
 The usual agent is a Pydantic AI ``Agent`` with ``model`` (``provider/model-id``,
-or a Pydantic AI model), or else MODEL, or else anthropic/claude-sonnet-5-5,
-with ANTHROPIC_API_KEY; ``system``; and ``tools``. Or bring an ``Agent``
+or a Pydantic AI model), or else MODEL, or else openai/gpt-6-sol,
+with OPENAI_API_KEY; ``system``; and ``tools``. Or bring an ``Agent``
 of your own: ``agent(name, Agent(...))``, with ``tools([...])`` for the
 tools here (``tool``, ``call``, ``signal``, ...).
 

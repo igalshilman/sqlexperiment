@@ -25,11 +25,11 @@ const respond =
       .trim();
     return say(`${model} (${persona}): ${said.join(' / ')}`);
   };
+vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
+  openaiProvider: () => fakeProvider('openai', 'gpt-6-sol', respond('gpt')),
+}));
 vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
   anthropicProvider: () => fakeProvider('anthropic', 'claude-sonnet-5-5', respond('claude')),
-}));
-vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
-  openaiProvider: () => fakeProvider('openai', 'gpt-6-luna', respond('gpt')),
 }));
 
 interface Settings {
@@ -80,13 +80,13 @@ describe('a Harness configured as it runs', () => {
   it('answers on each user’s model and persona, with the tools', async () => {
     const alice = store('alice');
     const bob = store('bob');
-    expect(await alice(chat, 'a1', 'Hi')).toBe('claude (You are a helpful assistant.): Hi');
-    await bob(configure, 'b0', { model: 'openai/gpt-6-luna', persona: 'You are a pirate.' });
-    expect(await bob(chat, 'b1', 'Hi')).toBe('gpt (You are a pirate.): Hi');
-    expect(await bob(chat, 'b2', 'What time is it?')).toBe('gpt: the time is 12:00');
+    expect(await alice(chat, 'a1', 'Hi')).toBe('gpt (You are a helpful assistant.): Hi');
+    await bob(configure, 'b0', { model: 'anthropic/claude-sonnet-5-5', persona: 'You are a pirate.' });
+    expect(await bob(chat, 'b1', 'Hi')).toBe('claude (You are a pirate.): Hi');
+    expect(await bob(chat, 'b2', 'What time is it?')).toBe('claude: the time is 12:00');
     // The same conversation, on another model.
-    await alice(configure, 'a2', { model: 'openai/gpt-6-luna' });
-    expect(await alice(chat, 'a3', 'Again')).toBe('gpt (You are a helpful assistant.): Hi / Again');
+    await alice(configure, 'a2', { model: 'anthropic/claude-sonnet-5-5' });
+    expect(await alice(chat, 'a3', 'Again')).toBe('claude (You are a helpful assistant.): Hi / Again');
   });
 
   it('compacts the conversation, and starts it over with a handoff', async () => {
@@ -96,7 +96,7 @@ describe('a Harness configured as it runs', () => {
     expect(await alice(chat, 'a3', 'Who am I?')).toMatch(/: .*Who am I\?$/);
     // After a reset, the model has the handoff and what comes next.
     await alice(reset, 'a4', 'Alice likes short answers');
-    expect(await alice(chat, 'a5', 'Hi')).toBe('claude (You are a helpful assistant.): Alice likes short answers / Hi');
+    expect(await alice(chat, 'a5', 'Hi')).toBe('gpt (You are a helpful assistant.): Alice likes short answers / Hi');
     // The UI still has all of it.
     const { messages } = await alice(pi.messages(), 'read', {});
     expect(messages.map((m) => m.role)).toEqual([

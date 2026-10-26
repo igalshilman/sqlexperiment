@@ -136,16 +136,16 @@ async def test_a_terminal_error_of_a_tool_is_its_answer_to_the_model():
         await Object().run(obj.handlers["chat"].fn, "refuse politely")
 
 
-def test_a_model_that_is_not_anthropics_is_refused_early(monkeypatch):
-    with pytest.raises(ValueError, match="not anthropic's"):
-        langgraph.agent("teller", model="openai/gpt-6-luna")
-    monkeypatch.setenv("MODEL", "openai/gpt-6-luna")
-    with pytest.raises(ValueError, match=r"\(from MODEL\) is not anthropic's"):
+def test_a_model_that_is_neither_openais_nor_anthropics_is_refused_early(monkeypatch):
+    with pytest.raises(ValueError, match="neither openai/<model-id> nor anthropic/<model-id>"):
+        langgraph.agent("teller", model="google/gemini-2.5-pro")
+    monkeypatch.setenv("MODEL", "google/gemini-2.5-pro")
+    with pytest.raises(ValueError, match=r"\(from MODEL\) is neither"):
         langgraph.agent("teller")
 
 
 async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("MODEL", raising=False)
     obj = langgraph.agent("assistant")
     with pytest.raises(restate.TerminalError, match="check the agent's model"):

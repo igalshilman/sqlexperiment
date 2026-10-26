@@ -14,8 +14,8 @@ the object's database (checkpointer.py)::
 
 The usual graph is the tool-calling loop: a model node, a tools node, and
 back to the model until it answers. The model is ``model`` (a LangChain chat
-model, or ``anthropic/model-id``), or else MODEL, or else
-anthropic/claude-sonnet-5-5, with ANTHROPIC_API_KEY. Or bring a graph of
+model, ``openai/model-id`` or ``anthropic/model-id``), or else MODEL, or
+else openai/gpt-6-sol, with OPENAI_API_KEY. Or bring a graph of
 your own: ``agent(name, graph=...)``, any ``StateGraph`` whose state has
 ``messages`` (``MessagesState``), with ``tool_node(tools)`` for its tools.
 
@@ -42,6 +42,7 @@ stored:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
@@ -51,6 +52,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, InjectedToolCallId, StructuredTool
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import StateUpdate
@@ -58,7 +60,7 @@ from pydantic import create_model
 from restate_fns import ObjectContext
 
 from restate_agents import turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of
+from restate_agents.common import DEFAULT_MODEL, ModelError, Transcript, configured, model_of
 from restate_agents.langgraph.checkpointer import SqlCheckpointSaver
 from restate_agents.object import Object, context
 from restate_agents.tools import Tool
@@ -92,7 +94,8 @@ def agent(
     - ``status``, ``stop`` and ``steer``: what it is doing, and the message it
       answers; ``pending`` and ``signal``: what its tools wait for.
 
-    The usual graph takes ``model``: ``anthropic/model-id``, or a LangChain
+    The usual graph takes ``model``: ``openai/model-id`` or
+    ``anthropic/model-id``, or a LangChain
     chat model that calls tools, or a function of the invocation's context
     giving either; ``system``: the system prompt; and ``tools``: ``tool``s,
     LangChain tools, or functions of the invocation's context giving them.
@@ -105,7 +108,7 @@ def agent(
     if graph is not None and (model is not None or system is not None or tools):
         raise TypeError(f"{name}: an agent takes a graph, or the usual graph's model, system and tools; not both")
     if model is None or isinstance(model, str):
-        model_id_of(model_of(model), "anthropic")
+        _provider_of(model_of(model))
     chosen = graph if graph is not None else _usual(model, system, tools)
 
     async def answer(ctx: ObjectContext, message: str) -> str:
@@ -289,4 +292,19 @@ async def _model(model: Model | Callable[[ObjectContext], Model] | None, ctx: Ob
     chosen = await configured(model, ctx, BaseChatModel)
     if isinstance(chosen, BaseChatModel):
         return chosen
-    return ChatAnthropic(model_name=model_id_of(model_of(chosen), "anthropic"))  # type: ignore[call-arg]
+    return _chat_model(model_of(chosen))
+
+
+def _chat_model(named: str) -> BaseChatModel:
+    """The chat model ``provider/model-id`` names: OpenAI's or Anthropic's."""
+    provider, id = _provider_of(named)
+    return ChatOpenAI(model=id) if provider == "openai" else ChatAnthropic(model_name=id)  # type: ignore[call-arg]
+
+
+def _provider_of(named: str) -> tuple[str, str]:
+    """``provider/model-id`` as its provider and model id, for a provider the usual graph takes."""
+    provider, _, id = named.partition("/")
+    if provider not in ("openai", "anthropic") or not id:
+        source = " (from MODEL)" if os.environ.get("MODEL") == named else ""
+        raise ModelError(f'the model "{named}"{source} is neither openai/<model-id> nor anthropic/<model-id>')
+    return provider, id

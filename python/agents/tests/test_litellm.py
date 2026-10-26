@@ -143,7 +143,7 @@ async def test_a_terminal_error_of_a_tool_is_its_answer_to_the_model():
 
 
 async def test_a_missing_api_key_is_a_terminal_error(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("MODEL", raising=False)
     obj = litellm.agent("assistant")
     with pytest.raises(restate.TerminalError, match="check the agent's model"):

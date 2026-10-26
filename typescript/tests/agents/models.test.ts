@@ -40,7 +40,9 @@ describe('a wrong model', () => {
 
   it("of another provider fails at the definition, for an agent of one provider's models", () => {
     expect(() => deepseek.chat({ model: 'anthropic/claude-sonnet-5-5' })).toThrow(/not deepseek's/);
-    expect(() => langgraph.chat({ model: 'openai/gpt-6-luna' })).toThrow(/not anthropic's/);
+    expect(() => langgraph.chat({ model: 'google/gemini-2.5-pro' })).toThrow(
+      /neither openai\/<model-id> nor anthropic/,
+    );
   });
 
   it('that the provider refuses for good fails the invocation, saying what to check', async () => {

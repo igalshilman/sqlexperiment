@@ -2,8 +2,8 @@
 // and answers deterministically, so the agent's tests and the crash test run
 // offline. It transfers and audits on request, and reports the tool's result.
 //
-// The module stands in for @langchain/anthropic (see fakes.ts): its
-// ChatAnthropic is the teller.
+// The module stands in for @langchain/openai and @langchain/anthropic (see
+// fakes.ts): their ChatOpenAI and ChatAnthropic are the teller.
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
@@ -45,4 +45,4 @@ export class Teller extends BaseChatModel {
   }
 }
 
-export { Teller as ChatAnthropic };
+export { Teller as ChatAnthropic, Teller as ChatOpenAI };

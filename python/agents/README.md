@@ -37,11 +37,11 @@ answers a prompt in a handler of your own, once.
 
 | Import                                | Framework                          | Choose it when                                                                | Its example                                                               |
 | ------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| [`claude`](#claude)                   | The Anthropic SDK                  | You want Claude with nothing in between: the lightest, the API's own messages | [`chat.py`](../../examples-python/basic/chat.py)                          |
+| [`claude`](#claude)                   | The Anthropic SDK                  | You want Claude with nothing in between: the lightest, the API's own messages | [`frameworks.py`](../../examples-python/basic/frameworks.py)              |
 | [`litellm`](#litellm)                 | LiteLLM                            | You want the same, on any model: OpenAI's, Gemini, Bedrock, a local one       | [`release_notes.py`](../../examples-python/intermediate/release_notes.py) |
 | [`langgraph`](#langgraph)             | LangGraph                          | You use LangChain, or want a graph of your own, its steps Restate's           | [`writer.py`](../../examples-python/intermediate/writer.py)               |
 | [`pydantic_ai`](#pydantic-ai)         | Pydantic AI                        | You want typed outputs, and an `Agent` of your own                            | [`trips.py`](../../examples-python/intermediate/trips.py)                 |
-| [`openai_agents`](#openai-agents-sdk) | The OpenAI Agents SDK              | You want handoffs between agents, guardrails, OpenAI's models                 | [`airline.py`](../../examples-python/intermediate/airline.py)             |
+| [`openai_agents`](#openai-agents-sdk) | The OpenAI Agents SDK              | You want handoffs between agents, guardrails, OpenAI's models                 | [`chat.py`](../../examples-python/basic/chat.py)                          |
 | [`adk`](#google-adk)                  | Google's Agent Development Kit     | You want Gemini, ADK's sub-agents and callbacks                               | [`oncall.py`](../../examples-python/intermediate/oncall.py)               |
 | [`claude_agent`](#claude-code)        | Claude Code (the Claude Agent SDK) | You want a coding agent: Claude Code's own tools in a workspace               | [`coder.py`](../../examples-python/intermediate/coder.py)                 |
 | [`codex`](#codex)                     | Codex (`codex app-server`)         | You want OpenAI's coding agent: its tools in a workspace, in its sandbox      | [`coder_codex.py`](../../examples-python/intermediate/coder_codex.py)     |
@@ -229,12 +229,12 @@ assistant = litellm.agent("assistant", model="openai/gpt-5", system="Answer brie
 serve(assistant)
 ```
 
-| Option    | What                                                                                                                                                                                                             |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`   | Any model LiteLLM knows, as `provider/model-id` (`openai/gpt-5`, `gemini/gemini-2.5-pro`, `bedrock/...`, `ollama/llama3.1`), with its provider's API key; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` |
-| `system`  | The system prompt                                                                                                                                                                                                |
-| `tools`   | `tool`s and [Restate's tools](#restates-tools); and tools the provider runs, as dicts in its format                                                                                                              |
-| `request` | More of each request, as `litellm.acompletion` takes it: `{"temperature": 0.2, "api_base": "http://localhost:11434"}`                                                                                            |
+| Option    | What                                                                                                                                                                                                  |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`   | Any model LiteLLM knows, as `provider/model-id` (`openai/gpt-5`, `gemini/gemini-2.5-pro`, `bedrock/...`, `ollama/llama3.1`), with its provider's API key; or else `MODEL`, or else `openai/gpt-6-sol` |
+| `system`  | The system prompt                                                                                                                                                                                     |
+| `tools`   | `tool`s and [Restate's tools](#restates-tools); and tools the provider runs, as dicts in its format                                                                                                   |
+| `request` | More of each request, as `litellm.acompletion` takes it: `{"temperature": 0.2, "api_base": "http://localhost:11434"}`                                                                                 |
 
 `model`, `system`, `tools` and `request` may be functions of the
 invocation's context, or async ones. A model LiteLLM knows no provider of
@@ -253,11 +253,11 @@ conversation so far, with the tool calls, a page at a time:
 and `sync`, `notifications` and `watch` ([Follow a conversation](#follow-a-conversation)).
 Add handlers of your own with `@assistant.handler`.
 
-| Option   | What                                                                                                                                                                                                                        |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`  | `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`); or any LangChain chat model that calls tools; or a function of the invocation's context giving either |
-| `system` | The system prompt                                                                                                                                                                                                           |
-| `tools`  | `tool`s, [Restate's tools](#restates-tools) and LangChain tools, or functions of the invocation's context giving them                                                                                                       |
+| Option   | What                                                                                                                                                                                                                                              |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `openai/model-id` (`ChatOpenAI`) or `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`); or any LangChain chat model that calls tools; or a function of the invocation's context giving either |
+| `system` | The system prompt                                                                                                                                                                                                                                 |
+| `tools`  | `tool`s, [Restate's tools](#restates-tools) and LangChain tools, or functions of the invocation's context giving them                                                                                                                             |
 
 The graph is the usual tool-calling loop: a model node, a tools node, and
 back to the model until it answers. Its checkpoints are in the object's
@@ -360,11 +360,11 @@ assistant = pydantic_ai.agent("assistant", system="Answer briefly.", tools=[get_
 serve(assistant)
 ```
 
-| Option   | What                                                                                                                                                                                                                   |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`  | `provider/model-id` (any of Pydantic AI's providers whose package is installed: `anthropic` is), a Pydantic AI model, or a function of the context giving one. Default: `MODEL`, or else `anthropic/claude-sonnet-5-5` |
-| `system` | The system prompt (Pydantic AI's instructions)                                                                                                                                                                         |
-| `tools`  | `tool`s, Restate's tools, and Pydantic AI's tools or tool functions (`RunContext` and all)                                                                                                                             |
+| Option   | What                                                                                                                                                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `provider/model-id` (any of Pydantic AI's providers whose package is installed: `openai` and `anthropic` are), a Pydantic AI model, or a function of the context giving one. Default: `MODEL`, or else `openai/gpt-6-sol` |
+| `system` | The system prompt (Pydantic AI's instructions)                                                                                                                                                                            |
+| `tools`  | `tool`s, Restate's tools, and Pydantic AI's tools or tool functions (`RunContext` and all)                                                                                                                                |
 
 Or bring an `Agent` of your own, whose tools include Restate's through
 `pydantic_ai.tools([...])`; and ask it from handlers of your own with `pydantic_ai.prompt(ctx,
@@ -376,7 +376,7 @@ agent, text, **run)` (`run`: `Agent.run`'s options, such as `output_type` or
 from pydantic_ai import Agent
 from restate_agents import pydantic_ai
 
-planner = Agent("anthropic:claude-sonnet-5-5", tools=[weather, *pydantic_ai.tools([signal("approval", ...)])])
+planner = Agent("openai:gpt-6-sol", tools=[weather, *pydantic_ai.tools([signal("approval", ...)])])
 trips = pydantic_ai.agent("trips", planner)
 
 
