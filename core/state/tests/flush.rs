@@ -440,6 +440,7 @@ fn packs_in_s3_are_collected_where_restate_cannot_list() -> Result<()> {
         let packs = MemoryBlobs::default();
         let options = state::StateOptions {
             checkpoint_entries: 1,
+            l0_bytes: 0,
             ..Default::default()
         };
         let state = State::open(Arc::new(Unlisted(memory.clone())))
@@ -469,6 +470,7 @@ fn a_checkpoint_that_fails_is_reported_and_the_flush_goes_on() -> Result<()> {
         let packs = MemoryBlobs::default();
         let options = state::StateOptions {
             checkpoint_entries: 1,
+            l0_bytes: 0,
             ..Default::default()
         };
         let state = State::open(Arc::new(MemoryKv::default()))
@@ -507,6 +509,7 @@ fn a_checkpoint_that_keeps_failing_is_tried_less_and_less() -> Result<()> {
         let cache = open_cache(cache_config(4 << 20, 4 << 20));
         let options = state::StateOptions {
             checkpoint_entries: 1,
+            l0_bytes: 0,
             ..Default::default()
         };
         let open = || {

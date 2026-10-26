@@ -24,6 +24,7 @@ fn options(cache: Option<Namespace>, packs: Option<&MemoryBlobs>) -> Setup {
             prefetch_pages: 0,
             checkpoint_entries: 2,
             checkpoint_bytes: 0,
+            l0_bytes: 0,
         },
         cache,
         packs: packs.cloned(),

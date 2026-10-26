@@ -29,7 +29,7 @@ use crate::{
     format::{
         Checkpoint, Entry, FileChange, FileIndex, Head, Location, LogChange, LogIndex, MAX_DECODED,
         MAX_FILE_BYTES, MAX_FRAME_PAGES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_NAMES,
-        MAX_RECORD_BYTES, Manifest, PackId, Value, invalid,
+        MAX_RECORD_BYTES, Manifest, PackId, Tier, Value, invalid,
     },
     tail::Tiered,
     zstd,
@@ -196,6 +196,8 @@ pub struct Checkpointed {
     pub compacted: usize,
     /// Packs its garbage collection deleted ([`crate::State::collect_garbage`]).
     pub deleted: usize,
+    /// Its pack went to L1 (S3), and everything L0 held with it.
+    pub promoted: bool,
 }
 
 /// A checkpoint put, for the next head to name.
@@ -803,7 +805,7 @@ impl Snapshot {
         {
             return Ok(value);
         }
-        let Some(block) = self.tiered.block() else {
+        let Some(block) = self.tiered.block(at.pack) else {
             return self.fetch(at, false).await;
         };
         let blocks = at.offset / block..at.range().end.div_ceil(block);
@@ -852,7 +854,7 @@ impl Snapshot {
             }
         }
         let fetched = bounded(runs.iter().map(|&(run, _)| async move {
-            match self.tiered.block() {
+            match self.tiered.block(run.pack) {
                 // In parts, which the cache keeps: a range of them.
                 Some(_) => self.raw(run).await,
                 None => self.tiered.get(run.pack, run.range()).await,
@@ -1034,21 +1036,38 @@ impl Snapshot {
             self.options.checkpoint_entries,
             self.options.checkpoint_bytes,
         );
-        // With packs in Restate, a checkpoint costs only its bytes: one is
-        // due once the tail passes what the checkpoint holds (its packs and
-        // its manifest), as it costs more to read, and to write against its
-        // pages, than a checkpoint.
+        // A checkpoint into L0 costs only its bytes, in Restate: one is due
+        // once the tail passes what L0 and the manifest hold, as it costs
+        // more to read, and to write against its pages, than a checkpoint.
         // A tail under a frame's bytes is never worth one: a checkpoint, and
-        // the collection after it, costs a round trip or two.
+        // the collection after it, costs a round trip or two. A checkpoint
+        // into L1 costs an S3 put: it is due by the thresholds as they are.
         let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
-        let held: u64 = self.durable.manifest.sizes.values().sum::<u64>() + manifest;
+        let held = self.l0_bytes() + manifest;
         let frame = head.frame_pages * PAGE;
-        let limit = match self.tiered.packs_in_restate {
-            true => bytes.min(held.max(frame)),
-            false => bytes,
+        let limit = match self.promotes() {
+            false => bytes.min(held.max(frame)),
+            true => bytes,
         };
         head.version > 0
             && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= limit))
+    }
+
+    /// Bytes L0's packs hold.
+    fn l0_bytes(&self) -> u64 {
+        (self.durable.manifest.sizes.iter())
+            .filter(|(pack, _)| pack.tier == Tier::L0)
+            .map(|(_, &bytes)| bytes)
+            .sum()
+    }
+
+    /// Whether the next checkpoint goes to L1, with all of L0: there is an
+    /// L1, and L0 would hold its share ([`StateOptions::l0_bytes`]) with the
+    /// tail the checkpoint folds in, about what it writes: one large
+    /// checkpoint never takes L0 far past it.
+    fn promotes(&self) -> bool {
+        let l0 = self.l0_bytes() + self.durable.head.tail_bytes;
+        self.tiered.has_l1() && l0 >= self.options.l0_bytes
     }
 
     /// Flush `writes`, `records` and `logs`, which [`Self::check`] passed,
@@ -1182,9 +1201,14 @@ impl Snapshot {
         let durable = &self.durable;
         let head = &durable.head;
         let (frame_pages, frame_bytes) = (head.frame_pages, head.frame_bytes());
+        let promoted = self.promotes();
         let pack = PackId {
             version: head.version,
             nonce: cache::random(),
+            tier: match promoted {
+                true => Tier::L1,
+                false => Tier::L0,
+            },
         };
         let old = &durable.manifest;
         let mut manifest = Manifest {
@@ -1366,12 +1390,14 @@ impl Snapshot {
                 .insert(name.clone(), LogIndex { first, values });
         }
         let values = written.len() - before;
-        // Compaction: what packs mostly dead still hold moves into this one.
+        // Compaction: what packs of this tier mostly dead still hold moves
+        // into this one; into L1, all of L0 does.
         let mut live: HashMap<PackId, u64> = HashMap::new();
         for at in manifest.locations().filter(|at| at.pack != pack) {
             *live.entry(at.pack).or_default() += at.len;
         }
         let mut sparse: Vec<(u64, PackId)> = (live.iter())
+            .filter(|&(held, _)| held.tier == pack.tier)
             .filter(|&(held, &live)| live * 2 < old.sizes.get(held).copied().unwrap_or(0))
             .map(|(&held, &live)| (live, held))
             .collect();
@@ -1379,7 +1405,7 @@ impl Snapshot {
         // copies a large pack's worth at once.
         sparse.sort();
         let mut budget = 0;
-        let sparse: BTreeSet<PackId> = (sparse.into_iter())
+        let mut sparse: BTreeSet<PackId> = (sparse.into_iter())
             .take_while(|&(live, _)| {
                 let first = budget == 0;
                 budget += live;
@@ -1387,6 +1413,9 @@ impl Snapshot {
             })
             .map(|(_, held)| held)
             .collect();
+        if promoted {
+            sparse.extend(live.keys().filter(|held| held.tier == Tier::L0));
+        }
         let moving: BTreeSet<Location> = (manifest.locations())
             .filter(|at| sparse.contains(&at.pack))
             .copied()
@@ -1425,6 +1454,7 @@ impl Snapshot {
             manifest_bytes: encoded.len(),
             compacted: sparse.len(),
             deleted: 0,
+            promoted,
         };
         if !body.is_empty() {
             self.tiered.put_pack(pack, body.into()).await?;

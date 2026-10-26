@@ -6,8 +6,8 @@
 //! | Restate | `v20/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
 //! | Restate | `v20/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
 //! | Restate | `v20/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
-//! | Packs   | `checkpoint/<version>-<nonce>`                 | A checkpoint's pack: the frames of pages and the values it wrote                    |
-//! | Restate | `v20/pack/checkpoint/<version>-<nonce>/<part>` | A pack, where packs are kept in Restate (the default), in parts of 64 KiB           |
+//! | Restate | `v20/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
+//! | S3      | `l1/<version>-<nonce>`                         | A pack in L1: what a checkpoint moved out of L0, with its own frames and values     |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
 //! pages, each a zstd frame of its own (against its file's [`crate::Base`]
@@ -28,8 +28,10 @@ use std::{
 /// should send this one.
 pub const HEAD_KEY: &str = "v20/head";
 pub const TAIL_PREFIX: &str = "v20/tail/";
-/// Where packs are, in their store.
-pub(crate) const PACK_PREFIX: &str = "checkpoint/";
+/// Where L1's packs are, in their store.
+pub(crate) const PACK_PREFIX: &str = "l1/";
+/// Where L0's packs are, in Restate ([`crate::blobs::KvBlobs`]).
+pub(crate) const L0_PREFIX: &str = "l0/";
 const HEAD_MAGIC: &[u8; 4] = b"SH20";
 const ENTRY_MAGIC: &[u8; 4] = b"SE20";
 const MANIFEST_MAGIC: &[u8; 4] = b"SM20";
@@ -160,36 +162,69 @@ impl<'a> Reading<'a> {
     }
 }
 
-/// A pack's name: the version it checkpoints, and a random nonce.
+/// Where a pack is kept: L0, in Restate, or L1, in S3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Tier {
+    L0,
+    L1,
+}
+
+impl Tier {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::L0 => L0_PREFIX,
+            Self::L1 => PACK_PREFIX,
+        }
+    }
+
+    fn decode(n: u64) -> Option<Self> {
+        match n {
+            0 => Some(Self::L0),
+            1 => Some(Self::L1),
+            _ => None,
+        }
+    }
+}
+
+/// A pack's name: the version it checkpoints, a random nonce, and its tier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PackId {
     pub version: u64,
     pub nonce: u64,
+    pub tier: Tier,
 }
 
 impl PackId {
-    /// Its name: `<version>-<nonce>`, its pack's and its manifest's.
+    /// Its name: `<version>-<nonce>`, its manifest's.
     pub fn name(self) -> String {
         format!("{:016x}-{:016x}", self.version, self.nonce)
     }
 
-    /// Its pack's key, in the pack store.
+    /// Its pack's key, in its tier's store: `l0/<name>` or `l1/<name>`.
     pub fn key(self) -> String {
-        format!("{PACK_PREFIX}{}", self.name())
+        format!("{}{}", self.tier.prefix(), self.name())
     }
 
-    /// The pack id named `name`.
-    pub fn parse_name(name: &str) -> Option<Self> {
+    /// The pack id named `name`, in `tier`.
+    pub fn parse_name(name: &str, tier: Tier) -> Option<Self> {
         let (version, nonce) = name.split_once('-')?;
         Some(Self {
             version: u64::from_str_radix(version, 16).ok()?,
             nonce: u64::from_str_radix(nonce, 16).ok()?,
+            tier,
         })
+    }
+
+    /// The version a manifest named `name` (`<version>-<nonce>`) holds.
+    pub fn manifest_version(name: &str) -> Option<u64> {
+        u64::from_str_radix(name.split_once('-')?.0, 16).ok()
     }
 
     /// The pack id whose pack's key is `key`.
     pub fn parse(key: &str) -> Option<Self> {
-        Self::parse_name(key.strip_prefix(PACK_PREFIX)?)
+        [Tier::L0, Tier::L1]
+            .into_iter()
+            .find_map(|tier| Self::parse_name(key.strip_prefix(tier.prefix())?, tier))
     }
 }
 
@@ -212,7 +247,12 @@ impl Checkpoint {
             return out.push(0);
         };
         out.push(1);
-        for n in [this.pack.version, this.pack.nonce, this.manifest] {
+        for n in [
+            this.pack.version,
+            this.pack.nonce,
+            this.pack.tier as u64,
+            this.manifest,
+        ] {
             put_varint(out, n);
         }
     }
@@ -224,6 +264,7 @@ impl Checkpoint {
                 pack: PackId {
                     version: r.varint()?,
                     nonce: r.varint()?,
+                    tier: Tier::decode(r.varint()?).ok_or_else(|| r.invalid())?,
                 },
                 // Its compressed body, of at most what a decode takes.
                 manifest: r.bounded(MAX_DECODED as u64)?,
@@ -600,6 +641,7 @@ impl Manifest {
         for pack in &packs {
             put_varint(&mut body, pack.version);
             put_varint(&mut body, pack.nonce);
+            put_varint(&mut body, pack.tier as u64);
             put_varint(&mut body, self.sizes[pack]);
         }
         // A location as its pack's index plus one (0 is none), and its
@@ -676,6 +718,7 @@ impl Manifest {
             let pack = PackId {
                 version: r.varint()?,
                 nonce: r.varint()?,
+                tier: Tier::decode(r.varint()?).ok_or_else(|| r.invalid())?,
             };
             manifest.sizes.insert(pack, r.varint()?);
             packs.push(pack);

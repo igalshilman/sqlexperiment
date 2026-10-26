@@ -83,8 +83,13 @@ fn a_compaction_fetches_neighbouring_frames_in_one_get() -> Result<()> {
     futures::executor::block_on(async {
         let packs = MemoryBlobs::default();
         let store = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            l0_bytes: 0,
+            ..Default::default()
+        };
         let state = State::open(store)
             .checkpoints(Arc::new(packs.clone()))
+            .options(options)
             .await?;
         checkpointed(&state, 0, 32, 0).await?;
         // 18 of the 32 frames again: the first pack is under half live, and

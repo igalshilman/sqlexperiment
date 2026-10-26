@@ -25,11 +25,14 @@
 //! and syncs once: one round trip, which Restate fences. Now and then
 //! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as
 //! a *checkpoint*: the frames of pages the tail changed, and the values it
-//! set, into one *pack* in a [`blobs::BlobStore`] (S3, through
-//! [`Open::checkpoints`], or Restate's state itself by default), and a
-//! manifest of where every frame and value is, in Restate. Its head then names the
-//! checkpoint, and drops the tail it covered. Pack names are unique, and
-//! packs never change, so S3 needs no fencing, nor conditional puts.
+//! set, into one *pack*, and a manifest of where every frame and value is,
+//! in Restate. Its head then names the checkpoint, and drops the tail it
+//! covered. Packs are tiered: a checkpoint's pack goes to *L0*, in Restate's
+//! state, until L0 holds [`StateOptions::l0_bytes`]; then one goes to *L1*,
+//! a [`blobs::BlobStore`] (S3, through [`Open::checkpoints`]), with
+//! everything L0 held. Without an L1, every pack stays in Restate. Pack
+//! names are unique, and packs never change, so S3 needs no fencing, nor
+//! conditional puts.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
@@ -37,7 +40,7 @@
 //! | Head | `v20/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
 //! | Tail | `v20/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (a zstd frame each) | Yes, until a checkpoint after the next one |
 //! | Manifests | `v20/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
-//! | Packs | `checkpoint/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
+//! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -160,11 +163,18 @@ pub struct StateOptions {
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
-    /// ... or this many bytes; 0 never does by size. With packs kept in
-    /// Restate too, at most the bytes the checkpoint holds (its packs and its
-    /// manifest), but at least a frame's: there a checkpoint costs only its
-    /// bytes, and spares the tail's, though a round trip or two too.
+    /// ... or this many bytes; 0 never does by size. A checkpoint into L0
+    /// (Restate) is due at most at the bytes L0 and the manifest hold, but at
+    /// least a frame's: it costs only its bytes, and spares the tail's,
+    /// though a round trip or two too. One into L1 (S3) is due at exactly
+    /// these.
     pub checkpoint_bytes: u64,
+    /// With packs in S3 ([`Open::checkpoints`]), a checkpoint's pack goes to
+    /// L0, in Restate, until the packs there hold this many bytes; the
+    /// checkpoint after that puts its pack in S3, and moves everything L0
+    /// holds into it. 0 puts every checkpoint in S3; without S3, every
+    /// pack stays in Restate.
+    pub l0_bytes: u64,
 }
 
 impl Default for StateOptions {
@@ -175,6 +185,7 @@ impl Default for StateOptions {
             prefetch_pages: 16,
             checkpoint_entries: 128,
             checkpoint_bytes: 1 << 20,
+            l0_bytes: 4 << 20,
         }
     }
 }
@@ -233,14 +244,16 @@ impl Shared {
     /// Delete the packs no checkpoint the head names needs, and the
     /// manifests of checkpoints older than the previous one. A failure, or
     /// dropping the future midway, ends the state: in Restate, what it
-    /// deleted has an unknown outcome, which the next open syncs.
-    async fn collect_garbage(&self) -> Result<usize> {
+    /// deleted has an unknown outcome, which the next open syncs. With
+    /// `all`, S3 is listed whatever the head; without, only where L1's
+    /// packs may have changed ([`Tiered::collect_garbage`]).
+    async fn collect_garbage(&self, all: bool) -> Result<usize> {
         let mut collecting = Collecting {
             shared: self,
             done: false,
         };
         let head = self.snapshot().head().clone();
-        let deleted = self.tail.collect_garbage(&head).await?;
+        let deleted = self.tail.collect_garbage(&head, all).await?;
         collecting.done = true;
         Ok(deleted)
     }
@@ -362,7 +375,10 @@ impl State {
             _ => HashMap::new(),
         };
         parked.retain(|_, value| value.version == snapshot.version());
-        let backoff = cache.as_ref().map(NamespaceCache::backoff).unwrap_or_default();
+        let backoff = cache
+            .as_ref()
+            .map(NamespaceCache::backoff)
+            .unwrap_or_default();
         Ok(Self {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
@@ -534,7 +550,7 @@ impl State {
         if self.shared.poisoned.load(Ordering::SeqCst) {
             return Err(ENDED.into());
         }
-        self.shared.collect_garbage().await
+        self.shared.collect_garbage(true).await
     }
 
     /// The packs the head's checkpoints need: those its checkpoint and the
@@ -573,8 +589,9 @@ impl Open {
         Self { options, ..self }
     }
 
-    /// Keep checkpoints in `packs`, S3 say ([`blobs::ObjectStoreBlobs`]),
-    /// rather than in the store: every state of the namespace must.
+    /// Keep the bulk of the checkpoints in `packs`, S3 say
+    /// ([`blobs::ObjectStoreBlobs`]), as L1: the latest few go to Restate
+    /// first ([`StateOptions::l0_bytes`]). Every state of the namespace must.
     pub fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
         Self {
             packs: Some(packs),
@@ -867,7 +884,7 @@ impl Mutation {
             receipt.0.store(FLUSHED, Ordering::SeqCst);
         }
         if let Some(checkpoint) = &mut report.checkpoint {
-            checkpoint.deleted = shared.collect_garbage().await?;
+            checkpoint.deleted = shared.collect_garbage(false).await?;
         }
         Ok(report)
     }

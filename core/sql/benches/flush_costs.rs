@@ -8,13 +8,14 @@
 //! S3=1 cargo bench --locked --features simulation --bench flush_costs
 //! ```
 //!
-//! `FRAME_PAGES`, `INLINE_BYTES`, `CHECKPOINT_ENTRIES` and
-//! `CHECKPOINT_BYTES` set the state's options; `WORKLOAD` runs only the
+//! `FRAME_PAGES`, `INLINE_BYTES`, `CHECKPOINT_ENTRIES`, `CHECKPOINT_BYTES`
+//! and `L0_BYTES` set the state's options; `WORKLOAD` runs only the
 //! workloads it names part of, `FLUSHES` that many flushes each (an aged
 //! database); `LABEL` names the run in its rows. Prints Markdown rows.
 //!
 //! Without `S3`, the packs are kept in Restate's state too. With `S3=1`,
-//! they are in an object store, and the rows are what S3 would bill:
+//! the packs past L0 (`L0_BYTES`, 0 for all of them) are in an object
+//! store, and the rows are what S3 would bill:
 //! requests and bytes per flush, and dollars per million flushes and per
 //! month stored, at S3 Standard's and S3 Express One Zone's prices.
 use sql::{Sql, Value};
@@ -85,6 +86,7 @@ fn options() -> StateOptions {
         inline_record_bytes: var("INLINE_BYTES").unwrap_or(default.inline_record_bytes),
         checkpoint_entries: var("CHECKPOINT_ENTRIES").unwrap_or(default.checkpoint_entries),
         checkpoint_bytes: var("CHECKPOINT_BYTES").unwrap_or(default.checkpoint_bytes),
+        l0_bytes: var("L0_BYTES").unwrap_or(default.l0_bytes),
         ..default
     }
 }

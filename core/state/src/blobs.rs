@@ -1,6 +1,6 @@
-//! Where checkpoints' packs are: a [`BlobStore`], S3 through
-//! [`ObjectStoreBlobs`] (the feature `object-store`), or Restate's state
-//! itself ([`KvBlobs`], the default).
+//! Where checkpoints' packs are: L0 in Restate's state itself ([`KvBlobs`]),
+//! and L1 in a [`BlobStore`], S3 through [`ObjectStoreBlobs`] (the feature
+//! `object-store`), if the state has one.
 //!
 //! ```rust,ignore
 //! let packs = ObjectStoreBlobs::new(s3, "objects/42"); // the feature `object-store`
@@ -33,7 +33,7 @@ pub trait BlobStore: Send + Sync {
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, io::Result<Vec<String>>>;
 }
 
-/// Where [`KvBlobs::new`] keeps its blobs' parts: packs kept in Restate.
+/// Where [`KvBlobs::new`] keeps its blobs' parts: L0's packs, in Restate.
 pub const KV_PREFIX: &str = "v20/pack/";
 /// Where checkpoints' manifests are kept, in Restate wherever the packs
 /// are, in parts of 64 KiB.
@@ -54,7 +54,7 @@ pub struct KvBlobs {
 }
 
 impl KvBlobs {
-    /// Packs, under [`KV_PREFIX`].
+    /// L0's packs, under [`KV_PREFIX`].
     pub fn new(store: Arc<dyn KvStore>) -> Self {
         Self {
             store,
