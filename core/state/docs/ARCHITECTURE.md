@@ -104,7 +104,7 @@ state(n) = checkpoint(c) + mutation(c + 1) + … + mutation(n)
 
 Everything below is how those two layers are laid out, written and read.
 
-## 3. How it is stored: the terms
+## 3. How it is stored
 
 ```
 Restate (the object's state)                           S3, if the state has one
@@ -121,20 +121,11 @@ Restate (the object's state)                           S3, if the state has one
 └───────────────────────────────────────────────┘
 ```
 
-| Term                   | What it is                                                                                                                                                                                                                         |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Head**               | The commit point, one key (`v21/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                                       |
-| **Tail entry**         | One flush's mutation, as it was (`v21/tail/<version>/<part>`).                                                                                                                                                                     |
-| **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                                        |
-| **Checkpoint**         | The whole state as of a version: a manifest that indexes all of it, and a pack of only what changed since the checkpoint before. Written by a flush, when the tail is long enough, before its own tail entry.                      |
-| **Frame**              | The unit a file is stored in: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                                        |
-| **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                                |
-| **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `<version>-<nonce>`, with a random nonce, so no two puts share one, in one of two tiers. |
-| **Manifest**           | One per checkpoint (`v21/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                           |
-| **Overlay**            | The tail, in memory: the records and logs changed since the checkpoint, and per page changed, the chain of its changes. A read looks here first.                                                                                   |
-| **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                                         |
-| **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                                     |
-| **L0, L1**             | The two tiers packs are in: L0 in Restate (`KvBlobs`, in 64 KiB parts beside everything else); L1 in S3 (`ObjectStoreBlobs`), where the state has one, for the packs L0 outgrew.                                                   |
+A paged file is stored as **frames** of 4 pages (16 KiB), each compressed
+with zstd on its own: the unit a read fetches and a checkpoint rewrites.
+The state in memory keeps the tail decoded as an **overlay**, the records,
+logs and pages changed since the checkpoint, and a read looks there first.
+The rest of the terms are introduced below, each where its piece is.
 
 ## 4. The pieces, and how they change over time
 
@@ -142,9 +133,9 @@ Restate (the object's state)                           S3, if the state has one
 
 1. **If a checkpoint is due**, write it first (below), as of the version
    before this flush.
-2. **Encode the mutation** as a tail entry. Each page written is a zstd
-   frame of its own, compressed against the page as the state holds it
-   before the flush: its **change**. A row update usually changes a few
+2. **Encode the mutation** as a tail entry. Each page written is
+   compressed on its own, against the page as the state holds it before
+   the flush: its **change**. A row update usually changes a few
    bytes of a page, so its page costs about 100–200 bytes, not 4 KiB; and a
    page written at every flush (a log appended to, a VM's heap) costs each
    flush only what that flush changed.
