@@ -562,17 +562,17 @@ Per flush, with a warm cache, and against v20's packs all in S3:
 
 | Workload            | Bytes put to Restate per flush | v20, all in S3 | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold | v20, warm |
 | ------------------- | ------------------------------ | -------------- | ----------------- | ------------ | ---------------------------------------------- | --------- |
-| Chat with effects   | 1951                           | 1938           | 170 KiB           | none         | $0 / $0                                        | $0.07     |
-| Small, update 1     | 678                            | 1734           | 34 KiB            | none         | $0 / $0                                        | $0.07     |
-| 10k rows, update 1  | 641                            | 436            | 1.2 MiB           | none         | $0 / $0                                        | $0.08     |
+| Chat with effects   | 1177                           | 1938           | 161 KiB           | none         | $0 / $0                                        | $0.07     |
+| Small, update 1     | 327                            | 1734           | 28 KiB            | none         | $0 / $0                                        | $0.07     |
+| 10k rows, update 1  | 633                            | 436            | 1.2 MiB           | none         | $0 / $0                                        | $0.08     |
 | 100k rows, update 1 | 521                            | 426            | 81 KiB            | 10.7 MiB     | $0.02 / $2.45                                  | $0.08     |
-| 1M rows, update 1   | 876                            | 654            | 148 KiB           | 107 MiB      | $0.02 / $3.59                                  | $0.08     |
-| 1M rows, update 10  | 1403                           | 1080           | 284 KiB           | 107 MiB      | $0.02 / $23.87                                 | $0.08     |
-| 100k rows, aged     | 1168                           | 702            | 3.6 MiB           | 10.7 MiB     | $0 / $2.65                                     | $0.08     |
+| 1M rows, update 1   | 861                            | 654            | 145 KiB           | 107 MiB      | $0.03 / $4.39                                  | $0.08     |
+| 1M rows, update 10  | 1372                           | 1080           | 277 KiB           | 107 MiB      | $0.03 / $24.97                                 | $0.08     |
+| 100k rows, aged     | 1167                           | 702            | 3.6 MiB           | 10.7 MiB     | $0 / $2.65                                     | $0.08     |
 
 A database under 4 MiB, compressed, is stored and costs as without S3:
 nothing in S3, and its tail cut by the relative rule, so a small one puts
-a third of the bytes v20's S3 mode did. A larger one checkpoints into L0
+a fifth of the bytes v20's S3 mode did. A larger one checkpoints into L0
 and pays its packs' bytes to Restate (about 220 bytes a flush for one-row
 updates, v20's Restate mode's), and in exchange makes no S3 request
 between promotions: none of the 256 flushes measured uploaded, where v20
