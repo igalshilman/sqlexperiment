@@ -167,7 +167,7 @@ fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         let base = baseline().await?;
-        for (operation, prefix) in [(Operation::Put, "v20/tail/"), (Operation::Sync, "")] {
+        for (operation, prefix) in [(Operation::Put, "v21/tail/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
                 // The save puts its tail entry, then its head.

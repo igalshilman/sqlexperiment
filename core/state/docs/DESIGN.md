@@ -268,7 +268,7 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   checks structure and bounds versions, sizes, counts and names, and every
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
-- **Format.** Only v20, with no migration.
+- **Format.** Only v21, with no migration.
 - **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
   differences from the location before, and zstd over the manifest's body;
   the pages are zstd frames of their own. A zero-copy format (FlatBuffers,

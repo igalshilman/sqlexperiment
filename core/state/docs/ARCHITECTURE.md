@@ -107,24 +107,24 @@ Everything below is how those two layers are laid out, written and read.
 ```
 Restate (the object's state)                           Restate, or S3
 ┌───────────────────────────────────────────────┐     ┌──────────────────────────────┐
-│ v20/head          the commit point: version,  │     │ pack: checkpoint/<v>-<nonce> │
+│ v21/head          the commit point: version,  │     │ pack: checkpoint/<v>-<nonce> │
 │                   checkpoints, tail entries   │     │   frames, patches,           │
-│ v20/tail/<v>/<p>  one per flush: its mutation │     │   large values               │
-│ v20/manifest/...  one per checkpoint: where   │────▶│                              │
+│ v21/tail/<v>/<p>  one per flush: its mutation │     │   large values               │
+│ v21/manifest/...  one per checkpoint: where   │────▶│                              │
 │                   every frame and value is    │     │                              │
 └───────────────────────────────────────────────┘     └──────────────────────────────┘
 ```
 
 | Term                   | What it is                                                                                                                                                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Head**               | The commit point, one key (`v20/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                             |
-| **Tail entry**         | One flush's mutation, as it was (`v20/tail/<version>/<part>`).                                                                                                                                                           |
+| **Head**               | The commit point, one key (`v21/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                             |
+| **Tail entry**         | One flush's mutation, as it was (`v21/tail/<version>/<part>`).                                                                                                                                                           |
 | **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                              |
 | **Checkpoint**         | The whole state as of a version: a manifest that indexes all of it, and a pack of only what changed since the checkpoint before. Written by a flush, when the tail is long enough, before its own tail entry.            |
 | **Frame**              | The unit a file is stored in: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                              |
 | **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                      |
 | **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `checkpoint/<version>-<nonce>`, with a random nonce, so no two puts share one. |
-| **Manifest**           | One per checkpoint (`v20/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                 |
+| **Manifest**           | One per checkpoint (`v21/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                 |
 | **Overlay**            | The tail, decoded in memory: the pages, records and logs changed since the checkpoint. A read looks here first.                                                                                                          |
 | **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                               |
 | **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                           |

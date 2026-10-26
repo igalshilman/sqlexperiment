@@ -3,10 +3,10 @@
 //!
 //! | Store   | Key                                            | Holds                                                                               |
 //! | ------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-//! | Restate | `v20/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
-//! | Restate | `v20/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
-//! | Restate | `v20/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
-//! | Restate | `v20/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
+//! | Restate | `v21/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
+//! | Restate | `v21/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
+//! | Restate | `v21/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
+//! | Restate | `v21/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
 //! | S3      | `l1/<version>-<nonce>`                         | A pack in L1: what a checkpoint moved out of L0, with its own frames and values     |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
@@ -26,15 +26,15 @@ use std::{
 /// The head's key: the commit point. An open reads it first, so a host whose
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
-pub const HEAD_KEY: &str = "v20/head";
-pub const TAIL_PREFIX: &str = "v20/tail/";
+pub const HEAD_KEY: &str = "v21/head";
+pub const TAIL_PREFIX: &str = "v21/tail/";
 /// Where L1's packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "l1/";
 /// Where L0's packs are, in Restate ([`crate::blobs::KvBlobs`]).
 pub(crate) const L0_PREFIX: &str = "l0/";
-const HEAD_MAGIC: &[u8; 4] = b"SH20";
-const ENTRY_MAGIC: &[u8; 4] = b"SE20";
-const MANIFEST_MAGIC: &[u8; 4] = b"SM20";
+const HEAD_MAGIC: &[u8; 4] = b"SH21";
+const ENTRY_MAGIC: &[u8; 4] = b"SE21";
+const MANIFEST_MAGIC: &[u8; 4] = b"SM21";
 /// Bytes of a tail entry's part.
 pub(crate) const PART_BYTES: usize = 1 << 20;
 

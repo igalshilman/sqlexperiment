@@ -1,6 +1,6 @@
 # Storage format
 
-Only this format (v20) is implemented. Use a dedicated namespace. Keys,
+Only this format (v21) is implemented. Use a dedicated namespace. Keys,
 encodings and bounds live in `src/format.rs`; there is no migration or
 format discovery. Storage is assumed reliable (a value reads back as
 written); every zstd frame carries a checksum, and decoding checks
@@ -8,10 +8,10 @@ structure and the bounds below.
 
 | Store               | Key                                     | Value                                                      |
 | ------------------- | --------------------------------------- | ---------------------------------------------------------- |
-| Restate             | `v20/head`                              | The head, the commit point; absent until the first flush   |
-| Restate             | `v20/tail/<version>/<part>`             | A part of the tail entry of the flush that made `version`  |
-| Restate             | `v20/manifest/<version>-<nonce>/<part>` | A part of a checkpoint's manifest; put once, never changed |
-| Restate (`KvBlobs`) | `v20/pack/l0/<version>-<nonce>/<part>`  | A part of a pack in L0; put once, never changed            |
+| Restate             | `v21/head`                              | The head, the commit point; absent until the first flush   |
+| Restate             | `v21/tail/<version>/<part>`             | A part of the tail entry of the flush that made `version`  |
+| Restate             | `v21/manifest/<version>-<nonce>/<part>` | A part of a checkpoint's manifest; put once, never changed |
+| Restate (`KvBlobs`) | `v21/pack/l0/<version>-<nonce>/<part>`  | A part of a pack in L0; put once, never changed            |
 | S3 (`BlobStore`)    | `l1/<version>-<nonce>`                  | A pack in L1; put once, never changed                      |
 
 The head is the only key whose write commits. `<version>` and `<part>` in a
@@ -23,7 +23,7 @@ parts of 64 KiB (the last shorter), numbered in decimal from 0; a
 checkpoint that stores nothing outside its manifest puts no pack. A pack
 is in one of two tiers, which its key and every reference to it name. In
 L0 (`blobs::KvBlobs`), it is cut into parts of 64 KiB (the last shorter),
-numbered in decimal from 0, under `v20/pack/l0/`; in L1, in S3
+numbered in decimal from 0, under `v21/pack/l0/`; in L1, in S3
 (`blobs::ObjectStoreBlobs`), it is one object, `l1/<version>-<nonce>`
 under the namespace's prefix. Without S3, every pack is in L0.
 
@@ -34,7 +34,7 @@ manifest.
 
 ## Head
 
-`SH20`, then, uncompressed:
+`SH21`, then, uncompressed:
 
 | Field       | Encoding                                                                                           |
 | ----------- | -------------------------------------------------------------------------------------------------- |
@@ -54,9 +54,9 @@ size of the options that open it.
 
 ## Tail entry
 
-What one flush changed, as it changed it: `SE20`, then, uncompressed (its
+What one flush changed, as it changed it: `SE21`, then, uncompressed (its
 pages are zstd frames of their own), cut into parts of at most 1 MiB, put
-at `v20/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
+at `v21/tail/<version>/0` onward. The parts, joined, are at most 1 GiB.
 
 | Field   | Encoding                                                                                                                                                                                                                                                                                                           |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -90,7 +90,7 @@ no base page reads as a hole.
 
 ## Manifest
 
-`SM20`, then one zstd frame of the body (at most 1 GiB decoded):
+`SM21`, then one zstd frame of the body (at most 1 GiB decoded):
 
 | Field   | Encoding                                                                                                                                                                                                                                                                                                                                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
