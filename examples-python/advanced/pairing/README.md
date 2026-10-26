@@ -7,7 +7,7 @@ your approval before it ships. The agent's loop runs in Restate, not in a
 coding harness: each model step and each tool call is stored.
 
 ```
-you ──▶ pair.py (a terminal) ──▶ pair/<project> (Claude) ──▶ sandbox: files, git, tests
+you ──▶ pair.py (a terminal) ──▶ pair/<project> (LiteLLM) ──▶ sandbox: files, git, tests
           ▲   steer, approve        │  plan (a table of its own)
           └── follow ◀──────────────┤  reviewer/<project>.<task> (another model): what to fix
                                     └▶ approval (you) ──▶ shipping/<…> (a workflow): CI, then a pull request
@@ -41,7 +41,7 @@ What it shows:
   from its last stored step; a shipped change ships once, as the workflow
   is keyed by the tool call.
 
-Run it from `examples-python/`, with `ANTHROPIC_API_KEY` (and
+Run it from `examples-python/`, with `OPENAI_API_KEY` (and
 `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for a Modal sandbox); the requests
 are in [`pairing.py`](pairing.py)'s docstring, and the terminal's commands in
 [`pair.py`](pair.py)'s.

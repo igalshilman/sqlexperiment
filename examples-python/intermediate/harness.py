@@ -5,7 +5,7 @@ reads for each message; ``compact`` has the model summarize the conversation
 so far, to keep its context short; and ``reset`` starts it over, with a note
 to carry on.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/harness.py
+    OPENAI_API_KEY=... uv run intermediate/harness.py
     restate deployments register http://localhost:9080
     curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
     curl localhost:8080/assistant/alice/chat -d 'What time is it?'
@@ -13,13 +13,14 @@ to carry on.
     curl localhost:8080/assistant/alice/reset -d 'Alice likes short answers'
     curl localhost:8080/assistant/alice/messages
 
-The model is one of Claude's, such as ``{"model": "anthropic/claude-haiku-5-5"}``.
+The model is any LiteLLM knows, such as ``{"model": "openai/gpt-6-luna"}``, with its
+provider's API key.
 """
 
 import json
 from datetime import UTC, datetime
 
-from restate_agents import claude, serve, tool
+from restate_agents import litellm, serve, tool
 
 
 async def settings_of(ctx) -> dict:
@@ -42,7 +43,7 @@ def clock() -> str:
     return datetime.now(UTC).isoformat()
 
 
-assistant = claude.agent(
+assistant = litellm.agent(
     "assistant",
     model=model,
     system=persona,
@@ -63,13 +64,13 @@ async def configure(ctx, model: str | None = None, persona: str | None = None) -
 @assistant.handler(message=True)
 async def compact(ctx, instructions: str) -> str:
     """Summarize the conversation so far, as ``instructions`` say, in place of it."""
-    return await claude.compact(ctx, instructions, model=await model(ctx))
+    return await litellm.compact(ctx, instructions, model=await model(ctx))
 
 
 @assistant.handler(message=True)
 async def reset(ctx, handoff: str) -> None:
     """Start the conversation over, with ``handoff`` as what to carry on with."""
-    await claude.reset(ctx, handoff)
+    await litellm.reset(ctx, handoff)
 
 
 if __name__ == "__main__":

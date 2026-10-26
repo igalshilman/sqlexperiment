@@ -12,9 +12,9 @@ import { sqlAttempt } from '../testing.ts';
 
 // Told "remember X", it calls remember; asked what it knows, it calls recall;
 // given a tool's result, it says it.
-vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
-  anthropicProvider: () =>
-    fakeProvider('anthropic', 'claude-sonnet-5-5', ({ messages }) => {
+vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
+  openaiProvider: () =>
+    fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const last = messages.at(-1)!;
       if (last.role === 'toolResult') return say(textOf(last.content));
       const text = textOf(last.content);

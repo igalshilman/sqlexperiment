@@ -6,13 +6,13 @@ each model's answer is stored as it comes: a crash in the third round
 carries on from there, without asking either model again. The approved
 notes go to the publishing workflow (publishing.py), which runs once.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/release_notes.py
+    OPENAI_API_KEY=... uv run intermediate/release_notes.py
     restate deployments register http://localhost:9080
     curl localhost:8080/releases/v2.4/write --json '["Add Apple Pay", "Fix rounding in the cart"]'
 
 The models are any two LiteLLM knows, with their providers' keys:
-DRAFTER=openai/gpt-5-mini REVIEWER=gemini/gemini-2.5-pro, say. By default,
-Claude Haiku drafts and Claude Sonnet reviews.
+DRAFTER=anthropic/claude-haiku-5-5 REVIEWER=gemini/gemini-2.5-pro, say. By
+default, GPT-6 Luna drafts and GPT-6 Sol reviews.
 """
 
 import os
@@ -20,8 +20,8 @@ import os
 from publishing import publish, publishing
 from restate_agents import Object, litellm, serve
 
-DRAFTER = os.environ.get("DRAFTER", "anthropic/claude-haiku-5-5")
-REVIEWER = os.environ.get("REVIEWER", "anthropic/claude-sonnet-5-5")
+DRAFTER = os.environ.get("DRAFTER", "openai/gpt-6-luna")
+REVIEWER = os.environ.get("REVIEWER", "openai/gpt-6-sol")
 
 releases = Object("releases")
 

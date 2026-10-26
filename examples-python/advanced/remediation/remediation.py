@@ -11,7 +11,7 @@ as the finding's audit trail; a crash carries on from the last decision; a
 sign-off can take days without a process; an executor past its deadline is
 cancelled, its work with it.
 
-    ANTHROPIC_API_KEY=... uv run advanced/remediation/remediation.py
+    OPENAI_API_KEY=... uv run advanced/remediation/remediation.py
     restate deployments register http://localhost:9080
     curl localhost:8080/remediation/f-1/run/send --json @advanced/remediation/finding.json
     curl localhost:8080/remediation/f-1/trail      # each decision, as it is made

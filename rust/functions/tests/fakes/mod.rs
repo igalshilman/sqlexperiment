@@ -1,4 +1,4 @@
-//! A scripted Claude, as the `llm` binding for tests: it answers each request
+//! A scripted model, as the `llm` binding for tests: it answers each request
 //! in the gateway's format by the steps the conversation has taken, as the
 //! shop assistant or, offered `bash`, as the coding agent.
 use functions::{Binding, GuestError, HostCall};
@@ -7,16 +7,16 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 
 #[derive(Clone)]
-pub struct Claude;
+pub struct Model;
 
 /// Every request the fake was sent, in order, its conversation's messages
 /// read from the scope.
 pub static REQUESTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
-impl Binding for Claude {
+impl Binding for Model {
     fn call(&self, call: HostCall) -> BoxFuture<'static, Result<Value, GuestError>> {
         let request = call.input;
-        assert!(request["model"].as_str().unwrap().starts_with("anthropic/"));
+        assert!(request["model"].as_str().unwrap().starts_with("openai/"));
         REQUESTS.lock().unwrap().push(request.clone());
         let messages = request["messages"].as_array().unwrap();
         let codes = request["tools"][0]["name"] == "bash";

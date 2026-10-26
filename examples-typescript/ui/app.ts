@@ -2,7 +2,7 @@
 // client: send a message, see what the agent is doing while it works,
 // approve or reject what it waits for, steer it, or stop it.
 //
-//   ANTHROPIC_API_KEY=… node intermediate/support.ts                                 # the agent, on port 9080
+//   OPENAI_API_KEY=… node intermediate/support.ts                                 # the agent, on port 9080
 //   npx @restatedev/restate-server                                       # Restate, in another terminal
 //   npx @restatedev/restate deployments register http://localhost:9080
 //   npx vite ui                                                          # this page: http://localhost:5173

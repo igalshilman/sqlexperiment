@@ -23,7 +23,7 @@ await serve(coder);
 
 | Option      | What                                                                                                                                                                                                        |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`)                                                                          |
+| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                                                                        |
 | `system`    | The system prompt                                                                                                                                                                                           |
 | `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                                           |
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools`                                     |
@@ -96,7 +96,7 @@ turn starts, and resumes every claimed turn when it boots.
 ## Run
 
 ```sh
-cd examples-typescript && ANTHROPIC_API_KEY=… node opencode.ts
+cd examples-typescript && OPENAI_API_KEY=… node opencode.ts
 ```
 
 With a Restate server, and the agent registered with it: see

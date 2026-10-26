@@ -5,7 +5,7 @@ booking; and a handler of your own that asks it for the plan, typed. The
 conversation is stored in the object's database at each step: a crash
 mid-turn carries on from the step it was at.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/trips.py
+    OPENAI_API_KEY=... uv run intermediate/trips.py
     restate deployments register http://localhost:9080
     curl localhost:8080/trips/alice/chat -d 'Three days in Lisbon in May, and book me a hotel'
     curl localhost:8080/trips/alice/pending      # the booking it waits to be approved
@@ -46,7 +46,7 @@ def book(call_id: str, hotel: str, nights: int) -> str:
 
 
 planner = Agent(
-    "anthropic:claude-sonnet-5-5",
+    "openai:gpt-6-sol",
     instructions="You are a travel agent: plan trips, and book what the traveller approves. Be brief.",
     tools=[
         weather,

@@ -25,7 +25,7 @@ export async function get(_, ctx) {
 
 ```sh
 make functions                                   # from the repository's root
-ANTHROPIC_API_KEY=... target/release/functions   # every function here, on port 9080
+OPENAI_API_KEY=... target/release/functions      # every function here, on port 9080
 npx @restatedev/restate-server                   # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/add --json 20  # 20, a second later
@@ -49,7 +49,7 @@ file's header shows how to call it, and Restate's UI lists every handler.
 | [`timeout.js`](timeout.js)           | A deadline: race a [`slow`](slow.js) call against a timer                                                     |
 | [`fanout.js`](fanout.js)             | Add to `counter` under several keys at once, and wait for all                                                 |
 | [`primes.js`](primes.js)             | A long computation, carried across turns                                                                      |
-| [`assistant.js`](assistant.js)       | An AI agent (Claude) with the shop as its tools                                                               |
+| [`assistant.js`](assistant.js)       | An AI agent (GPT) with the shop as its tools                                                                  |
 | [`coder.js`](coder.js)               | A coding agent with a shell and files, in a workspace that outlives the run                                   |
 
 ## Writing a function

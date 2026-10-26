@@ -59,12 +59,15 @@ from claude_agent_sdk import (
 from restate_fns import ObjectContext
 
 from restate_agents import harness, turns
-from restate_agents.common import DEFAULT_MODEL, Transcript, configured, model_id_of, model_of, table_schema
+from restate_agents.common import CLAUDE_MODEL, Transcript, configured, model_id_of, model_of, table_schema
 from restate_agents.object import Object, service
 from restate_agents.tools import Tool
 from restate_agents.turns import CANCELLED
 
 __all__ = ["CANCELLED", "DEFAULT_MODEL", "agent", "prompt", "reset"]
+
+DEFAULT_MODEL = CLAUDE_MODEL
+"""The model of an agent given none, and no MODEL."""
 
 # The MCP server that serves the agent's tools to Claude Code: a tool ``t`` is ``mcp__restate__t`` there.
 SERVER = "restate"
@@ -106,7 +109,7 @@ def agent(
     your own with ``@agent.handler``.
     """
     if not callable(model):
-        model_id_of(model_of(model), "anthropic")
+        model_id_of(model_of(model, DEFAULT_MODEL), "anthropic")
 
     async def answer(ctx: ObjectContext, message: str) -> str:
         return await prompt(
@@ -155,7 +158,7 @@ async def prompt(
     run = _Run(
         ctx,
         thread,
-        model=model_id_of(model_of(model), "anthropic"),
+        model=model_id_of(model_of(model, DEFAULT_MODEL), "anthropic"),
         system=system,
         tools=list(tools),
         workspace=workspace,

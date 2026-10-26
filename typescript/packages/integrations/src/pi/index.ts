@@ -11,8 +11,8 @@
 //
 //   compact: (ctx) => withPi(ctx, { tools }, async ({ conversation, context }) => ...),
 //
-// The model is `model`, MODEL, or else anthropic/claude-sonnet-5-5, with the
-// provider's API key (such as ANTHROPIC_API_KEY).
+// The model is `model`, MODEL, or else openai/gpt-6-sol, with the
+// provider's API key (such as OPENAI_API_KEY).
 //
 // It runs `work` over `ctx.db`: pi-durable's storage is the object's
 // database (storage.ts), and each pi-durable commit is an SQL transaction
@@ -88,7 +88,7 @@ const textOf = (content: Message['content']): string =>
 
 /** An agent's options: `chat`, `prompt` and `withPi` take them. */
 export interface Options {
-  /** The model, as `provider/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
+  /** The model, as `provider/model-id`: MODEL, or else openai/gpt-6-sol. */
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;

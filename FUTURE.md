@@ -122,9 +122,13 @@ stable release, clean per the report; the lock has its hashes) and
 `openai-agents` below 0.21 (0.20), since 0.21 and later need `openai` 3,
 which LiteLLM 1.106.2 does not take.
 
+The same holds for Pydantic AI's `openai` extra (`openai` 3 too): its
+OpenAI models, which the Python examples use, run on the `openai` 2 that
+LiteLLM brings, undeclared.
+
 **Then:** check the new LiteLLM release (its source and its wheels' files:
-no `.pth` or `sitecustomize.py`), pin it exactly, and lift the
-`openai-agents` pin (its `TODO:`).
+no `.pth` or `sitecustomize.py`), pin it exactly, lift the `openai-agents`
+pin (its `TODO:`), and declare `pydantic-ai-slim[anthropic,openai]`.
 
 ## The SQL engine's huge pages, in the bindings
 

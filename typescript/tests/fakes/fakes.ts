@@ -7,7 +7,7 @@
 // (the unit tests do the same with vi.mock):
 // - pi-ai's provider `teller`: pi.ts;
 // - @anthropic-ai/sdk, of the Claude agent: claude.ts;
-// - @langchain/anthropic: langgraph.ts;
+// - @langchain/openai and @langchain/anthropic: langgraph.ts;
 // - DeepSeek's provider plugin: deepseek.ts;
 // - restate-agents/opencode/db, whose OpenCode gets the teller's plugin:
 //   opencode-db.ts.
@@ -20,6 +20,7 @@ const fake = (path: string) => new URL(path, import.meta.url).href;
 const packages: Record<string, string> = {
   '@earendil-works/pi-ai/providers/teller': fake('pi.ts'),
   '@anthropic-ai/sdk': fake('claude.ts'),
+  '@langchain/openai': fake('langgraph.ts'),
   '@langchain/anthropic': fake('langgraph.ts'),
   '@deepseek-ai/dsh-llm-deepseek-api-key': fake('deepseek.ts'),
 };

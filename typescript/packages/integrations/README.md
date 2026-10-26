@@ -42,7 +42,7 @@ Run it, from [`examples-typescript/`](../../../examples-typescript/README.md), a
 repository's root ([Build your own](#build-your-own)):
 
 ```sh
-ANTHROPIC_API_KEY=… node chat.ts                                             # the agent, on port 9080
+OPENAI_API_KEY=… node chat.ts                                                # the agent, on port 9080
 npx @restatedev/restate-server  # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
@@ -390,16 +390,18 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 ## Models
 
 Every agent's `model` is `provider/model-id`, or else the `MODEL`
-environment variable, or else Anthropic's `anthropic/claude-sonnet-5-5`, with
-`ANTHROPIC_API_KEY` (DeepSeek's `deepseek/deepseek-flash`, with
+environment variable, or else OpenAI's `openai/gpt-6-sol`, with
+`OPENAI_API_KEY` (Anthropic's `anthropic/claude-sonnet-5-5`, with
+`ANTHROPIC_API_KEY`, for Claude; DeepSeek's `deepseek/deepseek-flash`, with
 `DEEPSEEK_API_KEY`, for the DeepSeek Harness):
 
 ```ts
-pi.agent({ name: 'assistant', model: 'openai/gpt-6-luna' }); // with OPENAI_API_KEY
+pi.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with ANTHROPIC_API_KEY
 ```
 
-pi and OpenCode take any provider they know; Claude and LangGraph take
-Anthropic's models (and LangGraph any LangChain chat model, as `model`).
+pi and OpenCode take any provider they know; LangGraph OpenAI's and
+Anthropic's models (and any LangChain chat model, as `model`); Claude
+Anthropic's.
 
 A wrong model fails at once: a model that is not `provider/model-id`, or
 another provider's for an agent of one provider's models, when the agent is

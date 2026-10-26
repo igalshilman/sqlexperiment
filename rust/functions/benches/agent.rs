@@ -25,7 +25,7 @@ use std::{
     time::Instant,
 };
 
-/// The scripted model, as the gateway's provider `anthropic`: it answers
+/// The scripted model, as the gateway's provider `openai`: it answers
 /// with `next`, and keeps the size of the request it was sent.
 #[derive(Clone, Default)]
 struct Scripted {
@@ -56,7 +56,7 @@ fn main() -> Result<()> {
     let programs = Arc::new(Programs::new(runtime).compile("coder", source)?);
     let store = MemoryKv::default();
     let model = Scripted::default();
-    let llm = Llm::new().provider("anthropic", Provider::local(model.clone()));
+    let llm = Llm::new().provider("openai", Provider::local(model.clone()));
     let s3 = std::env::args().any(|arg| arg == "s3");
     let packs = MemoryBlobs::default();
     let mut scope =

@@ -6,7 +6,7 @@ signal), or sends notes back to the writer; and the publishing workflow
 (publishing.py) publishes it. Each step is stored in the object's database: a crash
 mid-review carries on from the last draft, and the post is published once.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/writer.py
+    OPENAI_API_KEY=... uv run intermediate/writer.py
     restate deployments register http://localhost:9080
     curl localhost:8080/writer/post/chat -d 'A tweet announcing durable AI agents on Restate'
     curl localhost:8080/writer/post/pending    # the draft that waits for your approval
@@ -15,15 +15,15 @@ mid-review carries on from the last draft, and the post is published once.
     curl localhost:8080/writer/post/messages   # each draft, and where it was published
 """
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from publishing import publishing
 from pydantic import BaseModel
 from restate_agents import langgraph, serve
 from restate_agents.langgraph import nodes
 
-model = ChatAnthropic(model="claude-sonnet-5-5")
+model = ChatOpenAI(model="gpt-6-sol")
 
 DRAFTS = 3
 

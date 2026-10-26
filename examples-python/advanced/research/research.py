@@ -9,7 +9,7 @@ Every step is Restate's: a crash anywhere carries on from where it was, a
 plan can wait for you for days without a process, and each agent's
 conversation is in its own object, to read or follow as it works.
 
-    ANTHROPIC_API_KEY=... uv run advanced/research/research.py
+    OPENAI_API_KEY=... uv run advanced/research/research.py
     restate deployments register http://localhost:9080
     curl localhost:8080/research/r1/run/send --json '"How did the Dutch close off the Zuiderzee?"'
     curl localhost:8080/research/r1/progress      # the plan, once it waits for you

@@ -30,6 +30,7 @@ import {
   CANCELLED,
   cancellationOf,
   chatHandler,
+  CLAUDE_MODEL,
   type Configure,
   configured,
   messagesHandler,
@@ -183,7 +184,7 @@ const answerOnce = async (
 ): Promise<string> => {
   const agent = {
     client: client ?? (shared ??= new Anthropic()),
-    model: modelIdOf(modelOf(named), 'anthropic'),
+    model: modelIdOf(modelOf(named, CLAUDE_MODEL), 'anthropic'),
     maxTokens,
     system,
     tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
@@ -223,7 +224,7 @@ const answerOnce = async (
  * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object') modelIdOf(modelOf(options.model), 'anthropic');
+  if (typeof options === 'object') modelIdOf(modelOf(options.model, CLAUDE_MODEL), 'anthropic');
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 

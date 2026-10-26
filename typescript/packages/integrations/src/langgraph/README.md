@@ -17,11 +17,11 @@ const assistant = langgraph.agent({ name: 'assistant', system: 'Answer briefly.'
 await serve(assistant);
 ```
 
-| Option   | What                                                                                                                                                               |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`  | `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `anthropic/claude-sonnet-5-5` (`ANTHROPIC_API_KEY`); or any LangChain chat model that calls tools |
-| `system` | The system prompt                                                                                                                                                  |
-| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                            |
+| Option   | What                                                                                                                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `openai/model-id` (`ChatOpenAI`) or `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`); or any LangChain chat model that calls tools |
+| `system` | The system prompt                                                                                                                                                                        |
+| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                                                  |
 
 For an object of your own, `langgraph.chat(options)` and
 `langgraph.messages()` are the handlers; `options` may be a function of the
@@ -56,7 +56,7 @@ step it stored.
 ## Run
 
 ```sh
-cd examples-typescript && ANTHROPIC_API_KEY=… node langgraph.ts
+cd examples-typescript && OPENAI_API_KEY=… node langgraph.ts
 ```
 
 With a Restate server, and the agent registered with it: see

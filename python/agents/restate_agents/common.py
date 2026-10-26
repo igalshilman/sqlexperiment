@@ -39,8 +39,11 @@ def table_schema(table: str, create: str) -> Schema:
     return Schema(table, [create])
 
 
-DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
-"""The model of an agent given none, and no MODEL."""
+DEFAULT_MODEL = "openai/gpt-6-sol"
+"""The model of an agent given none, and no MODEL, on a framework that takes any provider's (with OPENAI_API_KEY)."""
+
+CLAUDE_MODEL = "anthropic/claude-sonnet-5-5"
+"""The model of a Claude agent given none, and no MODEL (with ANTHROPIC_API_KEY)."""
 
 
 async def configured(option: Any, ctx: Any, value: type | tuple[type, ...] = ()) -> Any:
@@ -60,9 +63,9 @@ class ModelError(ValueError):
     """An agent's model that it cannot take: not ``provider/model-id``, or another provider's."""
 
 
-def model_of(model: str | None) -> str:
-    """The model, as ``provider/model-id``: ``model``, or else MODEL, or else ``DEFAULT_MODEL``."""
-    return model or os.environ.get("MODEL") or DEFAULT_MODEL
+def model_of(model: str | None, default: str = DEFAULT_MODEL) -> str:
+    """The model, as ``provider/model-id``: ``model``, or else MODEL, or else ``default``."""
+    return model or os.environ.get("MODEL") or default
 
 
 def model_id_of(model: str, provider: str) -> str:

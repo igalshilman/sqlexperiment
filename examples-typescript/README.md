@@ -15,9 +15,9 @@ tools, a person in the loop, teams, workflows, coding agents); and
 | [`chat.ts`](basic/chat.ts)           | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'assistant', tools: [weather] })`                                  |
 | [`opencode.ts`](basic/opencode.ts)   | The same agent on OpenCode 2.0                                                                                                                |
 | [`langgraph.ts`](basic/langgraph.ts) | The same agent on LangGraph                                                                                                                   |
-| [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner)                                                                                    |
+| [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner; `ANTHROPIC_API_KEY`)                                                               |
 | [`deepseek.ts`](basic/deepseek.ts)   | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                   |
-| [`models.ts`](basic/models.ts)       | Models you set up yourself: Claude through an Anthropic client of your own (a gateway, no retries of its own), LangGraph on a `ChatAnthropic` |
+| [`models.ts`](basic/models.ts)       | Models you set up yourself: LangGraph on `ChatOpenAI`s of your own (a gateway, no retries of its own; a high temperature)                     |
 | [`memory.ts`](basic/memory.ts)       | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a handler of your own beside the agent's |
 | [`notes.ts`](basic/notes.ts)         | SQL in a virtual object, with `ctx.db`, and no agent                                                                                          |
 
@@ -28,7 +28,7 @@ tools, a person in the loop, teams, workflows, coding agents); and
 | [`support.ts`](intermediate/support.ts)   | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                              |
 | [`triage.ts`](intermediate/triage.ts)     | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                             |
 | [`router.ts`](intermediate/router.ts)     | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                   |
-| [`team.ts`](intermediate/team.ts)         | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                     |
+| [`team.ts`](intermediate/team.ts)         | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (OpenCode)                   |
 | [`followup.ts`](intermediate/followup.ts) | An agent that schedules a check-in for a day later: `send` with a delay                                                                     |
 | [`harness.ts`](intermediate/harness.ts)   | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers    |
 | [`coding.ts`](intermediate/coding.ts)     | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                  |
@@ -50,7 +50,7 @@ crash resumes the reply. The integrations are in
 ## Run an example
 
 ```sh
-ANTHROPIC_API_KEY=… node basic/chat.ts                                       # the agent, on port 9080
+OPENAI_API_KEY=… node basic/chat.ts                                          # the agent, on port 9080
 npx @restatedev/restate-server  # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'
@@ -68,10 +68,13 @@ docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-g
 npx @restatedev/restate deployments register http://host.docker.internal:9080
 ```
 
-`MODEL` picks another model, such as `MODEL=openai/gpt-6-luna` with
-`OPENAI_API_KEY`, for the agents on pi and OpenCode; Claude and LangGraph
-take Anthropic's models, and DeepSeek its own, and refuse another
-provider's `MODEL` when they start (see
+The examples take OpenAI's models, with `OPENAI_API_KEY` (all but
+`claude.ts` and `deepseek.ts`, on their providers' own). `MODEL` picks
+another model, such as `MODEL=anthropic/claude-sonnet-5-5` with
+`ANTHROPIC_API_KEY`, for the agents on pi, OpenCode and LangGraph
+(LangGraph takes OpenAI's and Anthropic's); Claude takes Anthropic's
+models, and DeepSeek its own, and refuse another provider's `MODEL` when
+they start (see
 [the models](../typescript/packages/integrations/README.md#models)). To call an agent
 from code, or to send a message again safely, see
 [Calling an agent](../typescript/packages/integrations/README.md#calling-an-agent).

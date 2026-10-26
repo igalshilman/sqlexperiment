@@ -1,7 +1,7 @@
 // The bank agent on LangGraph (restate-agents/langgraph): a GraphAgent object per conversation, whose tools
 // (./bank.ts) move money in the ledger.
 //
-// Environment: PORT (default 9080), ANTHROPIC_API_KEY, MODEL, and ABORT_PER_MILLE (see
+// Environment: PORT (default 9080), OPENAI_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
 import { object, signals } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';

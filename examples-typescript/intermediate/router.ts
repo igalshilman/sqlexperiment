@@ -6,7 +6,7 @@
  * calls that team's agent like any Restate handler. Each team keeps its own
  * conversation with each user (`billing/alice`, `tech/alice`).
  *
- *   ANTHROPIC_API_KEY=… node intermediate/router.ts
+ *   OPENAI_API_KEY=… node intermediate/router.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/desk/alice/chat -d 'I was charged twice for order 103'
@@ -15,10 +15,10 @@
  */
 import * as restate from '@restatedev/restate-sdk';
 import { chatHandler, object, serve } from 'restate-agents';
-import * as claude from 'restate-agents/claude';
+import * as langgraph from 'restate-agents/langgraph';
 import * as pi from 'restate-agents/pi';
 
-const billing = claude.agent({
+const billing = langgraph.agent({
   name: 'billing',
   system: 'You handle billing: charges, refunds and invoices. Be brief and kind.',
 });

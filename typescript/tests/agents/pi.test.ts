@@ -18,9 +18,9 @@ import {
 
 // It repeats what it was told so far; asked to delegate, it hands out two
 // tasks, and then reports their results.
-vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
-  anthropicProvider: () =>
-    fakeProvider('anthropic', 'claude-sonnet-5-5', ({ messages }) => {
+vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
+  openaiProvider: () =>
+    fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const last = messages.at(-1)!;
       if (last.role === 'toolResult') {
         return say(

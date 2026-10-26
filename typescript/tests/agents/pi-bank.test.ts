@@ -7,10 +7,10 @@ import type * as restate from 'restate-fns';
 import * as pi from 'restate-agents/pi';
 import { prompt } from './pi.ts';
 
-// The default model's provider, Anthropic's, is the teller.
-vi.mock('@earendil-works/pi-ai/providers/anthropic', async () => {
+// The default model's provider, OpenAI's, is the teller.
+vi.mock('@earendil-works/pi-ai/providers/openai', async () => {
   const { fakeProvider, teller } = await import('../fakes/pi.ts');
-  return { anthropicProvider: () => fakeProvider('anthropic', 'claude-sonnet-5-5', teller) };
+  return { openaiProvider: () => fakeProvider('openai', 'gpt-6-sol', teller) };
 });
 
 /** The bank agent, after making a table of yours named as one of pi-durable's. */

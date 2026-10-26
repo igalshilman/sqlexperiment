@@ -15,8 +15,8 @@ object's database::
 
 The model is ``model``, as LiteLLM names it (``provider/model-id``: such as
 ``anthropic/claude-sonnet-5-5``, ``openai/gpt-5``, ``gemini/gemini-2.5-pro``,
-``ollama/llama3.1``), or else MODEL, or else anthropic/claude-sonnet-5-5, with
-its provider's API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...). Each request
+``ollama/llama3.1``), or else MODEL, or else openai/gpt-6-sol, with
+its provider's API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...). Each request
 is ``litellm.acompletion``'s, with more of it from ``request``.
 
 The handler is not replayed: a retried attempt (a crash, a lost connection)
