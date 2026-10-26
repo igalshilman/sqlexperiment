@@ -3,18 +3,21 @@
 //!
 //! | Store   | Key                                            | Holds                                                                               |
 //! | ------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-//! | Restate | `v20/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
-//! | Restate | `v20/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
-//! | Restate | `v20/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
-//! | Restate | `v20/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
-//! | S3      | `l1/<version>-<nonce>`                         | A pack in L1: what a checkpoint moved out of L0, with its own frames and values     |
+//! | Restate | `v21/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
+//! | Restate | `v21/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
+//! | Restate | `v21/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
+//! | Restate | `v21/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: the pages a checkpoint copied, and values, in parts of 64 KiB         |
+//! | S3      | `l1/<version>-<nonce>`                         | A pack in L1: the frames a promotion rebuilt, values, and what it moved             |
+//! | Restate | `v21/pack/l1/<version>-<nonce>/<part>`         | A pack in L1, without S3, in parts of 64 KiB                                        |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
-//! pages, each a zstd frame of its own (against its file's [`crate::Base`]
-//! pages, if it has one), so that a page is read with one ranged get of its
-//! frame. A checkpoint's manifest says where each frame, large record and
-//! log entry is: in its own pack, or in an older one. It is in Restate
-//! wherever the packs are, so that an open reads it with the tail.
+//! pages in L1, each a zstd frame of its own (against its file's
+//! [`crate::Base`] pages, if it has one), so that a page is read with one
+//! ranged get of its frame, and of the pages written since in L0, each as
+//! the tail wrote it, against its frame's page. A checkpoint's manifest says
+//! where each frame, page, large record and log entry is: in its own pack,
+//! or in an older one. It is in Restate wherever the packs are, so that an
+//! open reads it with the tail.
 use crate::{PAGE, zstd};
 use bytes::Bytes;
 use std::{
@@ -26,15 +29,15 @@ use std::{
 /// The head's key: the commit point. An open reads it first, so a host whose
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
-pub const HEAD_KEY: &str = "v20/head";
-pub const TAIL_PREFIX: &str = "v20/tail/";
+pub const HEAD_KEY: &str = "v21/head";
+pub const TAIL_PREFIX: &str = "v21/tail/";
 /// Where L1's packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "l1/";
 /// Where L0's packs are, in Restate ([`crate::blobs::KvBlobs`]).
 pub(crate) const L0_PREFIX: &str = "l0/";
-const HEAD_MAGIC: &[u8; 4] = b"SH20";
-const ENTRY_MAGIC: &[u8; 4] = b"SE20";
-const MANIFEST_MAGIC: &[u8; 4] = b"SM20";
+const HEAD_MAGIC: &[u8; 4] = b"SH21";
+const ENTRY_MAGIC: &[u8; 4] = b"SE21";
+const MANIFEST_MAGIC: &[u8; 4] = b"SM21";
 /// Bytes of a tail entry's part.
 pub(crate) const PART_BYTES: usize = 1 << 20;
 

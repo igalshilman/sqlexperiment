@@ -4,7 +4,7 @@
 //! image, 19 µs against 1 µs to decompress it).
 //!
 //! A frame's dictionary is a raw prefix: content the frame refers back to,
-//! such as the page a tail page or a patch is compressed against. (zstd's dictionary calls would read one
+//! such as the page a tail page or an L0 page is compressed against. (zstd's dictionary calls would read one
 //! that starts with its dictionary magic as a trained dictionary.)
 use std::{cell::RefCell, io};
 use zstd_safe::{CCtx, CParameter, DCtx, ResetDirective};

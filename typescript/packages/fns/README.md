@@ -156,11 +156,11 @@ The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
 `ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
 `ctx.run`.
 
-**The database is the object's state.** Its keys (`v20/head`, `v20/tail/…`,
-`v20/manifest/…` and, without S3, `v20/pack/…`) sit next to the object's
+**The database is the object's state.** Its keys (`v21/head`, `v21/tail/…`,
+`v21/manifest/…` and, without S3, `v21/pack/…`) sit next to the object's
 other state keys, so `ctx.clearAll()` in any handler of the object deletes
-the database, a handler's own key starting with `v20/` corrupts it, and
-`ctx.stateKeys()` lists them. Keep other state out of `v20/`, and do not
+the database, a handler's own key starting with `v21/` corrupts it, and
+`ctx.stateKeys()` lists them. Keep other state out of `v21/`, and do not
 clear all of an object that uses `ctx.db`. (Reserving
 these keys in the SDK is future work.)
 

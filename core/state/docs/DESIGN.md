@@ -56,10 +56,11 @@ overwritten, so there is nothing to repair after a crash.
 
 **Compression.** zstd does the work twice. A frame compresses its 4 pages
 together, so a B-tree page compresses against its neighbours, and against
-its file's base pages. And a page in the tail, or a patch, uses the page as
-the checkpoint holds it as a reference prefix ("patch from"), so a flush
+its file's base pages. And a page in the tail, or in L0, uses the page as
+its frame in L1 holds it as a reference prefix ("patch from"), so a flush
 that changes a few bytes of a page writes about those bytes plus the
-frame's overhead.
+frame's overhead. The reference changes only at a promotion: a page
+changed many times since one costs what changed since then.
 
 **Effects.** A host may flush bytes of its own with a transaction, as a
 record (the SDKs' `effects`): set in the same mutation, they ride in the same
@@ -134,7 +135,7 @@ The engine sees two virtual files, the database and its WAL file (SQLite's
 own), served by `KvIo`:
 
 - **Reads** of the database file go to the committed view: the overlay's
-  page, else the page's patch or frame, decoded, from the state, the cache,
+  page, else the page in L0 or its frame, decoded, from the state, the cache,
   or the store. The engine issues one dependent read at a time; adjacent
   queued reads are batched (up to 16) without crossing write, truncate or
   sync barriers. A get fetches a whole frame, which the state keeps decoded,
@@ -175,7 +176,7 @@ One `PageCache` per process. A state opens in it under its namespace's key
 it (a `NamespaceCache`, inside the crate).
 
 **Packs.** A pack never changes, and its name is never reused, so the cache
-keeps its ranges (frames, patches, values, manifests, and the parts read
+keeps its ranges (frames, L0 pages, values, manifests, and the parts read
 of packs kept in Restate) under (namespace, pack, offset, length) in memory, spilling to a local disk file
 ([foyer](https://github.com/foyer-rs/foyer)), one budget for all namespaces,
 for as long as it likes. There is nothing to invalidate: no versions, no
@@ -222,15 +223,16 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                                                              | Writes                             |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| Flush, cached    | 1, the sync                                                                                                              | A tail entry (its parts), the head |
-| Flush, cold      | 1, plus 1 to get the frames (or patches) of the pages it writes, where the state lacks them                              | The same                           |
-| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; in S3, 1 PUT before the flush | A pack, a manifest                 |
-| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes  | The deletes                        |
-| Open, with cache | 1, the head, when nothing changed since this owner's flush                                                               | None                               |
-| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                | None                               |
-| Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                         | None                               |
+| Operation        | Round trips                                                                                                               | Writes                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| Flush, cached    | 1, the sync                                                                                                               | A tail entry (its parts), the head |
+| Flush, cold      | 1, plus 1 to get the frames of the pages it writes, where the state lacks them                                            | The same                           |
+| Checkpoint       | None more into L0: it copies the tail                                                                                     | A pack in L0, a manifest           |
+| Promotion        | Up to 3 more, for what the state lacks: frames it rebuilds, L0's pages, ranges it compacts; in S3, 1 PUT before the flush | A pack in L1, a manifest           |
+| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes   | The deletes                        |
+| Open, with cache | 1, the head, when nothing changed since this owner's flush                                                                | None                               |
+| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                 | None                               |
+| Cold page read   | 1 ranged get of its frame (and its page in L0, together); for a page in the overlay, of its frame                         | None                               |
 
 Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
 [cache](../../sql/benches/CACHE_RESULTS.md).
@@ -262,13 +264,13 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
 - **Memory.** A session's private changes (`max_private_bytes`, 256 MiB) and a
   statement's result rows (`max_result_bytes`, 64 MiB) are capped; exceeding
   either fails the statement. A state keeps the tail since its checkpoint in
-  memory, as its overlay, and at most 256 decoded frames and patches. Parked
+  memory, as its overlay, and at most 256 decoded frames and L0 pages. Parked
   engines share a byte budget, by a measured estimate.
 - **Integrity.** Restate provides it: a value reads back as written. Decoding
   checks structure and bounds versions, sizes, counts and names, and every
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
-- **Format.** Only v20, with no migration.
+- **Format.** Only v21, with no migration.
 - **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
   differences from the location before, and zstd over the manifest's body;
   the pages are zstd frames of their own. A zero-copy format (FlatBuffers,

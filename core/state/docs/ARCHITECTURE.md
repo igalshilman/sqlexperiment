@@ -2,9 +2,10 @@
 
 How the state works, from the top down: the data model a user of the crate
 sees, the state as a sequence of mutations, how that sequence is stored
-(the head, the tail, checkpoints, manifests and packs), and how each of
-those changes over time. It ends with what changes when the packs are in
-S3, with measured sizes and costs, and with the layouts this one replaced.
+(the head, the tail, two levels of packs and the manifests that index
+them), and how each of those changes over time. It ends with what changes
+when L1 is in S3, with measured sizes and costs, and with the layouts this
+one replaced.
 
 Two docs go further: [DESIGN.md](DESIGN.md) has the rules this one leaves
 out (retries, readers, the owner cache, the SQL engine, limits), and
@@ -100,35 +101,53 @@ state(n) = checkpoint(c) + mutation(c + 1) + … + mutation(n)
   data is spread over its own pack and older ones (see
   [What a checkpoint holds](#what-a-checkpoint-holds)).
 
-Everything below is how those two layers are laid out, written and read.
+A checkpoint itself keeps two levels, for the same reason: **L0**, the
+pages written since the last promotion, as the tail wrote them, cheap to
+add to; and **L1**, the frames a promotion last rebuilt, cheap to read.
+Every page in the tail and in L0 is compressed against its frame in L1,
+so moving pages from the tail into L0 is a copy, and only a promotion,
+now and then, decodes them.
+
+```
+page = tail ▸ L0 ▸ L1        (the first that holds it)
+       └ deltas against L1 ┘
+```
+
+Everything below is how those layers are laid out, written and read.
 
 ## 3. How it is stored: the terms
 
 ```
-Restate (the object's state)                           Restate, or S3
+Restate (the object's state)                           S3, or Restate without it
 ┌───────────────────────────────────────────────┐     ┌──────────────────────────────┐
-│ v20/head          the commit point: version,  │     │ pack: checkpoint/<v>-<nonce> │
-│                   checkpoints, tail entries   │     │   frames, patches,           │
-│ v20/tail/<v>/<p>  one per flush: its mutation │     │   large values               │
-│ v20/manifest/...  one per checkpoint: where   │────▶│                              │
-│                   every frame and value is    │     │                              │
-└───────────────────────────────────────────────┘     └──────────────────────────────┘
+│ v21/head          the commit point: version,  │     │ L1: l1/<v>-<nonce>           │
+│                   checkpoints, tail entries   │     │   frames a promotion rebuilt,│
+│ v21/tail/<v>/<p>  one per flush: its mutation │     │   large values               │
+│ v21/manifest/...  one per checkpoint: where   │────▶│                              │
+│                   every frame, page and value │     └──────────────────────────────┘
+│                   is                          │
+│ v21/pack/l0/...   L0: pages copied from the   │
+│                   tail since the last         │
+│                   promotion, large values     │
+└───────────────────────────────────────────────┘
 ```
 
-| Term                   | What it is                                                                                                                                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Head**               | The commit point, one key (`v20/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                             |
-| **Tail entry**         | One flush's mutation, as it was (`v20/tail/<version>/<part>`).                                                                                                                                                           |
-| **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                              |
-| **Checkpoint**         | The whole state as of a version: a manifest that indexes all of it, and a pack of only what changed since the checkpoint before. Written by a flush, when the tail is long enough, before its own tail entry.            |
-| **Frame**              | The unit a file is stored in: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                              |
-| **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                      |
-| **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `checkpoint/<version>-<nonce>`, with a random nonce, so no two puts share one. |
-| **Manifest**           | One per checkpoint (`v20/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                 |
-| **Overlay**            | The tail, decoded in memory: the pages, records and logs changed since the checkpoint. A read looks here first.                                                                                                          |
-| **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                               |
-| **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                           |
-| **Pack store**         | Where packs go: Restate by default (`KvBlobs`, in 64 KiB parts beside everything else), or S3 (`ObjectStoreBlobs`).                                                                                                      |
+| Term                   | What it is                                                                                                                                                                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Head**               | The commit point, one key (`v21/head`): the version, the current and previous checkpoints, and which tail entries exist. Writing it is what commits a flush.                                                                  |
+| **Tail entry**         | One flush's mutation, as it was (`v21/tail/<version>/<part>`).                                                                                                                                                                |
+| **Flush**              | Put a tail entry, then the head, then sync: one round trip.                                                                                                                                                                   |
+| **Frame**              | The unit a file is stored in, in L1: 4 pages (16 KiB), compressed with zstd on its own. A file is a row of frames.                                                                                                            |
+| **Reference**          | What a page written since the last promotion is compressed against: the page as its frame holds it (else its base's page, else nothing). The tail and L0 both use it, so a page moves from one to the other as it is.         |
+| **Checkpoint**         | The whole state as of a version: a manifest that indexes all of it, and a pack of what it added. Written by a flush, when the tail is long enough, before its own tail entry. Into L0, or, now and then, a promotion into L1. |
+| **L0**                 | Packs in Restate of the pages checkpoints copied from the tail since the last promotion, as the tail wrote them, and large values.                                                                                            |
+| **Promotion**          | A checkpoint that rebuilds every frame L0 (or the tail) changed, into a pack in L1, and takes along what L0 and L1's sparse packs still hold: L0 is empty after it.                                                           |
+| **L1**                 | Packs of frames promotions rebuilt, and large values: in S3 where the state has one, else in Restate too.                                                                                                                     |
+| **Pack**               | What one checkpoint wrote, back to back. Put once, never changed; named `<version>-<nonce>` with its level, with a random nonce, so no two puts share one.                                                                    |
+| **Manifest**           | One per checkpoint (`v21/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame (L1), page (L0), record and log entry is. Small records are inline.                                                        |
+| **Overlay**            | The tail, decoded in memory: the pages, records and logs changed since the checkpoint. A read looks here first.                                                                                                               |
+| **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                                    |
+| **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                                |
 
 ## 4. The pieces, and how they change over time
 
@@ -137,14 +156,14 @@ Restate (the object's state)                           Restate, or S3
 1. **If a checkpoint is due**, write it first (below), as of the version
    before this flush.
 2. **Encode the mutation** as a tail entry. Each page written is a zstd
-   frame of its own, compressed against its **reference**: the page as the
-   checkpoint holds it (the new one, if this flush wrote one). A row update
-   usually changes a few bytes of a page, so its page costs about 100–200
-   bytes, not 4 KiB.
+   frame of its own, compressed against its **reference**: the page as its
+   frame in L1 holds it (under the new checkpoint, if this flush wrote
+   one). A row update usually changes a few bytes of a page, so its page
+   costs about 100–200 bytes, not 4 KiB.
 3. **Put** the tail entry, then the head; **sync**. Restate keeps writes in
    order, and a crash keeps a prefix of them, so the head is never stored
-   without the tail entry (and, with packs in Restate, the pack and
-   manifest) put before it. That is one round trip, checkpoint or not.
+   without the tail entry (and the pack and manifest) put before it. That
+   is one round trip, checkpoint or not.
 4. **Apply** the entry to the overlay in memory. The state is now at the
    next version, without reading anything back.
 
@@ -154,9 +173,9 @@ About 80–180 bytes, uncompressed, overwritten by every flush:
 
 - the database's random identity, drawn when it was made, and its frame size;
 - the version;
-- the checkpoint (its version and nonce, and its manifest's length), and
-  the previous one, which readers that opened before the latest checkpoint
-  may still read;
+- the checkpoint (its pack's version, nonce and level, and its manifest's
+  length), and the previous one, which readers that opened before the
+  latest checkpoint may still read;
 - the first tail entry kept, the tail's bytes since the checkpoint, and the
   number of parts of each tail entry kept.
 
@@ -174,53 +193,53 @@ One per flush, for the version it makes, cut into parts of 1 MiB if large:
 - per file changed, its new size and the pages written, each compressed
   against its reference.
 
-Every entry since a checkpoint compresses against **that** checkpoint, so
-each decodes alone. An entry is never changed; it is deleted when the
-second checkpoint after it is adopted, until which readers on the older
-checkpoint may need it.
+Every page since a promotion compresses against the same frames, so each
+entry decodes alone, and a checkpoint into L0 copies its pages as they
+are. An entry is never changed; it is deleted when the second checkpoint
+after it is adopted, until which readers on the older checkpoint may need
+it.
 
 ### Checkpoints
 
 **When.** A flush checkpoints first when, since the last checkpoint:
 
 - 128 flushes have been made (`checkpoint_entries`), or
-- the tail holds 1 MiB (`checkpoint_bytes`); with packs in Restate, or
-  as many bytes as the checkpoint itself holds (its packs and manifest),
-  whichever is smaller, but at least a frame's (16 KiB),
+- the tail holds as many bytes as L0 and the manifest (but at least a
+  frame's, 16 KiB, and at most 1 MiB, `checkpoint_bytes`),
 
-or when the mutation asks for one (`mutation.checkpoint()`). The
-relative rule is for packs in Restate, where a checkpoint costs only its
-bytes: a 20 KiB database checkpoints every few dozen flushes and keeps a
-short tail, and a 100 MiB one every 128. The floor of a frame keeps a
-state of a few small records from checkpointing at every flush, as a
-checkpoint, and the collection after it, costs a round trip or two.
+or when the mutation asks for one (`mutation.checkpoint()`). A checkpoint
+into L0 costs only its bytes in Restate, and the manifest it rewrites, so
+a small database checkpoints every few dozen flushes and keeps a short
+tail, and a 100 MiB one every 128.
 
-**What it writes.** For each frame the overlay changed:
+**Into L0**, the usual case: the checkpoint copies each page the overlay
+holds, as the tail wrote it, into a new pack in L0, and records where in
+the manifest; a page the overlay holds as a hole is a hole in L0. A file
+cut since the last checkpoint records its cut: its frames' pages past it
+read as holes, unless L0 holds a page written after. There is nothing to
+decode or read, and no choice to make per frame.
 
-- **Patch it** when only a few of its pages changed: each changed page is
-  stored as a patch, compressed against the frame's page, while the
-  frame's patches stay within half the frame's stored bytes. A one-row update in a
-  large database touches a frame or two, so a checkpoint of 128 such
-  flushes is about 28 KB of patches. Patches are per page so that a
-  change rewrites only its page's: one patch per frame (the frame as it
-  is now, against the frame as stored) keeps the manifest smaller, but
-  rewrites every page the frame changed since it was written at each
-  change, and on an aged database put 2,187 bytes a flush against 1,172
-  (branch `claude/frame-patches`).
-- **Rebuild it** otherwise: read the old frame and its patches, apply the
-  overlay's pages, compress it again without patches.
+**A promotion**, now and then: once what a promotion would rebuild or
+reclaim (L0, the tail it would copy, and the dead bytes of L1's packs that
+are under half live) is as much as L1 holds live, but at least a frame's
+bytes and at most `l0_bytes` (1 MiB), the checkpoint goes into L1 instead.
+It copies the overlay into L0, in memory, as above, then **folds** L0 into
+the frames: every frame with a page in L0, or past a cut, is read, its
+pages decoded against it and written in, and compressed again, into a new
+pack in L1. Then it **compacts**: what L0's packs and L1's packs under half
+live still hold (large values, frames) moves into the new pack as it is,
+L1's up to 64 MiB a promotion, the cheapest packs first. L0 is empty
+after it.
 
-Then the records set and log entries appended since: inline in the
-manifest if up to 1 KiB, else into the pack. And **compaction**: any older
-pack the new manifest needs less than half of has its live ranges copied,
-as they are, into the new pack, so that pack can go. Ranges of a pack
-close together are fetched as one read, and one checkpoint moves at most
-64 MiB, the cheapest packs first; the rest move at the checkpoints after
-it.
+A small database promotes about as often as it checkpoints, as its L1 is
+small; a 100 MiB one keeps up to 1 MiB of pages in L0 and promotes every
+few thousand flushes.
 
-All of that is one pack and one manifest. The flush's head then names the
-new checkpoint, the one before becomes the previous checkpoint, and the
-tail entries the previous checkpoint covered are deleted in the same sync.
+Then the records set and log entries appended since go in, either way:
+inline in the manifest if up to 1 KiB, else into the pack. All of that is
+one pack and one manifest. The flush's head then names the new
+checkpoint, the one before becomes the previous checkpoint, and the tail
+entries the previous checkpoint covered are deleted in the same sync.
 
 A checkpoint that fails (an upload, say) fails nothing: the flush commits
 its tail entry anyway, reports why (`FlushReport::checkpoint_failed`), and
@@ -234,14 +253,17 @@ namespace's next states, and `Mutation::checkpoint` tries regardless.
 
 One per checkpoint, zstd-compressed, always in Restate, in 64 KiB parts:
 
-- the packs it uses, and the bytes each holds (for compaction);
+- the packs it uses, with their level, and the bytes each holds (for
+  compaction);
 - every record: inline, or where its value is;
 - every log: its first index and where each entry is;
-- every file: its size, its base, a location (pack, offset, length) per
-  frame, or none for a hole, and its patches.
+- every file: its size, its base, its cut, a location (pack, offset,
+  length) per frame in L1, or none for a hole, and its pages in L0, each a
+  location or a hole.
 
-About 1.7 bytes per frame: 3 KiB for a 100k-row database, 30 KiB for 1M
-rows. A checkpoint writes its manifest whole. Two are kept, the head's
+About 1.7 bytes per frame and 4 per page in L0: 3 KiB for a 100k-row
+database, 30 KiB for 1M rows, and up to about 1 KiB per 256 pages in L0. A
+checkpoint writes its manifest whole. Two are kept, the head's
 checkpoint's and the previous one's.
 
 ### Packs
@@ -249,67 +271,49 @@ checkpoint's and the previous one's.
 One per checkpoint that stores anything outside its manifest. Put once,
 never changed, named with a random nonce, so a cache can keep any range of
 any pack forever, with nothing to invalidate. A pack lives as long as some
-manifest the head names points into it. A frame no flush touches stays in
-the pack that first wrote it, across any number of checkpoints, until
-compaction moves it.
+manifest the head names points into it. A pack in L0 lives until the
+promotion after it, and two checkpoints more; a frame in L1 no flush
+touches stays in the pack that first wrote it, across any number of
+promotions, until compaction moves it.
 
 ### What a checkpoint holds
 
 A checkpoint has two parts: a manifest that indexes the whole state, and a
-pack of what changed since the checkpoint before.
+pack of what it added: pages copied into L0, or frames a promotion
+rebuilt.
 
 - **The manifest** names every file, record and log, and gives a location
-  (pack, offset, length) for every frame, patch and stored value. It
+  for every frame in L1, every page in L0 and every stored value. It
   stands on its own: an open reads this one manifest.
-- **The pack** holds the frames the checkpoint rebuilt, the patches it
-  added, the values set since, and what compaction moved. For everything
-  else, the manifest points into the older packs that already hold it.
+- **The pack** holds what the checkpoint added. For everything else, the
+  manifest points into the older packs that already hold it.
 
-The state as of a checkpoint is its manifest and the packs it points
-into. Say `db` has 6 frames (f0–f5, 4 pages each), with a checkpoint every
-4 flushes:
+Say `db` has 6 frames (f0–f5, 4 pages each), with a checkpoint every 4
+flushes, and L0 promoted at the fourth checkpoint:
 
-| Checkpoint | What the tail since the one before changed | Its pack holds                                        | Compaction                                       |
-| ---------- | ------------------------------------------ | ----------------------------------------------------- | ------------------------------------------------ |
-| C4         | Every frame (the database was made)        | P4: f0–f5                                             | –                                                |
-| C8         | Page 9 (in f2); all of f5                  | P8: f5, rebuilt; a patch for page 9 (p9)              | –                                                |
-| C12        | Most of f0; f5 again                       | P12: f0 and f5, rebuilt; p9, moved from P8            | P8 is only p9 now, under half live: p9 moves     |
-| C16        | Most of f1 and f2                          | P16: f1 and f2, rebuilt (f2 absorbs p9); f3, f4 moved | P4 is only f3 and f4, under half live: they move |
+| Checkpoint | What the tail since the one before changed | Its pack holds                          | Level |
+| ---------- | ------------------------------------------ | --------------------------------------- | ----- |
+| C4         | Every frame (the database was made)        | P4: f0–f5                               | L1    |
+| C8         | Page 9 (in f2); pages 20–23 (all of f5)    | Q8: p9, p20–p23, as the tail wrote them | L0    |
+| C12        | Page 9 again; page 1 (in f0)               | Q12: p9, p1                             | L0    |
+| C16        | Page 2 (in f0); a promotion                | P16: f0, f2, f5, rebuilt                | L1    |
 
-**Where each manifest points.** Every manifest names every frame, and
-shares what did not change with the manifests before it:
-
-```
-          f0     f1     f2     f3     f4     f5     p9
-M4        P4     P4     P4     P4     P4     P4     ·
-M8        P4     P4     P4     P4     P4     P8     P8
-M12       P12    P4     P4     P4     P4     P12    P12*
-M16       P12    P16    P16    P16*   P16*   P12    ·
-
-* moved there by compaction    · no patch
-```
-
-M8 shares five frames with M4; M16 still reads f0 and f5 from P12. A read
-of page 9 under M8 or M12 takes the frame from P4 and the patch from P8
-or P12; under M16, f2 is rebuilt with page 9 in it, and the patch is gone.
-
-**What each pack still holds for the latest manifest.** A pack never
-changes; what the latest manifest stops pointing into is dead in place:
+**Where each manifest points.** Every manifest names every frame and every
+page L0 holds, and shares what did not change with the manifests before
+it:
 
 ```
-after C8    P4   [ f0  f1  f2  f3  f4  ░░ ]    5 of 6 live: kept
-            P8   [ f5  p9 ]
-
-after C12   P4   [ ░░  f1  f2  f3  f4  ░░ ]    4 of 6 live: kept
-            P8   [ ░░  p9 ]                    p9 alone, under half: p9 moves to P12
-            P12  [ f0  f5  p9 ]
-
-after C16   P4   [ ░░  ░░  ░░  f3  f4  ░░ ]    under half: f3 and f4 move to P16
-            P12  [ f0  f5  ░░ ]                p9 dead, but small: kept
-            P16  [ f1  f2  f3  f4 ]
-
-░░ dead: the latest manifest no longer points into it
+          f0   f1   f2   f3   f4   f5  │ in L0
+M4        P4   P4   P4   P4   P4   P4  │ –
+M8        P4   P4   P4   P4   P4   P4  │ p9 Q8, p20–p23 Q8
+M12       P4   P4   P4   P4   P4   P4  │ p1 Q12, p9 Q12, p20–p23 Q8
+M16       P16  P4   P16  P4   P4   P16 │ –
 ```
+
+The frames do not change between promotions: M8 and M12 share all of P4,
+and add pages. A read of page 9 under M12 takes p9 from Q12 and decodes
+it against page 9 as f2 holds it, in P4; a read of page 8 takes f2. Under
+M16, f2 is rebuilt with page 9 in it, and L0 is empty.
 
 **How long each pack lives.** Garbage collection keeps what the head's two
 manifests, its checkpoint's and the previous one's, point into, and
@@ -317,52 +321,53 @@ deletes older packs that neither names:
 
 ```
          C4     C8     C12    C16    C20
-P4       ●━━━━━━━━━━━━━━━━━━━━━━━━━━━×      M12 points into it; M16 and M20 do not
-P8              ●━━━━━━━━━━━━━×             M8 points into it; M12 and M16 do not
-P12                    ●━━━━━━━━━━━━━━━━▶   M16 still reads f0 and f5 from it
-P16                           ●━━━━━━━━━▶
+P4       ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▶   M16 still reads f1, f3 and f4 from it
+Q8              ●━━━━━━━━━━━━━━━━━━━━━×        M12 points into it; M16 and M20 do not
+Q12                    ●━━━━━━━━━━━━━━×        the same
+P16                           ●━━━━━━━━━━▶
 
 ● written    × deleted, two checkpoints after the last manifest that named it
 ```
 
 - **Sharing:** a checkpoint writes what the tail changed; every frame it
-  did not touch stays where an older checkpoint wrote it, however long
-  ago.
-- **Patches:** a page or two changed in a frame is a patch beside the
-  frame (p9 in C8); a rebuilt frame absorbs its patches (f2 in C16), so a
-  page reads from at most a frame and one patch.
-- **Compaction:** once the latest manifest needs less than half of a
-  pack's bytes, the checkpoint copies the live ranges, as they are, into
-  its own pack (P8 at C12, P4 at C16), up to 64 MiB a checkpoint. Every
-  pack a manifest names is soon at least half live, so what is stored
-  stays within about twice the state.
-- **Size:** a checkpoint's pack follows what the tail changed, plus what
-  compaction moves; the manifest is the part that grows with the
-  database, at about 1.7 bytes per frame.
+  did not touch stays where a promotion wrote it, however long ago.
+- **One reference:** every page in the tail and in L0 is a delta against
+  its frame in L1, so a page reads from at most one page in L0 and one
+  frame, and a checkpoint into L0 is a copy.
+- **Folding:** a promotion folds L0 and the tail into the frames they
+  changed (f0, f2 and f5 at C16); L0's packs are then garbage.
+- **Compaction:** at a promotion, an L1 pack the new manifest needs less
+  than half of has its live ranges copied, as they are, into the new pack
+  (up to 64 MiB a promotion), so what L1 stores stays within about twice
+  the state. P4 is still half live after C16, so it stays.
+- **Size:** a checkpoint into L0 is the pages the tail wrote, as it wrote
+  them; a promotion, the frames L0 changed; the manifest is the part that
+  grows with the database.
 
 ### A timeline
 
 With a checkpoint every 4 flushes (128 by default), `E5` the tail entry of
-version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
+version 5, and `C4` the checkpoint of version 4 (its pack and manifest
 `M4`):
 
-| Flush makes | Checkpoint first | The head names   | Tail kept | Deleted in the same sync | Garbage collected after                      |
-| ----------- | ---------------- | ---------------- | --------- | ------------------------ | -------------------------------------------- |
-| v1 … v4     | –                | no checkpoint    | E1 … E4   | –                        | –                                            |
-| v5          | C4 = P4 + M4     | C4               | E1 … E5   | –                        | –                                            |
-| v6 … v8     | –                | C4               | E1 … E8   | –                        | –                                            |
-| v9          | C8 = P8 + M8     | C8, previous C4  | E5 … E9   | E1 … E4                  | nothing older than C4                        |
-| v10 … v12   | –                | C8, previous C4  | E5 … E12  | –                        | –                                            |
-| v13         | C12 = P12 + M12  | C12, previous C8 | E9 … E13  | E5 … E8                  | M4; P4 unless M8 or M12 still points into it |
+| Flush makes | Checkpoint first | The head names   | Tail kept | Deleted in the same sync | Garbage collected after                    |
+| ----------- | ---------------- | ---------------- | --------- | ------------------------ | ------------------------------------------ |
+| v1 … v4     | –                | no checkpoint    | E1 … E4   | –                        | –                                          |
+| v5          | C4, a promotion  | C4               | E1 … E5   | –                        | –                                          |
+| v6 … v8     | –                | C4               | E1 … E8   | –                        | –                                          |
+| v9          | C8, into L0      | C8, previous C4  | E5 … E9   | E1 … E4                  | nothing older than C4                      |
+| v10 … v12   | –                | C8, previous C4  | E5 … E12  | –                        | –                                          |
+| v13         | C12, into L0     | C12, previous C8 | E9 … E13  | E5 … E8                  | M4; no pack, as M8 and M12 still need them |
 
-- **State v10** is `C8 + E9 + E10`, and E9 and E10 compress against C8's
-  pages.
+- **State v10** is `C8 + E9 + E10`, and E9 and E10 compress against C4's
+  frames, as C8's pages do.
 - **A reader** that opened on v6 reads `C4 + E5 + E6`. Those stay until
   v13, two checkpoints later; after that it fails with "is gone", and its
   handler is retried.
 - **In Restate**, at any time: the head, the tail since the previous
-  checkpoint (at most twice 128 entries), two manifests, and the packs
-  those two manifests point into.
+  checkpoint (at most twice 128 entries), two manifests, L0 (at most
+  `l0_bytes` of pages since the last promotion, and the packs of the one
+  before, until two checkpoints after it), and L1 if there is no S3.
 
 ### Opening and reading
 
@@ -375,7 +380,7 @@ version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
    that what it reads is durable.
 2. Otherwise, **get the checkpoint's manifest and the tail past it**,
    together, and apply the tail to the overlay in memory.
-3. **Get large records and log entries**, and every frame and patch of a
+3. **Get large records and log entries**, and every frame and L0 page of a
    file without a base of at most 16 pages, such as a small database
    whole, together.
 
@@ -383,24 +388,29 @@ That is at most 3 round trips, whatever the database's size.
 
 **Read a page** from the first of:
 
-1. the overlay (the tail changed it): decompress it against its reference,
-   the checkpoint's page, which may need reading first;
-2. its patch;
-3. its frame: one ranged read of the pack (in Restate, the 64 KiB parts
-   it is in, which the cache keeps for the frames beside it; in S3, a
-   ranged GET), decompressed in about 25 µs;
-4. a hole: zeros, or the base's page.
+1. the overlay (the tail changed it);
+2. L0, if it holds the page (or a hole);
+3. a hole, if the page is past its file's cut;
+4. its frame in L1: one ranged read of the pack (in Restate, the 64 KiB
+   parts it is in, which the cache keeps for the frames beside it; in S3,
+   a ranged GET), decompressed in about 25 µs;
+5. a hole: zeros, or the base's page.
 
-A SQL query reads a page per b-tree level it descends, so a cold point
-query is a round trip per level the cache does not hold: 2 to 6.
+A page from the overlay or L0 decodes against its frame's page, which is
+fetched alongside, in the same round trip. A SQL query reads a page per
+b-tree level it descends, so a cold point query is a round trip per level
+the cache does not hold: 2 to 6.
 
 ### Garbage collection
 
 After every flush that checkpoints, and whenever anyone calls
 `State::collect_garbage` (a reader may too):
 
-1. **List** Restate's keys, once (Restate's `getKeys()`), and S3's packs if
-   they are there. A store that cannot list keeps its garbage.
+1. **List** Restate's keys, once (Restate's `getKeys()`): the manifests and
+   L0, and L1 without S3. With S3, list it too, but only if the head's
+   checkpoint or the previous one is a promotion, as only a promotion
+   changes what L1 needs (or when asked, by `State::collect_garbage`). A
+   store that cannot list keeps its garbage.
 2. **Keep** the packs the head's two manifests point into, and the two
    manifests.
 3. **Delete** listed packs and manifests older than the previous
@@ -411,14 +421,15 @@ Collections may overlap, crash or race the owner: a later head only ever
 names packs its own manifests name, or packs newer than its previous
 checkpoint, so whatever head a collection read, it never deletes what a
 later head needs. A pack a crashed attempt put, which no head names, goes
-once the previous checkpoint passes it.
+once the previous checkpoint passes it (in S3, at the next promotion's
+collection).
 
 ### The cache
 
 One `PageCache` per process ([foyer](https://github.com/foyer-rs/foyer),
 in memory and spilling to a local disk file):
 
-- **Pack ranges**: frames, patches, values and manifests, and the 64 KiB
+- **Pack ranges**: frames, L0 pages, values and manifests, and the 64 KiB
   parts read of packs in Restate, kept by (pack, offset, length). Packs
   never change, so nothing is ever invalidated.
 - **Namespace states**: per namespace, the head bytes it last read or
@@ -437,37 +448,36 @@ head, and the flush's sync.
 A crash anywhere keeps a prefix of the writes since the last sync, and
 nothing needs repair:
 
-| Interrupted                             | What is left                             | What happens next                         |
-| --------------------------------------- | ---------------------------------------- | ----------------------------------------- |
-| A flush                                 | Its tail entry without the head, or both | The next flush overwrites the tail entry  |
-| A checkpoint                            | A pack and manifest no head names        | Garbage, collected later                  |
-| A collection                            | Some deletes                             | The next collection deletes the rest      |
-| A flush's tail deletes, before its head | The head before, with its tail           | The next checkpoint deletes the rest      |
-| An unknown outcome                      | The flush may or may not be stored       | The state ends; the next open syncs first |
+| Interrupted                             | What is left                             | What happens next                                        |
+| --------------------------------------- | ---------------------------------------- | -------------------------------------------------------- |
+| A flush                                 | Its tail entry without the head, or both | The next flush overwrites the tail entry                 |
+| A checkpoint, or a promotion            | A pack and manifest no head names        | Garbage, collected later; L0 as it was, for the next try |
+| A collection                            | Some deletes                             | The next collection deletes the rest                     |
+| A flush's tail deletes, before its head | The head before, with its tail           | The next checkpoint deletes the rest                     |
+| An unknown outcome                      | The flush may or may not be stored       | The state ends; the next open syncs first                |
 
-## 5. With packs in S3
+## 5. With L1 in S3
 
-`State::open(store).checkpoints(packs)` puts the packs in an object store.
-Only the packs move. The head, the tail and the manifests stay in Restate,
-so an open never needs S3 to find anything.
+`State::open(store).checkpoints(packs)` puts L1 in an object store. Only
+L1 moves. The head, the tail, the manifests and L0 stay in Restate, so an
+open never needs S3 to find anything, and a checkpoint into L0 makes no
+request to it.
 
 What changes:
 
-- **A checkpoint uploads its pack** (one PUT) before the flush puts its
-  head, so a checkpointing flush, one in 128, also waits for S3.
-- **A page read is a ranged GET** of the pack's frame, about 20 ms against
-  about 2 ms for Restate.
-- **The checkpoint trigger is absolute**: 128 flushes or 1 MiB. A
-  checkpoint costs an S3 PUT and LIST, so a small database is not
-  checkpointed early, and its tail runs longer (and its pages drift further
-  from their references).
+- **A promotion uploads its pack** (one PUT) before the flush puts its
+  head, so a promoting flush also waits for S3: about one checkpoint in
+  two for a small database, and one flush in a few thousand for a large
+  one.
+- **A frame read is a ranged GET**, about 20 ms against about 2 ms for
+  Restate. A page in L0 needs its frame too, fetched alongside.
 - **No fencing in S3.** Restate fences the head and the tail; S3 fences
   nothing, so a former attempt may still be uploading. A pack's name has a
-  random nonce, so no two uploads ever share a name, and a head only names a pack
-  its own attempt uploaded before putting it: a zombie's packs are
+  random nonce, so no two uploads ever share a name, and a head only names
+  a pack its own attempt uploaded before putting it: a zombie's packs are
   garbage, collected later.
-- **Garbage collection** lists Restate's keys and S3's packs together, and
-  deletes in one Restate sync and one S3 DELETE per pack, sent together.
+- **Garbage collection** lists S3 only around a promotion, and deletes in
+  one Restate sync and one S3 DELETE per pack, sent together.
 
 ## 6. Numbers
 

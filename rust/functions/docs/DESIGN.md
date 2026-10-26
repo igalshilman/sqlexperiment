@@ -619,11 +619,13 @@ Zeroing free chunks (§5.6) already makes what it allocates and frees free.
 ### 5.1. Record identities and layouts
 
 A scope's store holds one state, a `state` namespace
-([its format](../../../core/state/docs/FORMAT.md)): the head at `v20/head`,
-the commit point, which names the tail entries (`v20/tail/<version>/<part>`,
+([its format](../../../core/state/docs/FORMAT.md)): the head at `v21/head`,
+the commit point, which names the tail entries (`v21/tail/<version>/<part>`,
 one turn's changes each) and the checkpoint: its manifest
-(`v20/manifest/…`) and its pack of frames of 4 pages, large records and log
-entries (`v20/pack/…`, or in S3). Its files:
+(`v21/manifest/…`), which names the pages written since the last
+promotion, in L0 (`v21/pack/l0/…`), and the frames of 4 pages it rebuilt,
+in L1 (`v21/pack/l1/…`, or in S3), with large records and log entries. Its
+files:
 
 | File              | Kind                    | Holds                                                                   |
 | ----------------- | ----------------------- | ----------------------------------------------------------------------- |
@@ -1081,7 +1083,8 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
 there for each request. Measured on 25 October 2026 (4 vCPUs), on the
-state's frame packs (v20: a tail in Restate, checkpoints now and then):
+state's frame packs (v20, before its two levels: a tail in Restate,
+checkpoints now and then):
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
