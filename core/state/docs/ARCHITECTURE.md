@@ -509,7 +509,7 @@ Latencies come from `read_latency`, a discrete-event simulation that
 **assumes** 2 ms per Restate round trip and 20 ms per S3 request; they show
 the shape, not production timings.
 
-### Packs in Restate (the default)
+### Without S3 (the default)
 
 Per flush, with a warm cache:
 
@@ -541,20 +541,29 @@ Cold reads, at 2 ms a round trip:
 | 10k rows | 6 ms | 4 ms                      | 6 ms                | 8 ms          |
 | 1M rows  | 6 ms | 6 ms                      | 12 ms               | 10 ms         |
 
-### Packs in S3
+### With L1 in S3
 
-| Workload           | Bytes put to Restate per flush | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold |
-| ------------------ | ------------------------------ | ----------------- | ------------ | ---------------------------------------------- |
-| Chat with effects  | 1938                           | 223 KiB           | 0.06 MiB     | $0.07 / $1.02                                  |
-| Small, update 1    | 1735                           | 150 KiB           | 0.01 MiB     | $0.07 / $0.60                                  |
-| 10k rows, update 1 | 436                            | 34 KiB            | 1.15 MiB     | $0.08 / $2.73                                  |
-| 1M rows, update 1  | 653                            | 93 KiB            | 108 MiB      | $0.08 / $3.86                                  |
-| 1M rows, update 10 | 1078                           | 153 KiB           | 108 MiB      | $0.08 / $28.70                                 |
-| 100k rows, aged    | 702                            | 108 KiB           | 14 MiB       | $0.08 / $4.35                                  |
+Per flush, with a warm cache, and against v20's packs all in S3:
 
-Warm, the cost is the checkpoints' PUT and LIST, once in 128 flushes; cold,
-it is the GETs of the frames a flush reads, which follow the rows it
-touches more than the database's size. Storage is a rounding error: 108 MiB
+| Workload            | Bytes put to Restate per flush | v20, all in S3 | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold | v20, warm |
+| ------------------- | ------------------------------ | -------------- | ----------------- | ------------ | ---------------------------------------------- | --------- |
+| Chat with effects   | 1951                           | 1938           | 170 KiB           | none         | $0 / $0                                        | $0.07     |
+| Small, update 1     | 678                            | 1734           | 34 KiB            | none         | $0 / $0                                        | $0.07     |
+| 10k rows, update 1  | 641                            | 436            | 1.2 MiB           | none         | $0 / $0                                        | $0.08     |
+| 100k rows, update 1 | 521                            | 426            | 81 KiB            | 10.7 MiB     | $0.02 / $2.45                                  | $0.08     |
+| 1M rows, update 1   | 876                            | 654            | 148 KiB           | 107 MiB      | $0.02 / $3.59                                  | $0.08     |
+| 1M rows, update 10  | 1403                           | 1080           | 284 KiB           | 107 MiB      | $0.02 / $23.87                                 | $0.08     |
+| 100k rows, aged     | 1168                           | 702            | 3.6 MiB           | 10.7 MiB     | $0 / $2.65                                     | $0.08     |
+
+A database under 4 MiB, compressed, is stored and costs as without S3:
+nothing in S3, and its tail cut by the relative rule, so a small one puts
+a third of the bytes v20's S3 mode did. A larger one checkpoints into L0
+and pays its packs' bytes to Restate (about 220 bytes a flush for one-row
+updates, v20's Restate mode's), and in exchange makes no S3 request
+between promotions: none of the 256 flushes measured uploaded, where v20
+uploaded a pack every 128. What remains is the listing after the load's
+promotion. Warm, S3 is cheaper by four; cold, it is the GETs of the
+frames a flush reads, as in v20. Storage is a rounding error: 108 MiB
 costs $0.0024 a month.
 
 Cold reads, at 2 ms a Restate round trip and 20 ms an S3 GET:
@@ -562,21 +571,26 @@ Cold reads, at 2 ms a Restate round trip and 20 ms an S3 GET:
 | Database | Open  | Point query (primary key) | Point query (index) | 100-row range |
 | -------- | ----- | ------------------------- | ------------------- | ------------- |
 | 100 rows | 4 ms  | 0 (all in the tail)       | 0                   | 0             |
-| 10k rows | 24 ms | 40 ms                     | 60 ms               | 80 ms         |
+| 10k rows | 6 ms  | 4 ms                      | 6 ms                | 8 ms          |
 | 1M rows  | 24 ms | 60 ms                     | 120 ms              | 100 ms        |
+
+The 10k-row database is all in L0: it reads as without S3 (v20 took 24
+ms to open it and 40 to 80 ms a query). The 1M-row one reads from L1, as
+v20 did from S3.
 
 With a warm cache both modes cost the same: two Restate round trips per
 invocation, and no S3 request.
 
 ### Choosing
 
-- **Packs in Restate**: one system, no unfenced writer, no credentials, and
-  cold reads about 10× faster. The whole database, compressed (about 2.5×),
-  is in Restate, a key per 64 KiB, and every collection lists them all.
-- **Packs in S3**: Restate holds kilobytes per database however large it
-  grows, and S3 costs cents per million warm flushes. Each b-tree level a
-  cold query reads costs an S3 GET, and small databases write about 3× the
-  bytes to Restate, as their tail is cut less often.
+- **Without S3**: one system, no unfenced writer, no credentials, and
+  cold reads about 10× faster. The whole database, compressed (about
+  2.5×), is in Restate, a key per 64 KiB, and every collection lists them
+  all.
+- **With S3**: the same for a database under `l0_bytes`; past it, Restate
+  holds the last few MiB of checkpoints however large the database grows,
+  S3 costs cents per million flushes, and each b-tree level a cold query
+  reads from L1 costs an S3 GET.
 
 ## 7. Earlier layouts
 
