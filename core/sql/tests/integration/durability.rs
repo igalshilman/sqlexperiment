@@ -95,14 +95,20 @@ fn a_transaction_commits_as_a_whole_or_not_at_all() -> Result<()> {
     })
 }
 
-/// A long session crosses checkpoints and collects garbage every five
-/// transactions, reading its own writes throughout.
+/// A long session crosses a checkpoint every eight transactions and
+/// collects garbage every five, reading its own writes throughout.
 #[test]
 fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
     futures::executor::block_on(async {
         for cache in [None, Some(fresh_namespace())] {
             let store = Arc::new(MemoryKv::default());
-            let mut db = Db::open(store.clone(), options(cache.clone())).await?;
+            let options = || {
+                options(cache.clone()).with(|o| StateOptions {
+                    checkpoint_entries: 8,
+                    ..o
+                })
+            };
+            let mut db = Db::open(store.clone(), options()).await?;
             db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)")
                 .await?;
             for i in 0..60i64 {
@@ -129,7 +135,7 @@ fn a_long_session_collects_garbage_and_reads_its_writes() -> Result<()> {
             drop(db);
             store.crash();
 
-            let mut db = Db::open(store.clone(), options(cache)).await?;
+            let mut db = Db::open(store.clone(), options()).await?;
             assert_eq!(count(&mut db).await?, 120);
             assert_eq!(
                 db.query("PRAGMA integrity_check").await?[0][0].to_string(),

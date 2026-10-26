@@ -293,3 +293,191 @@ fn checkpoints_patch_frames_a_few_pages_change() -> Result<()> {
         Ok(())
     })
 }
+
+/// Every page of `file` up to `pages`, zeros for holes.
+async fn contents(file: &state::File, pages: u64) -> Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    for n in 0..pages {
+        match file.read(n).await? {
+            Some(page) => contents.extend_from_slice(&page),
+            None => contents.extend_from_slice(&[0; 4096]),
+        }
+    }
+    Ok(contents)
+}
+
+/// Write `image`'s pages that differ from `before` in one flush.
+async fn flush_changes(
+    state: &State,
+    file: &state::File,
+    image: &[u8],
+    before: &[u8],
+) -> Result<state::FlushReport> {
+    let mut mutation = state.mutation();
+    for (n, (now, then)) in image.chunks(4096).zip(before.chunks(4096)).enumerate() {
+        if now != then {
+            mutation.write(file, n as u64, Some(now.to_vec().into()))?;
+        }
+    }
+    mutation.flush().await
+}
+
+/// No checkpoint by count or size: only the tail.
+fn tail_only() -> state::StateOptions {
+    state::StateOptions {
+        checkpoint_entries: 0,
+        checkpoint_bytes: 0,
+        ..Default::default()
+    }
+}
+
+/// A page changed a little at every flush costs a flush its change alone,
+/// not all it changed since the checkpoint: the tail is the chain of its
+/// changes, each against the page before it.
+#[test]
+fn a_page_rewritten_flush_after_flush_costs_only_its_change() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).options(tail_only()).await?;
+        let file = state.file("db")?;
+        let mut image = noise(1, 1);
+        flush_changes(&state, &file, &image, &[0; 4096]).await?;
+        for round in 0..64 {
+            let before = image.clone();
+            let at = round * 61;
+            image[at..at + 8].copy_from_slice(&noise(round as u64 + 2, 1)[..8]);
+            let report = flush_changes(&state, &file, &image, &before).await?;
+            assert!(report.checkpoint.is_none());
+            assert!(report.entry_bytes < 200, "round {round}: {report:?}");
+        }
+        assert_eq!(contents(&file, 1).await?, image);
+        let reopened = State::open(store).options(tail_only()).await?;
+        assert_eq!(contents(&reopened.file("db")?, 1).await?, image);
+        Ok(())
+    })
+}
+
+/// A page cut by a shrink, or written as a hole, and written again after,
+/// builds on a hole, not on what the checkpoint held there.
+#[test]
+fn a_page_rewritten_after_a_shrink_or_a_hole_starts_from_a_hole() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).options(tail_only()).await?;
+        let file = state.file("db")?;
+        let mut image = noise(1, 8);
+        flush_changes(&state, &file, &image, &[0; 8 * 4096]).await?;
+        let mut mutation = state.mutation();
+        mutation.checkpoint();
+        mutation.write(&file, 0, Some(page(1)))?;
+        assert!(mutation.flush().await?.checkpoint.is_some());
+        image[..4096].copy_from_slice(&page(1));
+        // Page 6 cut, page 2 a hole.
+        let mut mutation = state.mutation();
+        mutation.set_len(&file, 4 * 4096)?;
+        mutation.write(&file, 2, None)?;
+        mutation.flush().await?;
+        image[4 * 4096..].fill(0);
+        image[2 * 4096..3 * 4096].fill(0);
+        for round in 0..2u8 {
+            let mut mutation = state.mutation();
+            for n in [2, 6] {
+                let at = n * 4096 + 100 * round as usize;
+                image[at..at + 8].fill(round + 7);
+                let range = n * 4096..(n + 1) * 4096;
+                mutation.write(&file, n as u64, Some(image[range].to_vec().into()))?;
+            }
+            mutation.flush().await?;
+            assert_eq!(contents(&file, 8).await?, image, "round {round}");
+            let reopened = State::open(store.clone()).options(tail_only()).await?;
+            assert_eq!(
+                contents(&reopened.file("db")?, 8).await?,
+                image,
+                "round {round}, reopened"
+            );
+        }
+        Ok(())
+    })
+}
+
+/// A page rewritten across checkpoints: each checkpoint holds the page as
+/// the chain left it, and the chain starts over on it.
+#[test]
+fn the_chain_starts_over_at_a_checkpoint() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let options = state::StateOptions {
+            checkpoint_entries: 4,
+            checkpoint_bytes: 0,
+            ..Default::default()
+        };
+        let state = State::open(store.clone()).options(options.clone()).await?;
+        let file = state.file("db")?;
+        let mut image = noise(1, 6);
+        flush_changes(&state, &file, &image, &[0; 6 * 4096]).await?;
+        let mut checkpoints = 0;
+        for round in 0..12 {
+            let before = image.clone();
+            let at = 4096 + round * 97;
+            image[at..at + 8].copy_from_slice(&noise(round as u64 + 2, 1)[..8]);
+            let report = flush_changes(&state, &file, &image, &before).await?;
+            checkpoints += report.checkpoint.is_some() as usize;
+            let reopened = State::open(store.clone()).options(options.clone()).await?;
+            assert_eq!(
+                contents(&reopened.file("db")?, 6).await?,
+                image,
+                "round {round}"
+            );
+        }
+        assert_eq!(checkpoints, 3);
+        assert_eq!(contents(&file, 6).await?, image);
+        Ok(())
+    })
+}
+
+/// The base of the file `vm` in [`a_based_page_chains_over_its_base`]:
+/// pages that do not compress.
+struct Noise(Vec<u8>);
+
+impl state::Base for Noise {
+    fn id(&self) -> u64 {
+        2
+    }
+    fn page(&self, n: u64) -> Option<&[u8]> {
+        self.0.get(n as usize * 4096..(n as usize + 1) * 4096)
+    }
+}
+
+/// A page of a file with a base chains over its base's page, and over it
+/// again once a hole made it its base's page.
+#[test]
+fn a_based_page_chains_over_its_base() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        // Two pages: the file holds them once page 1 is written.
+        let base = Arc::new(Noise(noise(9, 2)));
+        let state = State::open(store.clone()).options(tail_only()).await?;
+        let vm = state.file_with_base("vm", base.clone())?;
+        let mut image = base.0.clone();
+        for round in 0..6 {
+            let before = image.clone();
+            if round == 3 {
+                // A hole: page 1 reads its base's page again.
+                let mut mutation = state.mutation();
+                mutation.write(&vm, 1, None)?;
+                mutation.flush().await?;
+                image[4096..8192].copy_from_slice(&base.0[4096..8192]);
+                continue;
+            }
+            let at = 4096 + round * 131;
+            image[at..at + 8].fill(round as u8 + 1);
+            let report = flush_changes(&state, &vm, &image, &before).await?;
+            assert!(report.entry_bytes < 200, "round {round}: {report:?}");
+            let reopened = State::open(store.clone()).options(tail_only()).await?;
+            let vm = reopened.file_with_base("vm", base.clone())?;
+            assert_eq!(contents(&vm, 2).await?, image, "round {round}");
+        }
+        assert_eq!(contents(&vm, 2).await?, image);
+        Ok(())
+    })
+}
