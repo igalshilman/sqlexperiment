@@ -399,8 +399,8 @@ pub(crate) struct LogChange {
 }
 
 /// What a flush changed in a paged file: its size after, its base's id (as
-/// it was made), and the pages it wrote, each a zstd frame against its
-/// base's page (if it has a base), or `None` for a hole.
+/// it was made), and the pages it wrote, each a zstd frame against the page
+/// before it (see FORMAT.md), or `None` for a hole.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FileChange {
     pub size: u64,
@@ -548,7 +548,7 @@ pub(crate) enum Value {
 /// A paged file in a checkpoint: its size, its base's id, where each of its
 /// frames is (`None`: its base's pages, or zeros), and its patches: pages
 /// changed since their frame was written, each a zstd frame against the
-/// page as its frame holds it (as the tail keeps them), by page.
+/// page as its frame holds it, by page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileIndex {
     pub size: u64,

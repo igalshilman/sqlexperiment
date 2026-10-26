@@ -131,7 +131,7 @@ Restate (the object's state)                           S3, if the state has one
 | **Patch**              | One page that changed in a frame, stored on its own, compressed against the frame's page, so a checkpoint does not rewrite a frame for a few pages.                                                                                |
 | **Pack**               | What one checkpoint wrote, back to back: frames, patches, and records and log entries too large to inline. Put once, never changed; named `<version>-<nonce>`, with a random nonce, so no two puts share one, in one of two tiers. |
 | **Manifest**           | One per checkpoint (`v21/manifest/<version>-<nonce>/<part>`), always in Restate: where every frame, patch, record and log entry is, in this checkpoint's pack or an older one. Small records are inline.                           |
-| **Overlay**            | The tail, decoded in memory: the pages, records and logs changed since the checkpoint. A read looks here first.                                                                                                                    |
+| **Overlay**            | The tail, in memory: the records and logs changed since the checkpoint, and per page changed, the chain of its changes. A read looks here first.                                                                                   |
 | **Garbage collection** | Deleting the packs and manifests no checkpoint the head names still needs.                                                                                                                                                         |
 | **Page cache**         | One per process, in memory and on local disk: the ranges of packs read, and each namespace's state as of the last head it saw.                                                                                                     |
 | **L0, L1**             | The two tiers packs are in: L0 in Restate (`KvBlobs`, in 64 KiB parts beside everything else); L1 in S3 (`ObjectStoreBlobs`), where the state has one, for the packs L0 outgrew.                                                   |
@@ -143,10 +143,11 @@ Restate (the object's state)                           S3, if the state has one
 1. **If a checkpoint is due**, write it first (below), as of the version
    before this flush.
 2. **Encode the mutation** as a tail entry. Each page written is a zstd
-   frame of its own, compressed against its **reference**: the page as the
-   checkpoint holds it (the new one, if this flush wrote one). A row update
-   usually changes a few bytes of a page, so its page costs about 100–200
-   bytes, not 4 KiB.
+   frame of its own, compressed against the page as the state holds it
+   before the flush: its **change**. A row update usually changes a few
+   bytes of a page, so its page costs about 100–200 bytes, not 4 KiB; and a
+   page written at every flush (a log appended to, a VM's heap) costs each
+   flush only what that flush changed.
 3. **Put** the tail entry, then the head; **sync**. Restate keeps writes in
    order, and a crash keeps a prefix of them, so the head is never stored
    without the tail entry (and a checkpoint's pack in L0, and its
@@ -177,13 +178,14 @@ One per flush, for the version it makes, cut into parts of 1 MiB if large:
 - the records set, with their values;
 - per log changed, the entries appended and where it was truncated (an
   entry appended and truncated in the same flush is dropped);
-- per file changed, its new size and the pages written, each compressed
-  against its reference.
+- per file changed, its new size and the pages written, each its change.
 
-Every entry since a checkpoint compresses against **that** checkpoint, so
-each decodes alone. An entry is never changed; it is deleted when the
-second checkpoint after it is adopted, until which readers on the older
-checkpoint may need it.
+So the tail is a log: an entry's pages decode against the state the
+entries before it left, from the checkpoint's pages on. A page's
+**chain** is its changes since the checkpoint, in order; a hole, or a
+shrink past it, starts it over from a hole. An entry is never changed; it
+is deleted when the second checkpoint after it is adopted, until which
+readers on the older checkpoint may need it.
 
 ### Checkpoints
 
@@ -202,11 +204,13 @@ costs an S3 PUT, so it waits for the absolute rule. The floor of a frame keeps a
 state of a few small records from checkpointing at every flush, as a
 checkpoint, and the collection after it, costs a round trip or two.
 
-**What it writes.** For each frame the overlay changed:
+**What it writes.** For each frame the overlay changed, as the state
+holds it now (the frame and its patches, with the chains over them):
 
-- **Patch it** when only a few of its pages changed: each changed page is
-  stored as a patch, compressed against the frame's page, while the
-  frame's patches stay within half the frame's stored bytes. A one-row update in a
+- **Patch it** when only a few of its pages changed: each page that
+  differs from the frame's is stored as a patch, compressed against the
+  frame's page (a patch of a page unchanged since is kept as it is), while
+  the frame's patches stay within half the frame's stored bytes. A one-row update in a
   large database touches a frame or two, so a checkpoint of 128 such
   flushes is about 28 KB of patches. Patches are per page so that a
   change rewrites only its page's: one patch per frame (the frame as it
@@ -214,8 +218,8 @@ checkpoint, and the collection after it, costs a round trip or two.
   rewrites every page the frame changed since it was written at each
   change, and on an aged database put 2,187 bytes a flush against 1,172
   (branch `claude/frame-patches`).
-- **Rebuild it** otherwise: read the old frame and its patches, apply the
-  overlay's pages, compress it again without patches.
+- **Rebuild it** otherwise, or when a page past the file's end changed:
+  compress it again, without patches.
 
 Then the records set and log entries appended since: inline in the
 manifest if up to 1 KiB, else into the pack. And **compaction**: any older
@@ -413,8 +417,9 @@ That is at most 3 round trips, whatever the database's size.
 
 **Read a page** from the first of:
 
-1. the overlay (the tail changed it): decompress it against its reference,
-   the checkpoint's page, which may need reading first;
+1. the overlay (the tail changed it): its chain, each change decompressed
+   in turn, from the checkpoint's page (read first) or a hole (about 3 µs
+   a change);
 2. its patch;
 3. its frame: one ranged read of the pack (in Restate, the 64 KiB parts
    it is in, which the cache keeps for the frames beside it; in S3, a

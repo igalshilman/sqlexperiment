@@ -38,7 +38,7 @@
 //! |---|---|---|
 //! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
 //! | Head | `v21/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
-//! | Tail | `v21/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (a zstd frame each) | Yes, until a checkpoint after the next one |
+//! | Tail | `v21/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
 //! | Manifests | `v21/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
 //! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
 //!
