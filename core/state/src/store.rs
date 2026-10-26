@@ -219,6 +219,19 @@ struct Pack {
 }
 
 impl Pack {
+    fn new(id: PackId) -> Self {
+        Self {
+            id,
+            body: Vec::new(),
+            written: Vec::new(),
+        }
+    }
+
+    /// The bytes at `at`, which it holds.
+    fn slice(&self, at: Location) -> Bytes {
+        Bytes::copy_from_slice(&self.body[at.offset as usize..at.range().end as usize])
+    }
+
     /// Append `bytes`, the decoded `image` of a frame if one: where they are.
     fn put(&mut self, bytes: Bytes, image: Option<Arc<Bytes>>) -> Location {
         let at = Location {
@@ -1244,18 +1257,14 @@ impl Snapshot {
         let durable = &self.durable;
         let head = &durable.head;
         let promoted = self.promotes();
-        let mut pack = Pack {
-            id: PackId {
-                version: head.version,
-                nonce: cache::random(),
-                tier: match promoted {
-                    true => Tier::L1,
-                    false => Tier::L0,
-                },
+        let mut pack = Pack::new(PackId {
+            version: head.version,
+            nonce: cache::random(),
+            tier: match promoted {
+                true => Tier::L1,
+                false => Tier::L0,
             },
-            body: Vec::new(),
-            written: Vec::new(),
-        };
+        });
         let old = &durable.manifest;
         let mut manifest = Manifest {
             files: old.files.clone(),
@@ -1264,8 +1273,17 @@ impl Snapshot {
             sizes: BTreeMap::new(),
         };
         let (frames, pages) = match promoted {
-            true => (self.rebuild(&mut manifest, &mut pack).await?, 0),
             false => (0, self.copy_pages(&mut manifest, &mut pack)),
+            // A promotion copies the overlay into L0 too, in memory, then
+            // folds L0 into the frames.
+            true => {
+                let mut overlay = Pack::new(PackId {
+                    tier: Tier::L0,
+                    ..pack.id
+                });
+                self.copy_pages(&mut manifest, &mut overlay);
+                (self.fold(&mut manifest, &overlay, &mut pack).await?, 0)
+            }
         };
         let before = pack.written.len();
         // Values: inline if small, else a frame of their own.
@@ -1396,88 +1414,78 @@ impl Snapshot {
         copied
     }
 
-    /// Into L1: every frame with a page in L0 or the overlay, or a page cut,
-    /// rebuilt from its frame and those pages, each decoded against the
-    /// frame's page (its reference); L0 and the cuts emptied. How many
-    /// frames it stored.
-    async fn rebuild(&self, manifest: &mut Manifest, pack: &mut Pack) -> io::Result<usize> {
-        let head = &self.durable.head;
-        let (frame_pages, frame_bytes) = (head.frame_pages, head.frame_bytes());
-        let old = &self.durable.manifest;
+    /// Into L1: every frame with a page in L0, or a page cut, rebuilt from
+    /// its frame and those pages, each decoded against the frame's page (its
+    /// reference); L0 and the cuts emptied. `overlay` holds the pages the
+    /// tail wrote, which [`Self::copy_pages`] put in L0. How many frames it
+    /// stored.
+    async fn fold(
+        &self,
+        manifest: &mut Manifest,
+        overlay: &Pack,
+        pack: &mut Pack,
+    ) -> io::Result<usize> {
+        let frame_pages = self.durable.head.frame_pages;
         let mut dirty = Vec::new();
-        for (name, file) in &self.durable.files {
-            let count = file.size.div_ceil(frame_bytes);
-            let held = old.files.get(name);
-            let cut = [file.cut, held.and_then(|held| held.cut)]
-                .into_iter()
-                .flatten()
-                .min();
-            let mut frames: BTreeSet<u64> = (file.pages.keys())
-                .chain(held.into_iter().flat_map(|held| held.pages.keys()))
-                .map(|page| page / frame_pages)
-                .collect();
-            if let (Some(cut), Some(held)) = (cut, held) {
-                let stored = (held.frames.iter().enumerate())
+        for (name, file) in &mut manifest.files {
+            let mut changed: BTreeSet<u64> =
+                (file.pages.keys()).map(|page| page / frame_pages).collect();
+            if let Some(cut) = file.cut {
+                let stored = (file.frames.iter().enumerate())
                     .filter(|&(index, at)| at.is_some() && (index as u64 + 1) * frame_pages > cut)
                     .map(|(index, _)| index as u64);
-                frames.extend(stored);
+                changed.extend(stored);
             }
-            let index = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
-                base: file.base,
-                ..FileIndex::default()
-            });
-            index.size = file.size;
-            index.frames.resize(count as usize, None);
-            index.cut = None;
-            index.pages.clear();
-            for frame in frames.into_iter().filter(|&frame| frame < count) {
-                let stored =
-                    held.and_then(|held| held.frames.get(frame as usize).copied().flatten());
-                dirty.push((name, file, held, frame, stored));
+            let pages = std::mem::take(&mut file.pages);
+            let cut = file.cut.take();
+            for index in changed {
+                let range = index * frame_pages..(index + 1) * frame_pages;
+                let pages: Vec<(u64, Option<Location>)> =
+                    pages.range(range).map(|(&page, &at)| (page, at)).collect();
+                let stored = file.frames[index as usize];
+                dirty.push((name.clone(), file.size, cut, index, stored, pages));
             }
         }
-        // The old frames and the pages in L0, fetched together.
-        let olds = bounded(
+        // The old frames and the pages, fetched together.
+        let fetched = bounded(
             dirty
                 .iter()
-                .map(|&(name, _, held, frame, stored)| async move {
+                .map(|(name, _, _, index, stored, pages)| async move {
                     let old = match stored {
-                        Some(at) => Some(self.frame(name, frame, at).await?),
+                        Some(at) => Some(self.frame(name, *index, *at).await?),
                         None => None,
                     };
-                    let range = frame * frame_pages..(frame + 1) * frame_pages;
-                    let in_l0: Vec<(u64, Location)> = (held.into_iter())
-                        .flat_map(|held| held.pages.range(range.clone()))
-                        .filter_map(|(&page, at)| Some((page, (*at)?)))
-                        .collect();
-                    let raws = bounded(in_l0.iter().map(|&(_, at)| self.raw(at))).await?;
-                    let in_l0: HashMap<u64, Bytes> =
-                        in_l0.into_iter().map(|(page, _)| page).zip(raws).collect();
-                    Ok::<_, io::Error>((old, in_l0))
+                    let raws =
+                        bounded(pages.iter().filter_map(|&(_, at)| at).map(|at| async move {
+                            match at.pack == overlay.id {
+                                true => Ok(overlay.slice(at)),
+                                false => self.raw(at).await,
+                            }
+                        }))
+                        .await?;
+                    Ok::<_, io::Error>((old, raws))
                 }),
         )
         .await?;
         let mut frames = 0;
-        for ((name, file, held, index, _), (old, in_l0)) in dirty.into_iter().zip(olds) {
-            let base = self.base_of(name)?;
+        for ((name, size, cut, index, _, pages), (old, raws)) in dirty.into_iter().zip(fetched) {
+            let base = self.base_of(&name)?;
             let hole = implicit(base, frame_pages, index);
             let mut image = old
                 .as_ref()
                 .map_or_else(|| hole.clone(), |old| old.to_vec());
+            let mut raws = raws.into_iter();
+            let pages: BTreeMap<u64, Option<Bytes>> = (pages.into_iter())
+                .map(|(page, at)| (page, at.and_then(|_| raws.next())))
+                .collect();
             let first = index * frame_pages;
-            let end = file.size.div_ceil(PAGE);
+            let end = size.div_ceil(PAGE);
             for page in first..first + frame_pages {
                 let at = ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
-                // The page written last: the overlay's, else L0's; or cut.
-                let written = match file.pages.get(&page) {
+                let written = match pages.get(&page) {
                     Some(frame) => Some(frame.as_ref()),
-                    None if file.cut(page) => Some(None),
-                    None => match held.and_then(|held| held.pages.get(&page)) {
-                        Some(Some(_)) => Some(in_l0.get(&page)),
-                        Some(None) => Some(None),
-                        None if held.is_some_and(|held| held.cut(page)) => Some(None),
-                        None => None,
-                    },
+                    None if cut.is_some_and(|cut| page >= cut) => Some(None),
+                    None => None,
                 };
                 match written {
                     Some(Some(frame)) if page < end => {
@@ -1502,7 +1510,7 @@ impl Snapshot {
                     Some(pack.put(frame, Some(Arc::new(Bytes::from(image)))))
                 }
             };
-            manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
+            manifest.files.get_mut(&name).expect("indexed").frames[index as usize] = stored;
         }
         Ok(frames)
     }
