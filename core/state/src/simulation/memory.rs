@@ -157,29 +157,27 @@ impl MemoryKv {
         let canonical = |pack: PackId| PackId { nonce: 0, ..pack };
         let mut contents = BTreeMap::new();
         // Packs and manifests, whole, by prefix and name.
-        let mut blobs: BTreeMap<(&str, PackId), BTreeMap<u64, Bytes>> = BTreeMap::new();
+        let mut blobs: BTreeMap<(&str, String), BTreeMap<u64, Bytes>> = BTreeMap::new();
         for (key, value) in self.values() {
             let blob = [KV_PREFIX, MANIFEST_PREFIX].into_iter().find_map(|prefix| {
                 let (name, part) = key.strip_prefix(prefix)?.rsplit_once('/')?;
-                let name = PackId::parse(name).or_else(|| PackId::parse_name(name));
-                Some((
-                    prefix,
-                    name.expect("a stored blob's name parses"),
-                    part.parse().ok()?,
-                ))
+                Some((prefix, name.to_owned(), part.parse().ok()?))
             });
             match blob {
-                Some((prefix, id, part)) => {
-                    blobs.entry((prefix, id)).or_default().insert(part, value);
+                Some((prefix, name, part)) => {
+                    blobs.entry((prefix, name)).or_default().insert(part, value);
                 }
                 None => drop(contents.insert(key, value)),
             }
         }
+        // The manifests' lengths, by version.
         let mut manifests = BTreeMap::new();
-        for ((prefix, id), parts) in blobs {
+        for ((prefix, name), parts) in blobs {
             let mut bytes: Vec<u8> = parts.into_values().flatten().collect();
-            let name = match prefix == MANIFEST_PREFIX {
+            let (version, name) = match prefix == MANIFEST_PREFIX {
                 true => {
+                    let version =
+                        PackId::manifest_version(&name).expect("a manifest's name parses");
                     let mut manifest = Manifest::decode(&bytes).expect("a stored manifest decodes");
                     for at in manifest.locations_mut() {
                         at.pack = canonical(at.pack);
@@ -189,17 +187,20 @@ impl MemoryKv {
                         .map(|(pack, size)| (canonical(pack), size))
                         .collect();
                     bytes = manifest.encode().expect("a manifest decoded").to_vec();
-                    manifests.insert(id, bytes.len() as u64);
-                    canonical(id).name()
+                    manifests.insert(version, bytes.len() as u64);
+                    (version, format!("{version:016x}-{:016x}", 0))
                 }
-                false => canonical(id).key(),
+                false => {
+                    let id = PackId::parse(&name).expect("a stored pack's key parses");
+                    (id.version, canonical(id).key())
+                }
             };
             for (part, bytes) in bytes.chunks(KV_PART as usize).enumerate() {
                 let kept = contents.insert(
                     format!("{prefix}{name}/{part}"),
                     Bytes::copy_from_slice(bytes),
                 );
-                assert!(kept.is_none(), "two checkpoints of version {}", id.version);
+                assert!(kept.is_none(), "two checkpoints of version {version}");
             }
         }
         if let Some(bytes) = contents.get_mut(HEAD_KEY) {
@@ -209,7 +210,7 @@ impl MemoryKv {
                 .into_iter()
                 .flatten()
             {
-                if let Some(&len) = manifests.get(&checkpoint.pack) {
+                if let Some(&len) = manifests.get(&checkpoint.pack.version) {
                     checkpoint.manifest = len;
                 }
                 checkpoint.pack = canonical(checkpoint.pack);

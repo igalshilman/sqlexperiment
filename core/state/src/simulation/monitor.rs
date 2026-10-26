@@ -33,7 +33,7 @@ use crate::{
     Base, PAGE,
     blobs::{KV_PREFIX, MANIFEST_PREFIX},
     format::{
-        Checkpoint, Entry, HEAD_KEY, Head, Location, Manifest, PackId, Value, parse_tail_key,
+        Checkpoint, Entry, HEAD_KEY, Head, Location, Manifest, PackId, Tier, Value, parse_tail_key,
     },
     kv::KvStore,
     simulation::MemoryBlobs,
@@ -202,8 +202,8 @@ impl Known {
     /// The bytes `range` of the pack `pack`, if the monitor sees it.
     fn pack_range(&self, pack: PackId, range: Range<u64>) -> Option<Bytes> {
         let key = pack.key();
-        if let Some(external) = &self.external {
-            return external.peek(&key, range);
+        if pack.tier == Tier::L1 {
+            return self.external.as_ref()?.peek(&key, range);
         }
         let whole = whole(self.packs.get(&key)?)?;
         let range = range.start as usize..range.end as usize;
@@ -503,10 +503,10 @@ impl Known {
                 }
             }
             Key::Manifest(name, _) => {
-                let Some(id) = PackId::parse_name(&name) else {
+                let Some(version) = PackId::manifest_version(&name) else {
                     return self.violation(format!("a delete of {at:?}"));
                 };
-                if head.previous.is_none_or(|p| id.version >= p.version()) {
+                if head.previous.is_none_or(|p| version >= p.version()) {
                     self.violation(format!("manifest {name} deleted, still needed"));
                 }
             }

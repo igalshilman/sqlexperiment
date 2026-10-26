@@ -6,13 +6,13 @@ format discovery. Storage is assumed reliable (a value reads back as
 written); every zstd frame carries a checksum, and decoding checks
 structure and the bounds below.
 
-| Store                           | Key                                     | Value                                                      |
-| ------------------------------- | --------------------------------------- | ---------------------------------------------------------- |
-| Restate                         | `v20/head`                              | The head, the commit point; absent until the first flush   |
-| Restate                         | `v20/tail/<version>/<part>`             | A part of the tail entry of the flush that made `version`  |
-| Restate                         | `v20/manifest/<version>-<nonce>/<part>` | A part of a checkpoint's manifest; put once, never changed |
-| Packs (`BlobStore`)             | `checkpoint/<version>-<nonce>`          | A pack: what a checkpoint wrote; put once, never changed   |
-| Restate, by default (`KvBlobs`) | `v20/pack/<pack key>/<part>`            | A part of a pack, where packs are kept in Restate          |
+| Store               | Key                                     | Value                                                      |
+| ------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| Restate             | `v20/head`                              | The head, the commit point; absent until the first flush   |
+| Restate             | `v20/tail/<version>/<part>`             | A part of the tail entry of the flush that made `version`  |
+| Restate             | `v20/manifest/<version>-<nonce>/<part>` | A part of a checkpoint's manifest; put once, never changed |
+| Restate (`KvBlobs`) | `v20/pack/l0/<version>-<nonce>/<part>`  | A part of a pack in L0; put once, never changed            |
+| S3 (`BlobStore`)    | `l1/<version>-<nonce>`                  | A pack in L1; put once, never changed                      |
 
 The head is the only key whose write commits. `<version>` and `<part>` in a
 tail entry's key are decimal. A pack's `<version>` is the head version
@@ -20,12 +20,12 @@ whose state it holds, and `<nonce>` a random number, each 16 lowercase hex
 digits: no two puts ever use one name. A checkpoint's manifest is in
 Restate wherever its pack is, under the same `<version>-<nonce>`, cut into
 parts of 64 KiB (the last shorter), numbered in decimal from 0; a
-checkpoint that stores nothing outside its manifest puts no pack. Where packs are kept in Restate
-(`blobs::KvBlobs`), a pack is cut into parts of 64 KiB (the last shorter),
-numbered in decimal from 0, under `v20/pack/` and its key
-(`v20/pack/checkpoint/<version>-<nonce>/<part>`); in S3
-(`blobs::ObjectStoreBlobs`), it is one object, under the namespace's prefix
-and its key.
+checkpoint that stores nothing outside its manifest puts no pack. A pack
+is in one of two tiers, which its key and every reference to it name. In
+L0 (`blobs::KvBlobs`), it is cut into parts of 64 KiB (the last shorter),
+numbered in decimal from 0, under `v20/pack/l0/`; in L1, in S3
+(`blobs::ObjectStoreBlobs`), it is one object, `l1/<version>-<nonce>`
+under the namespace's prefix. Without S3, every pack is in L0.
 
 Integers are LEB128 varints unless stated otherwise. A byte string is its
 length, then its bytes. A name is a byte string of at most 255 bytes of
@@ -36,16 +36,16 @@ manifest.
 
 `SH20`, then, uncompressed:
 
-| Field       | Encoding                                                                          |
-| ----------- | --------------------------------------------------------------------------------- |
-| Id          | 8 bytes, little-endian: the database's random identity, drawn when it was made    |
-| Frame pages | Pages per frame (1 to 256), set when the database was made                        |
-| Version     | Flushes that changed something, ever: 1 to 2^62                                   |
-| Checkpoint  | `0` for none, or `1`, the pack's version and nonce, then the manifest's length    |
-| Previous    | The checkpoint before, which readers that opened on it may still read; as above   |
-| Tail first  | The first version whose tail entry is kept; at least 1                            |
-| Tail bytes  | Bytes of the tail entries since the checkpoint                                    |
-| Parts       | Per version from tail first to the version, the number of parts of its tail entry |
+| Field       | Encoding                                                                                           |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| Id          | 8 bytes, little-endian: the database's random identity, drawn when it was made                     |
+| Frame pages | Pages per frame (1 to 256), set when the database was made                                         |
+| Version     | Flushes that changed something, ever: 1 to 2^62                                                    |
+| Checkpoint  | `0` for none, or `1`, the pack's version, nonce, tier (`0` L0, `1` L1), then the manifest's length |
+| Previous    | The checkpoint before, which readers that opened on it may still read; as above                    |
+| Tail first  | The first version whose tail entry is kept; at least 1                                             |
+| Tail bytes  | Bytes of the tail entries since the checkpoint                                                     |
+| Parts       | Per version from tail first to the version, the number of parts of its tail entry                  |
 
 The previous checkpoint is older than the checkpoint, or the same version,
 and the checkpoint no newer than the version; there is no previous without
@@ -94,7 +94,7 @@ no base page reads as a hole.
 
 | Field   | Encoding                                                                                                                                                                                                                                                                                                                                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packs   | Count, then per pack the manifest names, its own included if it put one, ascending: its version, its nonce, and the bytes it stored (for compaction)                                                                                                                                                                                                  |
+| Packs   | Count, then per pack the manifest names, its own included if it put one, ascending: its version, its nonce, its tier (`0` L0, `1` L1), and the bytes it stored (for compaction)                                                                                                                                                                       |
 | Records | Count, then per record: its name, its value (below)                                                                                                                                                                                                                                                                                                   |
 | Logs    | Count, then per log: its name, the index of its first entry (at most 2^62), a count (at most 4096), then each entry, a value                                                                                                                                                                                                                          |
 | Files   | Count, then per paged file: its name, its size in 512-byte units (at most 10 GiB), its base's id plus one (`0` for none), a count, then a location per frame (`0` for none: its base's pages, or zeros); then a count of patches, and per patch, ascending: its page as the gap from the page after the one before (the first from 0), and a location |

@@ -8,8 +8,8 @@
 //! S3=1 cargo bench --locked --features simulation --bench read_latency
 //! ```
 //!
-//! Without `S3`, the packs are kept in Restate's state too; with `S3=1`, in
-//! S3. `RESTATE_MS` (2) and `S3_MS` (20) set a request's time; CPU time,
+//! Without `S3`, the packs are kept in Restate's state too; with `S3=1`,
+//! past L0 (`L0_BYTES`, 0 for all of them), in S3. `RESTATE_MS` (2) and `S3_MS` (20) set a request's time; CPU time,
 //! bandwidth and queueing are not modeled. `WORKLOAD` runs only the
 //! databases it names part of. Prints Markdown rows: milliseconds at the
 //! median, the 90th percentile and the worst sample, and the mean round
@@ -227,6 +227,12 @@ impl Stores {
 
     async fn open(&self) -> Result<Sql> {
         let mut open = State::open(self.restate.clone());
+        if let Ok(bytes) = std::env::var("L0_BYTES") {
+            open = open.options(state::StateOptions {
+                l0_bytes: bytes.parse()?,
+                ..Default::default()
+            });
+        }
         if let Some((_, s3)) = &self.s3 {
             open = open.checkpoints(s3.clone());
         }

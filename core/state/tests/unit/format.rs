@@ -5,6 +5,11 @@ fn checkpoint(version: u64) -> Checkpoint {
         pack: PackId {
             version,
             nonce: u64::MAX - version,
+            tier: if version.is_multiple_of(2) {
+                Tier::L0
+            } else {
+                Tier::L1
+            },
         },
         manifest: 77,
     }
