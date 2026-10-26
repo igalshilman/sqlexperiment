@@ -482,93 +482,107 @@ What changes:
 ## 6. Numbers
 
 Bytes and request counts below come from the `flush_costs` bench
-(`core/sql/benches`), which runs the real encoding over in-memory stores.
-Latencies come from `read_latency`, a discrete-event simulation that
-**assumes** 2 ms per Restate round trip and 20 ms per S3 request; they show
-the shape, not production timings.
+(`core/sql/benches`), which runs the real encoding over in-memory stores,
+with the default `l0_bytes` (1 MiB). Latencies come from `read_latency`, a
+discrete-event simulation that **assumes** 2 ms per Restate round trip and
+20 ms per S3 request; they show the shape, not production timings. v20
+(frames and per-page patches, one level) is the layout this one replaced,
+measured with the same benches on the same commit's workloads.
 
-### Packs in Restate (the default)
+### L1 in Restate (the default)
 
 Per flush, with a warm cache:
 
-| Workload           | Database | Bytes put to Restate (tail + pack + manifest + head) | Stored in Restate | Keys  | Cold open and a point read |
-| ------------------ | -------- | ---------------------------------------------------- | ----------------- | ----- | -------------------------- |
-| Chat with effects  | 180 KiB  | 1949 (1593 + 248 + 29 + 79)                          | 170 KiB           | 77    | 4 round trips, 30 gets     |
-| Small, update 1    | 20 KiB   | 675 (489 + 90 + 3 + 93)                              | 34 KiB            | 61    | 3 round trips, 26 gets     |
-| 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
-| 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
-| 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |
-| 100k rows, aged    | 27 MiB   | 1172 (225 + 470 + 235 + 242)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
+| Workload            | Database | Bytes put to Restate (tail + pack + manifest + head) | v20  | Stored in Restate | Keys  |
+| ------------------- | -------- | ---------------------------------------------------- | ---- | ----------------- | ----- |
+| Chat with effects   | 180 KiB  | 2276 (1645 + 516 + 51 + 64)                          | 1949 | 107 KiB           | 24    |
+| Small, update 1     | 20 KiB   | 713 (489 + 126 + 2 + 96)                             | 676  | 32 KiB            | 60    |
+| 10k rows, update 1  | 2.8 MiB  | 646                                                  | 639  | 1.2 MiB           | 163   |
+| 10k rows, update 10 | 2.8 MiB  | 3317 (2665 + 482 + 81 + 89)                          | 2032 | 1.4 MiB           | 86    |
+| 1M rows, update 1   | 274 MiB  | 857 (226 + 203 + 249 + 179)                          | 872  | 108 MiB           | 1,870 |
+| 1M rows, update 10  | 274 MiB  | 1356                                                 | 1658 | 108 MiB           | 1,946 |
+| 100k rows, aged     | 27 MiB   | 2872 (250 + 2274 + 108 + 240)                        | 1172 | 11 MiB            | 340   |
 
-The pack and manifest columns are spread over the flushes: a 1M-row
-database's checkpoint, every 128 flushes, writes about 28 KB of patches
-and a 30 KiB manifest.
+Most workloads cost what v20 did. Two cost more, for the two reasons the
+one reference rule has a price:
 
-The other rows are young, a few hundred flushes old. An aged database
-costs more: its patches pile up, one per page changed since its frame was
-written, and its manifest, written whole, grows with them. After 16,384
-one-row updates, a 100k-row database's manifest is about 7× its first
-(235 bytes a flush against 32), and its packs carry more dead bytes
-before compaction moves them.
+- **A page changed many times between promotions** costs what changed
+  since its frame, not since its last version: ten rows a flush on 10k
+  rows put 2665 tail bytes a flush against 1610.
+- **A promotion rewrites every frame L0 touched.** On an aged database,
+  one-row updates spread over every frame: by the time L0 holds 1 MiB of
+  pages, a promotion rewrites most of the database. v20's patches rewrote
+  a frame only once its patches reached half of it. The cost falls as L0
+  grows, and stays above v20's: 17,395 bytes a flush at 64 KiB, 8,968 at
+  256 KiB, 2,872 at 1 MiB, 1,782 at 4 MiB, against 1,172.
 
-Cold reads, at 2 ms a round trip:
+A cold open and point read costs the same round trips as v20 (4 to 6),
+and about as many gets: it reads the tail since the last checkpoint, one
+get an entry, which depends on where in the checkpoint's cycle the open
+falls (23 gets against v20's 50 at 300 flushes of the 100k-row database).
+
+Cold reads, at 2 ms a round trip, the same as v20:
 
 | Database | Open | Point query (primary key) | Point query (index) | 100-row range |
 | -------- | ---- | ------------------------- | ------------------- | ------------- |
 | 100 rows | 6 ms | 0 (all in memory)         | 0                   | 0             |
 | 10k rows | 6 ms | 4 ms                      | 6 ms                | 8 ms          |
-| 1M rows  | 6 ms | 6 ms                      | 12 ms               | 10 ms         |
+| 1M rows  | 6 ms | 4 ms                      | 8 ms                | 8 ms          |
 
-### Packs in S3
+### L1 in S3
 
-| Workload           | Bytes put to Restate per flush | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold |
-| ------------------ | ------------------------------ | ----------------- | ------------ | ---------------------------------------------- |
-| Chat with effects  | 1938                           | 223 KiB           | 0.06 MiB     | $0.07 / $1.02                                  |
-| Small, update 1    | 1735                           | 150 KiB           | 0.01 MiB     | $0.07 / $0.60                                  |
-| 10k rows, update 1 | 436                            | 34 KiB            | 1.15 MiB     | $0.08 / $2.73                                  |
-| 1M rows, update 1  | 653                            | 93 KiB            | 108 MiB      | $0.08 / $3.86                                  |
-| 1M rows, update 10 | 1078                           | 153 KiB           | 108 MiB      | $0.08 / $28.70                                 |
-| 100k rows, aged    | 702                            | 108 KiB           | 14 MiB       | $0.08 / $4.35                                  |
+| Workload            | Bytes put to Restate per flush | v20  | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold | v20, warm |
+| ------------------- | ------------------------------ | ---- | ----------------- | ------------ | ---------------------------------------------- | --------- |
+| Chat with effects   | 1915                           | 1938 | 33 KiB            | 0.07 MiB     | $0.43 / $1.13                                  | $0.07     |
+| Small, update 1     | 586                            | 1734 | 23 KiB            | 0.01 MiB     | $0.28 / $1.06                                  | $0.07     |
+| 10k rows, update 1  | 644                            | 436  | 120 KiB           | 1.07 MiB     | $0.02 / $1.56                                  | $0.08     |
+| 10k rows, update 10 | 3318                           | 1813 | 370 KiB           | 1.07 MiB     | $0.02 / $8.25                                  | $0.08     |
+| 1M rows, update 1   | 858                            | 654  | 144 KiB           | 108 MiB      | $0.02 / $1.99                                  | $0.08     |
+| 1M rows, update 10  | 1355                           | 1078 | 272 KiB           | 108 MiB      | $0.02 / $15.57                                 | $0.08     |
+| 100k rows, aged     | 816                            | 702  | 584 KiB           | 11 MiB       | $0.00 / $2.07                                  | $0.08     |
 
-Warm, the cost is the checkpoints' PUT and LIST, once in 128 flushes; cold,
-it is the GETs of the frames a flush reads, which follow the rows it
-touches more than the database's size. Storage is a rounding error: 108 MiB
-costs $0.0024 a month.
+Here a promotion's rewrite goes to S3, where bytes are almost free: the
+aged database costs 16% more Restate bytes than v20, and a promotion an
+upload in about 5,000 flushes. A large database checkpoints into L0 with
+no S3 request, so a warm flush costs a quarter of v20's; a small one
+promotes about every other checkpoint, and costs four times as much, still
+cents per million flushes. Small databases put a third of v20's bytes to
+Restate, as their tail is cut by the same rule as without S3.
 
-Cold reads, at 2 ms a Restate round trip and 20 ms an S3 GET:
-
-| Database | Open  | Point query (primary key) | Point query (index) | 100-row range |
-| -------- | ----- | ------------------------- | ------------------- | ------------- |
-| 100 rows | 4 ms  | 0 (all in the tail)       | 0                   | 0             |
-| 10k rows | 24 ms | 40 ms                     | 60 ms               | 80 ms         |
-| 1M rows  | 24 ms | 60 ms                     | 120 ms              | 100 ms        |
-
-With a warm cache both modes cost the same: two Restate round trips per
-invocation, and no S3 request.
+Cold reads, at 2 ms a Restate round trip and 20 ms an S3 GET, are v20's:
+24 ms to open, 40 ms for a point query by key, 60 to 80 ms by index or for
+a range of 100 rows. A page in L0 adds no round trip: its frame is fetched
+alongside.
 
 ### Choosing
 
-- **Packs in Restate**: one system, no unfenced writer, no credentials, and
-  cold reads about 10× faster. The whole database, compressed (about 2.5×),
-  is in Restate, a key per 64 KiB, and every collection lists them all.
-- **Packs in S3**: Restate holds kilobytes per database however large it
-  grows, and S3 costs cents per million warm flushes. Each b-tree level a
-  cold query reads costs an S3 GET, and small databases write about 3× the
-  bytes to Restate, as their tail is cut less often.
+- **L1 in Restate**: one system, no unfenced writer, no credentials, and
+  cold reads about 10× faster. The whole database, compressed (about
+  2.5×), is in Restate, a key per 64 KiB, and every collection lists them
+  all; an aged database's promotions rewrite it there.
+- **L1 in S3**: Restate holds L0 and the manifest, at most about 1 MiB and
+  a few hundred KiB, however large the database grows, and a large
+  database's flushes make no S3 request between promotions. Each b-tree
+  level a cold query reads costs an S3 GET.
 
 ## 7. Earlier layouts
 
 Each layout below was built, measured and replaced by the next; their
-reports are in git history (`core/state/docs/` at commit `e015181`).
+reports are in git history (`core/state/docs/` at commit `e015181`, and
+v20's at `355a282`).
 
-| Layout                     | What it stored                                                                       | Why it went                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| A log                      | Every flush appended to a log, checkpointed now and then into page keys              | Each change was written twice, to the log and then in place                                 |
-| Copy-on-write blobs        | A root naming a radix map of chunks, each a base and a delta, all in Restate         | The whole database lived in Restate key by key: 33,000 keys for 100 MB of text              |
-| Blobs in S3                | The same blobs in an object store, the root in Restate, zombies kept apart by claims | Every flush was S3 PUTs: $15 per million one-row updates, over $100 for ten rows            |
-| Tail and checkpoints (v18) | A tail in Restate, and checkpoints of copy-on-write blobs, in S3 or Restate          | The chunk map, bases, deltas and rebase rules; a cold open of 1M rows took up to 1,331 gets |
-| Frame packs (v20, this)    | A tail of plain mutations; checkpoints of frames and patches, with a flat manifest   | –                                                                                           |
+| Layout                     | What it stored                                                                       | Why it went                                                                                                                                           |
+| -------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A log                      | Every flush appended to a log, checkpointed now and then into page keys              | Each change was written twice, to the log and then in place                                                                                           |
+| Copy-on-write blobs        | A root naming a radix map of chunks, each a base and a delta, all in Restate         | The whole database lived in Restate key by key: 33,000 keys for 100 MB of text                                                                        |
+| Blobs in S3                | The same blobs in an object store, the root in Restate, zombies kept apart by claims | Every flush was S3 PUTs: $15 per million one-row updates, over $100 for ten rows                                                                      |
+| Tail and checkpoints (v18) | A tail in Restate, and checkpoints of copy-on-write blobs, in S3 or Restate          | The chunk map, bases, deltas and rebase rules; a cold open of 1M rows took up to 1,331 gets                                                           |
+| Frame packs (v20)          | A tail of plain mutations; checkpoints of frames and per-page patches, in one store  | Each checkpoint chose per frame between a patch and a rebuild, and re-encoded every page; a large database put its packs, all in Restate or all in S3 |
+| Two levels (v21, this)     | A tail; L0, pages as the tail wrote them, in Restate; L1, frames, in S3 or Restate   | –                                                                                                                                                     |
 
 Against v18, frame packs halved the bytes a flush puts on large databases
 (a tail page costs what changed since the checkpoint) and brought a cold
-open to a manifest and a frame, in about 14% less code.
+open to a manifest and a frame, in about 14% less code. Against v20, two
+levels make a checkpoint a copy and let L1 live in S3 while the recent
+pages stay in Restate; they cost more bytes on pages changed often between
+promotions, and on aged databases kept in Restate (§6).
