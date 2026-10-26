@@ -9,6 +9,8 @@
     "@earendil-works/pi-durable": "1.1.0",
     "@langchain/core": "1.2.12",
     "@langchain/openai": "1.7.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "@opencode/plugin": "2.0.32",
     "@restatedev/restate-sdk": "1.17.4",
     "@restatedev/restate-sdk-clients": "1.17.4",
