@@ -40,6 +40,7 @@ tools, a person in the loop, teams, workflows, coding agents); and
 | Folder                                   | What                                                                                                                                                                                                                                                    |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case                                                                                                                 |
+| [`factory/`](advanced/factory/README.md) | A software factory on Linear: a webhook starts it; a triage agent (pi) asks a planner (Claude) for a structured plan, then hands each part to a coder (DeepSeek), at once; each moves its issue along, through Linear's MCP server                      |
 | [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you steer it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve |
 
 Each agent is a virtual object, one per key, whose conversation is in the
@@ -69,7 +70,8 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 ```
 
 The examples take OpenAI's models, with `OPENAI_API_KEY` (all but
-`claude.ts` and `deepseek.ts`, on their providers' own). `MODEL` picks
+`claude.ts` and `deepseek.ts`, on their providers' own, and
+`factory/`, on all three). `MODEL` picks
 another model, such as `MODEL=anthropic/claude-sonnet-5-5` with
 `ANTHROPIC_API_KEY`, for the agents on pi, OpenCode and LangGraph
 (LangGraph takes OpenAI's and Anthropic's); Claude takes Anthropic's
