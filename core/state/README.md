@@ -55,8 +55,9 @@ engine warm this way.
 A flush puts its mutation as one entry of a **tail** in Restate, then the
 **head**, the one key whose write commits, and syncs once. Now and then a
 flush first writes a **checkpoint**: a manifest in Restate that indexes the
-whole state, and a pack of what changed since the checkpoint before (in
-Restate by default, or in S3). Nothing a head names is ever overwritten, so a
+whole state, and a pack of what changed since the checkpoint before, in
+Restate, until the packs there hold a few MiB, then promoted to S3 if the
+state has one. Nothing a head names is ever overwritten, so a
 crash leaves nothing to repair. It relies on one owner at a time, which
 Restate's virtual objects give, and on a crash keeping a prefix of the
 writes since the last sync.
@@ -65,7 +66,7 @@ writes since the last sync.
 
 - [Architecture](docs/ARCHITECTURE.md): start here. The data model, the
   head, tail, checkpoints, manifests and packs and how they change over
-  time, packs in S3, the numbers, and the layouts this one replaced
+  time, L0 and L1, the numbers, and the layouts this one replaced
 - [Design](docs/DESIGN.md): the rules the architecture leaves out: retries,
   readers, the SQL engine, the owner cache, costs and limits
 - [Storage format](docs/FORMAT.md): exact encodings

@@ -85,7 +85,10 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
                 && t.reads_beside > 0,
             "{t:?}"
         );
-        assert!(t.s3_faults > 0 && t.landed_late > 0, "{t:?}");
+        assert!(
+            t.s3_faults > 0 && t.landed_late > 0 && t.promoted > 0,
+            "{t:?}"
+        );
         assert!(
             t.landed > 0 && t.lost > 0 && t.crashes > 0 && t.cancelled > 0,
             "{t:?}"
@@ -109,6 +112,8 @@ struct Totals {
     tail_entries: u64,
     checkpoints: usize,
     compacted: usize,
+    /// Checkpoints that moved L0 into L1.
+    promoted: usize,
     collected: usize,
     frames: usize,
     patched: usize,
@@ -134,6 +139,7 @@ impl Totals {
         self.tail_entries += run.tail_entries;
         self.checkpoints += run.checkpoints;
         self.compacted += run.compacted;
+        self.promoted += run.promoted;
         self.collected += run.collected;
         self.frames += run.frames;
         self.patched += run.patched;
@@ -199,6 +205,9 @@ impl World {
                 prefetch_pages: rng.pick(&[0, 4, 16]),
                 checkpoint_entries: rng.pick(&[0, 1, 2, 3, 8]),
                 checkpoint_bytes: rng.pick(&[0, 0, 2048, 1 << 20]),
+                // With S3: every pack there, promotions at every few
+                // checkpoints, now and then, or never.
+                l0_bytes: rng.pick(&[0, 0, 2048, 64 << 10, u64::MAX]),
             },
             cache,
             packs: self.packs.clone(),
@@ -403,6 +412,7 @@ impl World {
                     self.totals.frames += checkpoint.frames;
                     self.totals.patched += checkpoint.patched;
                     self.totals.compacted += checkpoint.compacted;
+                    self.totals.promoted += checkpoint.promoted as usize;
                     self.totals.collected += checkpoint.deleted;
                 }
             }
@@ -584,7 +594,7 @@ impl World {
     }
 
     /// Collect all garbage, as a fresh owner that checkpoints at every
-    /// flush, once every write sent to S3 landed: then only the packs the
+    /// flush and then collects, once every write sent to S3 landed: then only the packs the
     /// head needs are stored, and the manifests it names.
     async fn collect_all(&mut self) -> std::result::Result<(), String> {
         if let Some(packs) = &self.packs {
@@ -603,11 +613,15 @@ impl World {
             let ops = [Op::Set("progress", format!("tick {tick}").into())];
             text(session.flush(&ops).await)?;
         }
+        // The flushes' collections list S3 only around a promotion: one
+        // asked for lists it whatever the head.
+        text(session.state.collect_garbage().await)?;
         let needed = text(session.state.needed_packs().await)?;
-        let stored: std::collections::BTreeSet<String> = match &self.packs {
-            Some(packs) => packs.keys().into_iter().collect(),
-            None => self.memory.packs(),
-        };
+        // L0's packs, in the store, and L1's, in S3.
+        let mut stored = self.memory.packs();
+        if let Some(packs) = &self.packs {
+            stored.extend(packs.keys());
+        }
         let manifests = self.memory.manifests();
         let named = session.state.needed_manifests();
         if manifests != named {

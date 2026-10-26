@@ -7,7 +7,7 @@ five things:
 - how the host offers functions to the guest;
 - `ctx.db.sql`, with SQLite outside the guest;
 - one flush that makes a turn's SQL, pages and records durable together:
-  the state's (v20) tail entry and head, the memory's pages a file beside
+  the state's (v21) tail entry and head, the memory's pages a file beside
   the SQL's;
 - host bindings: operations the host makes itself, such as a model call,
   whose input nothing but the guest's heap keeps (§6).
@@ -182,18 +182,19 @@ two commit points once SQL joined.
 ### The record
 
 ```text
-v20/head = the commit point
+v21/head = the commit point
   id, frame size, version, the checkpoint and the one before, the tail
-v20/tail/<version>/<part>: one turn's mutation
+v21/tail/<version>/<part>: one turn's mutation
     run:               record: the run's progress as JSON // run, program, pending
                                                          // (the outbox), status, outcome
     memory:            record: the memory's as JSON      // meta, memoryLen, file, pages
     memory/<golden>:   paged file over the golden image  // the pages that differ from it
     db:                paged file                        // SQL
     <name>/…:          each extension's records and files
-v20/manifest/<checkpoint>/<part>: a checkpoint's manifest (each file's
+v21/manifest/<checkpoint>/<part>: a checkpoint's manifest (each file's
   frames, every record)
-v20/pack/<checkpoint>/<part>: a checkpoint's pack: frames of 4 pages, values
+v21/pack/l0/<checkpoint>/<part>: a checkpoint's pack: frames of 4 pages, values
+  (with S3, packs past the first few MiB are promoted there, as l1/<checkpoint>)
 ```
 
 - **A turn is one tail entry.** Its SQL pages and its memory's changed

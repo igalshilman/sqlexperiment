@@ -25,9 +25,9 @@ collection. The encodings are in [FORMAT.md](FORMAT.md).
   this owner issued.
 - **One owner at a time.** Restate runs one exclusive handler per object key,
   and fences a former attempt's writes. This crate does not fence. Packs
-  kept beside Restate, in S3 ([`ObjectStoreBlobs`](../src/blobs.rs)), are
+  promoted to L1, in S3 ([`ObjectStoreBlobs`](../src/blobs.rs)), are
   not fenced: there every pack has a name no other put uses
-  ([ARCHITECTURE.md](ARCHITECTURE.md#5-with-packs-in-s3)).
+  ([ARCHITECTURE.md](ARCHITECTURE.md#5-with-l1-in-s3)).
 - **Round trips dominate.** A flush or open should cost one round trip in
   the steady state.
 
@@ -222,15 +222,15 @@ one-thread runtime of its own. It is the only background work.
 
 ## Costs
 
-| Operation        | Round trips                                                                                                              | Writes                             |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| Flush, cached    | 1, the sync                                                                                                              | A tail entry (its parts), the head |
-| Flush, cold      | 1, plus 1 to get the frames (or patches) of the pages it writes, where the state lacks them                              | The same                           |
-| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; in S3, 1 PUT before the flush | A pack, a manifest                 |
-| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes  | The deletes                        |
-| Open, with cache | 1, the head, when nothing changed since this owner's flush                                                               | None                               |
-| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                | None                               |
-| Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                         | None                               |
+| Operation        | Round trips                                                                                                                    | Writes                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| Flush, cached    | 1, the sync                                                                                                                    | A tail entry (its parts), the head |
+| Flush, cold      | 1, plus 1 to get the frames (or patches) of the pages it writes, where the state lacks them                                    | The same                           |
+| Checkpoint       | Up to 3 more, for what the state lacks: frames it rebuilds or patches, ranges it compacts; a promotion, 1 PUT before the flush | A pack, a manifest                 |
+| Collection       | 1 to list the packs and manifests; if any is older than the previous checkpoint, 1 for both manifests, then the deletes        | The deletes                        |
+| Open, with cache | 1, the head, when nothing changed since this owner's flush                                                                     | None                               |
+| Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                      | None                               |
+| Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                               | None                               |
 
 Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
 [cache](../../sql/benches/CACHE_RESULTS.md).
@@ -249,8 +249,8 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   takes no write unless it is opened with that base.
 - **Keys.** Every flush puts at least two keys (a tail entry and the head);
   a namespace holds a key per part of each tail entry kept, a key per 64
-  KiB of each manifest kept (two checkpoints'), and, with packs in Restate,
-  a key per 64 KiB of each pack. A collection lists every key:
+  KiB of each manifest kept (two checkpoints'), and a key per 64 KiB of
+  each pack in L0: all of them without S3, the last few MiB with it. A collection lists every key:
   a round trip, and its deletes.
 - **Fencing.** Restate provides it for the head and the tail: a former
   attempt's writes never land after a newer owner's. Packs beside Restate
@@ -268,7 +268,7 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   checks structure and bounds versions, sizes, counts and names, and every
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
-- **Format.** Only v20, with no migration.
+- **Format.** Only v21, with no migration.
 - **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
   differences from the location before, and zstd over the manifest's body;
   the pages are zstd frames of their own. A zero-copy format (FlatBuffers,
@@ -289,8 +289,9 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   (`tests/campaign.rs`; `STATE_SEEDS=<n>` runs more seeds) mixes changes to
   records, files and logs, random checkpoint thresholds, faults,
   cancellations, crashes, reopens, owners and readers, with packs in
-  Restate (even seeds) or in an S3 that fails as S3 does (odd seeds:
-  uploads lost, done with the response lost, or landing late), and
+  Restate (even seeds) or promoted at random sizes to an S3 that fails as
+  S3 does (odd seeds: uploads lost, done with the response lost, or
+  landing late), and
   compares every reopen and every read with a model; other tests crash at
   every write of a flush, with packs in Restate and in S3, drop a flush
   after every number of polls, and corrupt every stored value. The Restate

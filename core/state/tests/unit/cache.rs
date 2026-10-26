@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    format::{Head, PackId},
+    format::{Head, PackId, Tier},
     simulation::{fresh_namespace_cache, shared_cache},
 };
 
@@ -13,6 +13,7 @@ fn at(id: u64, offset: u64) -> Location {
     let pack = PackId {
         version: 1,
         nonce: id,
+        tier: Tier::L0,
     };
     Location {
         pack,

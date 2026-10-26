@@ -268,6 +268,7 @@ impl Campaign {
                 checkpoint_bytes: rng.pick(&[0, 1 << 20]),
                 inline_record_bytes: rng.pick(&[64, 1024]),
                 prefetch_pages: rng.pick(&[0, 16]),
+                ..StateOptions::default()
             },
             cache: cached.then(fresh_namespace),
             packs: None,
