@@ -368,7 +368,7 @@ async def test_a_statement_that_commits_completes_once_its_writes_are_stored_how
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c)"
     )
     assert backend.unconfirmed == []
-    assert sum(key.startswith("v20/tail/") for key in backend.stored) > 8
+    assert sum(key.startswith("v21/tail/") for key in backend.stored) > 8
     await db.save()
 
 
@@ -445,7 +445,7 @@ async def packs_after_commits(keys):
     for _ in range(100):
         await db.execute("INSERT OR REPLACE INTO t VALUES(1, randomblob(3000))")
     await db.save()
-    return sum(key.startswith("v20/pack/") for key in backend.stored)
+    return sum(key.startswith("v21/pack/") for key in backend.stored)
 
 
 async def test_a_store_that_lists_its_keys_is_collected_and_one_that_cannot_keeps_its_packs():
