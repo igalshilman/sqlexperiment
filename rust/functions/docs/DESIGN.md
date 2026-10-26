@@ -1081,29 +1081,29 @@ file read (~6 KiB), a command (~1.5 KiB of output), an edit, or a written file
 (~3 KiB). The model is a conversation of the host's gateway
 ([LLM.md](LLM.md)): the program sends each step's new messages, which go
 into the scope's database, and the host reads the whole conversation from
-there for each request. Measured on 25 October 2026 (4 vCPUs), on the
-state's frame packs (v20: a tail in Restate, checkpoints now and then):
+there for each request. Measured on 26 October 2026 (4 vCPUs), on the
+state's frame packs (v20: a tail in Restate, checkpoints now and then),
+with a tail entry's pages compressed against the page before the flush:
 
 | Step | Request to the model | Reading it | Stored by the step | Model turn | Tool turn |
 | ---: | -------------------: | ---------: | -----------------: | ---------: | --------: |
-|    1 |              1.7 KiB |    0.51 ms |             9.3 KB |    1.60 ms |   1.75 ms |
-|   10 |               31 KiB |    0.50 ms |             9.2 KB |    1.34 ms |   1.29 ms |
-|   41 |              136 KiB |    0.88 ms |              10 KB |    1.13 ms |   1.65 ms |
-|   98 |              327 KiB |    1.40 ms |             9.0 KB |    1.36 ms |   1.28 ms |
-|  190 |              636 KiB |    2.46 ms |             9.8 KB |    1.29 ms |   1.47 ms |
+|    1 |              1.7 KiB |    0.50 ms |             8.9 KB |    2.13 ms |   1.68 ms |
+|   10 |               31 KiB |    0.53 ms |             7.7 KB |    1.22 ms |   1.37 ms |
+|   98 |              327 KiB |    1.74 ms |             7.4 KB |    1.31 ms |   1.31 ms |
+|  190 |              636 KiB |    2.28 ms |             8.3 KB |    1.36 ms |   1.43 ms |
 
-- **Per step:** 11 KB at the median, whatever the conversation's length: a
+- **Per step:** 9.0 KB at the median, whatever the conversation's length
+  (11 KB when the tail's pages were compressed against the checkpoint's): a
   tail entry with the rows of its new messages and the heap's changed pages,
-  and a head of 20–150 B. A step that folds the memory's log into its file
-  stores up to 24 KB.
-- **Checkpoints:** 17 in 200 steps, further apart as the state grows (steps
-  4, 7, 12, … 167, 196): one is due once the tail holds as many bytes as
-  the packs. Each stores what changed since the one before, 25–98 KB.
-- **The session:** 2.91 MiB stored over 200 steps: 2.01 MiB of tail, 0.90
-  MiB of checkpoints. Neither the heap nor Restate's journal holds the
-  requests.
+  and a head of up to 160 B. A page the program writes at every turn costs
+  each turn only what that turn changed.
+- **Checkpoints:** about 14 in 200 steps, further apart as the state grows:
+  one is due once the tail holds as many bytes as the packs. Each stores
+  what changed since the one before, 36–113 KB.
+- **The session:** 2.63 MiB stored over 200 steps, against 2.91 MiB. Neither
+  the heap nor Restate's journal holds the requests.
 - **Restores:** a new attempt, every 25 steps, restores the run in
-  0.8–1.7 ms (0.98 ms at the median), reading the checkpoint's frames and
+  0.8–2.6 ms (1.06 ms at the median), reading the checkpoint's frames and
   replaying the tail. Before the process turned transparent huge pages off
   (`no_huge_pages`), one in eight took 10–13 ms and the median was 1.27 ms:
   the SQL engine maps a 3 MiB buffer arena for each database it opens, asks
@@ -1111,10 +1111,11 @@ state's frame packs (v20: a tail in Restate, checkpoints now and then):
   2 MiB page.
 - **With the packs in S3** (`cargo bench --bench agent -- s3`, an S3 in
   memory, without its latency): a checkpoint is due once the tail holds 1
-  MiB, so 3 in 200 steps (at 64, 128 and 192), each a pack of 73–75 KB in S3
-  and a manifest of 18–26 KB in Restate. Restate stores 2.34 MiB and S3 0.21
-  MiB; no step stores more than 26 KB in Restate. Heads name more tail
-  entries, up to 300 B.
+  MiB, so 3 in 200 steps (at 64, 128 and 192), each a pack of 72–75 KB in S3
+  and a manifest of 15–17 KB in Restate. Restate stores 1.86 MiB (2.34 MiB
+  with the tail compressed against the checkpoint) and S3 0.21 MiB; no step
+  stores more than 23 KB in Restate. Heads name more tail entries, up to
+  300 B.
 - **Against the state before frame packs** (6ea9e1e, the same bench, the
   same machine, the same day), whose log kept each turn's changes and whose
   file was copy-on-write chunks: 11 KB a step too, 2.25 MiB in all, no step
