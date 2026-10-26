@@ -57,8 +57,7 @@ advanced/gateway/demo.sh
    another tenant's order of the same number is another object, empty.
 
 `MODEL` is the agents' model, such as `openai/gpt-6-luna` with
-`OPENAI_API_KEY` (by default `anthropic/claude-sonnet-5-5`, with
-`ANTHROPIC_API_KEY`).
+`OPENAI_API_KEY` (the default).
 On restate-server 1.7, set `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true` and
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V7=true`.
 

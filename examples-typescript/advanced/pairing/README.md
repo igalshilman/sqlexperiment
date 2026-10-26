@@ -10,7 +10,7 @@ Python, in a sandbox: [`examples-python/advanced/pairing`](../../../examples-pyt
 ```
 you ──▶ pair.ts (a terminal) ──▶ pair/<project> (pi) ──▶ WORKSPACE/<project>: read, write, edit, bash
           ▲   steer, approve        │  plan (a table of its own)
-          └── follow ◀──────────────┤  reviewer/<project>.<task> (Claude, another model): what to fix
+          └── follow ◀──────────────┤  reviewer/<project>.<task> (another model): what to fix
                                     └▶ approval (you) ──▶ shipping/<…> (a workflow): CI, then a pull request
 ```
 
@@ -42,7 +42,7 @@ What it shows:
   on from its last stored step; a shipped change ships once, as the
   workflow is keyed by the tool call.
 
-Run it from `examples-typescript/`, with `ANTHROPIC_API_KEY`; the requests
+Run it from `examples-typescript/`, with `OPENAI_API_KEY`; the requests
 are in [`pairing.ts`](pairing.ts)'s doc comment, and the terminal's
 commands in [`pair.ts`](pair.ts)'s. The coding tools run real commands on
 this machine: run it in a sandbox (a container, a VM).

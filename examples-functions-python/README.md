@@ -28,7 +28,7 @@ on the same runtime: CPython 3.15 in WebAssembly instead of QuickJS
 
 ```sh
 make functions-python                            # from the repository's root; builds CPython for WASI the first time (minutes)
-ANTHROPIC_API_KEY=... target/release/functions   # every function here, on port 9080
+OPENAI_API_KEY=... target/release/functions      # every function here, on port 9080
 npx @restatedev/restate-server                   # Restate, in another terminal
 curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
 curl localhost:8080/counter/alice/add --json 20  # 20, a second later
@@ -40,12 +40,12 @@ SQL database and KV, and run one at a time. Each call starts from the module
 as evaluated: what lasts between calls is in `ctx.db` and `ctx.kv`. Each
 file's header shows how to call it.
 
-| File                             | What                                                                                          |
-| -------------------------------- | --------------------------------------------------------------------------------------------- |
-| [`counter.py`](counter.py)       | **Start here.** A count per key, and a durable one-second timer                               |
-| [`notes.py`](notes.py)           | Notes in SQL, with t-strings: `ctx.db.sql(t"... {value}")`                                    |
-| [`refunds.py`](refunds.py)       | A refund that waits for a manager's approval (`ctx.signal`), and the refunds granted in SQL   |
-| [`researcher.py`](researcher.py) | An AI agent (Claude) that studies a question from three angles at once, with `asyncio.gather` |
+| File                             | What                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`counter.py`](counter.py)       | **Start here.** A count per key, and a durable one-second timer                             |
+| [`notes.py`](notes.py)           | Notes in SQL, with t-strings: `ctx.db.sql(t"... {value}")`                                  |
+| [`refunds.py`](refunds.py)       | A refund that waits for a manager's approval (`ctx.signal`), and the refunds granted in SQL |
+| [`researcher.py`](researcher.py) | An AI agent (GPT) that studies a question from three angles at once, with `asyncio.gather`  |
 
 ## Writing a function
 

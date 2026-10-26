@@ -6,7 +6,7 @@
  * database and its own directory. Tasks run at once, and each picks up where
  * it left off after a crash. Coders run real commands: use a sandbox.
  *
- *   ANTHROPIC_API_KEY=… WORKSPACE=/tmp/coding node intermediate/coding.ts
+ *   OPENAI_API_KEY=… WORKSPACE=/tmp/coding node intermediate/coding.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/coordinator/alice/chat -d 'Write fizzbuzz.py and primes.py, and run them'

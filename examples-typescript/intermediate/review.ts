@@ -7,7 +7,7 @@
  * database and its files in a directory of its own. Coders run real
  * commands: use a sandbox.
  *
- *   ANTHROPIC_API_KEY=… WORKSPACE=/tmp/review node intermediate/review.ts
+ *   OPENAI_API_KEY=… WORKSPACE=/tmp/review node intermediate/review.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/coder/fizzbuzz/build -d 'Write fizzbuzz in TypeScript, with a test'

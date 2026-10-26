@@ -2,7 +2,7 @@
 The research team, each an agent of its own, keyed by the research run (a
 researcher by the run and its topic: ``researcher/r1.2``), with its
 conversation in its object's database: a planner and a critic on Pydantic
-AI, which answer typed; a researcher and a writer on Claude.
+AI, which answer typed; a researcher and a writer on LiteLLM.
 
 Each role is a handler of the agent's own, which the run calls like any
 Restate handler; its conversation goes on from one call to the next, so the
@@ -11,11 +11,11 @@ planner revises the plan it made, and the writer the report it wrote.
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from restate_agents import claude, pydantic_ai
+from restate_agents import litellm, pydantic_ai
 from wiki import read, search
 
 # Pydantic AI's name of the model of the planner and the critic.
-MODEL = "anthropic:claude-sonnet-5-5"
+MODEL = "openai:gpt-6-sol"
 
 
 class Topic(BaseModel):
@@ -67,31 +67,31 @@ RESEARCHER = (
     "You research one topic on Wikipedia: search, read the articles that matter, and answer each question with the "
     "facts you found, citing the articles by title. Say what you could not find."
 )
-researcher = claude.agent("researcher", system=RESEARCHER, tools=[search, read])
+researcher = litellm.agent("researcher", system=RESEARCHER, tools=[search, read])
 
 
 @researcher.handler
 async def investigate(ctx, topic: Topic) -> str:
     """The findings of ``topic``."""
     questions = "\n".join(f"- {q}" for q in topic.questions)
-    return await claude.prompt(ctx, f"Topic: {topic.title}\n{questions}", system=RESEARCHER, tools=[search, read])
+    return await litellm.prompt(ctx, f"Topic: {topic.title}\n{questions}", system=RESEARCHER, tools=[search, read])
 
 
 WRITER = "You write research reports: clear, structured, every claim from the findings, with the sources at the end."
-writer = claude.agent("writer", system=WRITER)
+writer = litellm.agent("writer", system=WRITER)
 
 
 @writer.handler
 async def draft(ctx, brief: Brief) -> str:
     """A report answering the brief's question from its findings."""
     findings = "\n\n".join(f"## {title}\n{found}" for title, found in brief.findings.items())
-    return await claude.prompt(ctx, f"Question: {brief.question}\n\nFindings:\n\n{findings}", system=WRITER)
+    return await litellm.prompt(ctx, f"Question: {brief.question}\n\nFindings:\n\n{findings}", system=WRITER)
 
 
 @writer.handler
 async def revise(ctx, notes: str) -> str:
     """The report, revised as the critic's ``notes`` say."""
-    return await claude.prompt(ctx, f"Revise the report: {notes}\nAnswer with the whole report.", system=WRITER)
+    return await litellm.prompt(ctx, f"Revise the report: {notes}\nAnswer with the whole report.", system=WRITER)
 
 
 reviewing = Agent(

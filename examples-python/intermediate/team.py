@@ -1,5 +1,5 @@
 """
-A team of agents on different frameworks: an editor (Claude) hands research
+A team of agents on different frameworks: an editor (the OpenAI Agents SDK) hands research
 to a researcher (LangGraph) and drafting to a writer (Pydantic AI), and puts
 the piece together.
 
@@ -7,13 +7,13 @@ Each member is an agent of its own, keyed by the editor's key and the task
 (``researcher/alice.lisbon``), with its own conversation: the editor can come
 back to a task, and a crash anywhere resumes where it stopped.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/team.py
+    OPENAI_API_KEY=... uv run intermediate/team.py
     restate deployments register http://localhost:9080
     curl localhost:8080/editor/alice/chat -d 'Write a short guide to Lisbon for a first visit.'
     curl localhost:8080/writer/alice.guide/messages   # what the editor asked the writer (the task's name may differ)
 """
 
-from restate_agents import claude, langgraph, pydantic_ai, serve, subagent
+from restate_agents import langgraph, openai_agents, pydantic_ai, serve, subagent
 
 researcher = langgraph.agent(
     "researcher",
@@ -25,7 +25,7 @@ writer = pydantic_ai.agent(
     system="You write clear, warm prose from the notes you are given. Keep it short.",
 )
 
-editor = claude.agent(
+editor = openai_agents.agent(
     "editor",
     system="You edit a small team: research with the researcher, draft with the writer, then answer with the piece.",
     tools=[

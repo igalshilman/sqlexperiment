@@ -11,8 +11,8 @@ put them together.
 
 | File                                   | What                                                                                                                                                                     |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`chat.py`](basic/chat.py)             | **Start here.** A durable chat agent on Claude (the Anthropic SDK), with a tool                                                                                          |
-| [`frameworks.py`](basic/frameworks.py) | The same agent on each framework: Claude, LiteLLM, LangGraph, Pydantic AI, the OpenAI Agents SDK, ADK                                                                    |
+| [`chat.py`](basic/chat.py)             | **Start here.** A durable chat agent on the OpenAI Agents SDK, with a tool                                                                                               |
+| [`frameworks.py`](basic/frameworks.py) | The same agent on each framework: the OpenAI Agents SDK, LiteLLM, LangGraph, Pydantic AI, Claude, ADK                                                                    |
 | [`memory.py`](basic/memory.py)         | An assistant that remembers facts about you in its own SQL table, through its tools, with a handler of your own                                                          |
 | [`notes.py`](basic/notes.py)           | SQL in a virtual object, with `ctx.db`, and no agent                                                                                                                     |
 | [`follow.py`](basic/follow.py)         | A conversation followed from a terminal as the agent works (`restate_agents.client`); a chat page for it is [`examples-typescript/ui`](../examples-typescript/ui/app.ts) |
@@ -27,7 +27,7 @@ put them together.
 | [`trips.py`](intermediate/trips.py)                 | A travel agent on Pydantic AI: an Agent of your own, an approval before booking, and its plan as typed output                                                   |
 | [`release_notes.py`](intermediate/release_notes.py) | Two models through LiteLLM, in a handler of your own: a cheap one drafts, a strong one reviews, until approved; then a workflow publishes                       |
 | [`router.py`](intermediate/router.py)               | A front desk of your own: a handler asks a model which team handles a message, then asks that team's agent (`ask`)                                              |
-| [`team.py`](intermediate/team.py)                   | A team on three frameworks: an editor (Claude) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                                |
+| [`team.py`](intermediate/team.py)                   | A team on three frameworks: an editor (the OpenAI Agents SDK) hands research to a researcher (LangGraph) and drafting to a writer (Pydantic AI)                 |
 | [`triage.py`](intermediate/triage.py)               | A LangGraph graph of your own: a router hands each message to the billing or the tech team, each with its tools                                                 |
 | [`writer.py`](intermediate/writer.py)               | A LangGraph graph of your own: a writer drafts and a model edits, a person approves (a signal), a workflow publishes                                            |
 | [`analyst.py`](intermediate/analyst.py)             | A data analyst whose code runs in a sandbox (a Modal Sandbox per conversation): the agent's loop here, its tools write and run Python there, and the files last |
@@ -50,7 +50,7 @@ as the agent: [`shop.py`](intermediate/shop.py) for `support.py`,
 
 | Folder                                           | What                                                                                                                                                                                                                                                                        |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`research/`](advanced/research/README.md)       | Deep research, a workflow per run: a planner (Pydantic AI, typed) waits for you to approve its plan or change it; researchers (Claude, on Wikipedia) work the topics at once; a writer drafts and a critic sends the report back until it is good                           |
+| [`research/`](advanced/research/README.md)       | Deep research, a workflow per run: a planner (Pydantic AI, typed) waits for you to approve its plan or change it; researchers (LiteLLM, on Wikipedia) work the topics at once; a writer drafts and a critic sends the report back until it is good                          |
 | [`pairing/`](advanced/pairing/README.md)         | A pair programmer you talk with from a terminal, about a project, for as long as it lasts: its loop in Restate, its tools in a sandbox of the project's; you steer it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve |
 | [`remediation/`](advanced/remediation/README.md) | A supervisor of security fixes, a workflow per finding: an executor proposes a fix in a deadline, a judge audits it, a rejected fix goes up the ladder to a careful executor; a risky fix waits for a person's sign-off; every decision is kept as an audit trail           |
 
@@ -58,7 +58,7 @@ They are built from [`restate_agents`](../python/agents/README.md): an agent
 is a virtual object per conversation, and its tools are plain functions.
 
 ```python
-from restate_agents import claude, serve, tool
+from restate_agents import openai_agents, serve, tool
 
 
 @tool
@@ -67,7 +67,7 @@ async def remember(ctx, fact: str) -> str:
     ...
 
 
-assistant = claude.agent("assistant", tools=[remember])  # chat and messages handlers
+assistant = openai_agents.agent("assistant", tools=[remember])  # chat and messages handlers
 serve(assistant)
 ```
 
@@ -77,7 +77,7 @@ crash runs the call again. Restate's own tools call your services, objects,
 workflows and other agents, and wait for signals:
 
 ```python
-support = claude.agent("support", tools=[call(status), signal("approval", description=...), workflow(refund)])
+support = openai_agents.agent("support", tools=[call(status), signal("approval", description=...), workflow(refund)])
 ```
 
 `notes.py` is SQL alone, with no agent: a
@@ -86,20 +86,21 @@ support = claude.agent("support", tools=[call(status), signal("approval", descri
 ## Run an example
 
 ```sh
-ANTHROPIC_API_KEY=… uv run basic/chat.py                             # the agent, on port 9080
+OPENAI_API_KEY=… uv run basic/chat.py                                # the agent, on port 9080
 npx @restatedev/restate-server                                        # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080   # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
 curl localhost:8080/assistant/alice/messages                          # the conversation so far
 ```
 
-The agents take `MODEL` (`anthropic/<model-id>`), or else Claude Sonnet,
-with `ANTHROPIC_API_KEY` (and so do the advanced ones); `triage.py`, `writer.py` and `trips.py` bring a
-graph or an agent of their own, which names its model. `coder_codex.py` and
-`airline.py` take OpenAI's (their default), with `OPENAI_API_KEY`;
-`oncall.py`, Gemini, with `GOOGLE_API_KEY`; `release_notes.py`, any two of
-LiteLLM's models (`DRAFTER`, `REVIEWER`), by default Claude's; `notes.py`
-needs no key. Each example's docstring has its requests.
+The examples take OpenAI's models, with `OPENAI_API_KEY` (and so do the
+advanced ones): the agents take `MODEL` (`openai/<model-id>`), or else
+GPT-6 Sol; `triage.py`, `writer.py` and `trips.py` bring a graph or an
+agent of their own, which names its model; `release_notes.py`, any two of
+LiteLLM's models (`DRAFTER`, `REVIEWER`). Three are on another provider's
+framework: `coder.py` (Claude Code) with `ANTHROPIC_API_KEY`, `oncall.py`
+(ADK) with `GOOGLE_API_KEY`, and `frameworks.py`, each provider's agent with
+its key. `notes.py` needs no key. Each example's docstring has its requests.
 
 ## Run on Modal
 
@@ -114,7 +115,7 @@ Restate SDK is, and pip installs it with them).
 
 ```sh
 make wheels                                          # at the repository's root: dist/
-uvx modal secret create anthropic ANTHROPIC_API_KEY=…
+uvx modal secret create openai OPENAI_API_KEY=…
 uvx modal deploy intermediate/on_modal.py
 restate deployments register https://<workspace>--restate-support-support.us-east.modal.direct \
     --extra-header "Modal-Key: wk-…" --extra-header "Modal-Secret: ws-…"   # a Modal proxy token

@@ -5,7 +5,7 @@
  * kept in the object's SQL database. If the process dies mid-reply, Restate
  * retries the call and the agent picks up where it left off.
  *
- *   ANTHROPIC_API_KEY=… node basic/chat.ts
+ *   OPENAI_API_KEY=… node basic/chat.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'

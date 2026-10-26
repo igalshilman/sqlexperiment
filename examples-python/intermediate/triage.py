@@ -5,7 +5,7 @@ instructions and tools. The graph's state (the conversation, and the team
 that answers it) is stored in the object's database at each step: a crash
 mid-turn carries on from the step it was at.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/triage.py
+    OPENAI_API_KEY=... uv run intermediate/triage.py
     restate deployments register http://localhost:9080
     curl localhost:8080/desk/alice/chat -d 'I was charged twice for order 103, $30 each time'
     curl localhost:8080/desk/alice/chat -d 'And the app crashes when I log in'
@@ -15,14 +15,14 @@ mid-turn carries on from the step it was at.
 from collections.abc import Callable
 from typing import Literal
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import tools_condition
 from pydantic import BaseModel
 from restate_agents import langgraph, serve, tool
 
-model = ChatAnthropic(model="claude-sonnet-5-5")
+model = ChatOpenAI(model="gpt-6-sol")
 
 
 @tool

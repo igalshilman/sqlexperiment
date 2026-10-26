@@ -5,7 +5,7 @@
  * message to the next. The agent's loop runs here, in Restate: each step of
  * it is stored, so a crash carries on from the last one, mid-message.
  *
- *   ANTHROPIC_API_KEY=… node advanced/pairing/pairing.ts
+ *   OPENAI_API_KEY=… node advanced/pairing/pairing.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   node advanced/pairing/pair.ts fizzbuzz       # in another terminal: talk with it
@@ -20,12 +20,11 @@
  *
  * The pair's coding tools run real commands, on this machine, in
  * WORKSPACE/<project> (/tmp/restate-pairing by default): run it in a sandbox
- * (a container, a VM). REVIEWER sets the reviewer's model (Claude Opus by
+ * (a container, a VM). REVIEWER sets the reviewer's model (GPT-6 Astra by
  * default).
  */
 import { handlers } from 'restate-fns';
 import { object, serve, signal, subagent, workflow } from 'restate-agents';
-import * as claude from 'restate-agents/claude';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { Change, shipping } from './shipping.ts';
@@ -33,9 +32,9 @@ import { done, plan, PLAN, tasksOf } from './tools.ts';
 
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-pairing';
 
-const reviewer = claude.agent({
+const reviewer = pi.agent({
   name: 'reviewer',
-  model: process.env.REVIEWER ?? 'anthropic/claude-opus-5-5',
+  model: process.env.REVIEWER ?? 'openai/gpt-6-astra',
   system:
     'You review code changes. Read the diff you are given, and answer with what to fix, ' +
     'most important first: bugs, missing tests, unclear code. If there is nothing to fix, say so.',

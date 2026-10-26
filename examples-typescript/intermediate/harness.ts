@@ -6,7 +6,7 @@
  * keep its context short; and `reset` starts the conversation over, with a
  * note to carry on (both on pi's Harness directly, `withPi`).
  *
- *   ANTHROPIC_API_KEY=… node intermediate/harness.ts
+ *   OPENAI_API_KEY=… node intermediate/harness.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/assistant/alice/configure --json '{"persona": "You answer as a pirate."}'
@@ -16,7 +16,7 @@
  *   curl localhost:8080/assistant/alice/messages
  *
  * A model of another provider takes its API key, such as
- * `{"model": "openai/gpt-6-luna"}` with OPENAI_API_KEY.
+ * `{"model": "anthropic/claude-sonnet-5-5"}` with ANTHROPIC_API_KEY.
  */
 import type * as restate from 'restate-fns';
 import { object, serve, tool } from 'restate-agents';

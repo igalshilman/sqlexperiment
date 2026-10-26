@@ -3,7 +3,7 @@
  * day from now, a one-way call Restate keeps until then. Nothing runs in the
  * meantime, and a restart changes nothing.
  *
- *   ANTHROPIC_API_KEY=… node intermediate/followup.ts
+ *   OPENAI_API_KEY=… node intermediate/followup.ts
  *   npx @restatedev/restate-server   # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:8080/concierge/alice/chat -d 'My order 103 is late. Can you keep an eye on it?'
@@ -13,7 +13,7 @@
  */
 import * as restate from '@restatedev/restate-sdk';
 import { send, serve } from 'restate-agents';
-import * as claude from 'restate-agents/claude';
+import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
 // A stand-in for an email or a message to the customer.
@@ -26,7 +26,7 @@ const checkins = restate.service({
   },
 });
 
-const concierge = claude.agent({
+const concierge = pi.agent({
   name: 'concierge',
   system: 'You are a concierge for an online shop. When a customer needs it, schedule a check-in.',
   tools: [

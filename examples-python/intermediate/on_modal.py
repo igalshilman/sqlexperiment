@@ -5,7 +5,7 @@ again from the start, so it cannot work over HTTP/1.1's request-response
 mode, which is all Modal's web endpoints speak).
 
     make wheels                                                  # at the repository's root: dist/
-    uvx modal secret create anthropic ANTHROPIC_API_KEY=...
+    uvx modal secret create openai OPENAI_API_KEY=...
     uvx modal deploy intermediate/on_modal.py
     restate deployments register https://<workspace>--restate-support-support.us-east.modal.direct \\
         --extra-header "Modal-Key: wk-..." --extra-header "Modal-Secret: ws-..."
@@ -37,7 +37,7 @@ app = modal.App("restate-support", image=image)
     h2_enabled=True,
     min_containers=1,  # Restate needs the deployment up: a Server with no containers answers 503
     exit_grace_period=600,  # an agent's turn runs on, while a container is replaced
-    secrets=[modal.Secret.from_name("anthropic")],
+    secrets=[modal.Secret.from_name("openai")],
     env={"RESTATE_SQL_CACHE_FILE": "/tmp/restate-sql.cache"},  # a cache: each container starts cold
 )
 class Support:

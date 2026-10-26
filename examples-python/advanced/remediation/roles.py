@@ -61,7 +61,7 @@ def _asked(task: Task) -> str:
     return f"Finding: {task.finding.model_dump_json()}{rejected}"
 
 
-fast = Agent("anthropic:claude-haiku-5-5", instructions=EXECUTOR + " Be quick.", tools=TOOLS)
+fast = Agent("openai:gpt-6-luna", instructions=EXECUTOR + " Be quick.", tools=TOOLS)
 fast_executor = pydantic_ai.agent("fast_executor", fast)
 
 
@@ -72,7 +72,7 @@ async def propose_fast(ctx, task: Task) -> Fix:
 
 
 careful = Agent(
-    "anthropic:claude-sonnet-5-5",
+    "openai:gpt-6-sol",
     instructions=EXECUTOR + " Check the versions and the advisory yourself; prefer a change with low risk.",
     tools=TOOLS,
 )
@@ -86,7 +86,7 @@ async def propose_carefully(ctx, task: Task) -> Fix:
 
 
 auditing = Agent(
-    "anthropic:claude-sonnet-5-5",
+    "openai:gpt-6-sol",
     instructions=(
         "You audit security fixes before they are made: accept one that fixes the finding (the version is past the "
         "first fixed one), changes nothing else, and can be rolled back; reject anything else, saying why."

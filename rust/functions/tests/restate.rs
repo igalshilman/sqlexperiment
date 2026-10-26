@@ -163,7 +163,7 @@ fn workspaces() -> &'static std::path::Path {
     DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
 }
 
-/// Serve `programs` with a scripted Claude as `llm` and `record` as
+/// Serve `programs` with a scripted model as `llm` and `record` as
 /// bindings, and `Doubler` and `workspace`, and register them with the
 /// server.
 async fn serve_programs(programs: &Arc<Programs>) -> u16 {
@@ -177,7 +177,7 @@ async fn serve_programs(programs: &Arc<Programs>) -> u16 {
         .unwrap()
         .port();
     let cache = functions::page_cache().await.unwrap();
-    let llm = Llm::new().provider("anthropic", Provider::local(fakes::Claude));
+    let llm = Llm::new().provider("openai", Provider::local(fakes::Model));
     let extensions = Extensions::new().with("llm", llm).with("record", Record);
     let budget = functions::Budget::from_env().unwrap();
     let endpoint = functions::bind(Endpoint::builder(), programs, &cache, &budget, &extensions)

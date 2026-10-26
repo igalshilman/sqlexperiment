@@ -11,10 +11,10 @@ question ──▶ planner (Pydantic AI) ──▶ plan ──▶ review ──�
                                                  │ approved
                          ┌───────────────────────┼───────────────────────┐
                          ▼                       ▼                       ▼
-               researcher r1.0          researcher r1.1          researcher r1.2     (Claude, on Wikipedia, at once)
+               researcher r1.0          researcher r1.1          researcher r1.2     (LiteLLM, on Wikipedia, at once)
                          └───────────────────────┼───────────────────────┘
                                                  ▼
-                              writer (Claude) ⇄ critic (Pydantic AI)  ──▶ report
+                              writer (LiteLLM) ⇄ critic (Pydantic AI)  ──▶ report
 ```
 
 | File                         | What                                                                                      |
@@ -41,5 +41,5 @@ What it shows:
   carries on from its last stored step. Cancel the run, and the calls it
   waits on are cancelled with it.
 
-Run it from `examples-python/`, with `ANTHROPIC_API_KEY`; the requests are in
+Run it from `examples-python/`, with `OPENAI_API_KEY`; the requests are in
 [`research.py`](research.py)'s docstring.

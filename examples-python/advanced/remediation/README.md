@@ -34,6 +34,6 @@ What it shows:
 - **Exactly once, outside**: the ticket and the pull request are opened in
   `ctx.run` steps of their services, so a retried call opens no second one.
 
-Run it from `examples-python/`, with `ANTHROPIC_API_KEY`; the requests are in
+Run it from `examples-python/`, with `OPENAI_API_KEY`; the requests are in
 [`remediation.py`](remediation.py)'s docstring. `DEADLINE_SECONDS=5` makes the
 fast executor time out, to see the ladder at work.

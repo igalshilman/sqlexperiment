@@ -1,17 +1,17 @@
-// A shop assistant: Claude, with the shop's functions as its tools. It looks
+// A shop assistant: a model, with the shop's functions as its tools. It looks
 // up stock and the customer's balance, and buys through `checkout`. The key
 // is the customer, and the conversation is in its database: each message
 // continues it.
 //
-// The agent loop is plain JavaScript. While it waits on Claude or on a tool,
+// The agent loop is plain JavaScript. While it waits on the model or a tool,
 // the loop is saved with the rest of memory: a crash resumes it, and a model
 // call already answered is not made again.
 //
-//   ANTHROPIC_API_KEY=... target/release/functions
+//   OPENAI_API_KEY=... target/release/functions
 //   curl localhost:8080/inventory/widget/restock --json 5
 //   curl localhost:8080/payments/alice/deposit --json 100
 //   curl localhost:8080/assistant/alice/chat --json '"Buy two widgets, if I can afford them"'
-const MODEL = 'anthropic/claude-opus-5-5';
+const MODEL = 'openai/gpt-6-sol';
 const PRICES = { widget: 10, gadget: 30, gizmo: 5 };
 
 const TOOLS = [
@@ -84,7 +84,7 @@ export async function chat(message, ctx) {
     model: MODEL,
     system: `You are the shop assistant of ${customer}. Use the tools to answer and to buy.`,
     tools: TOOLS,
-    options: { output_config: { effort: 'low' } },
+    options: { reasoning_effort: 'low' },
   });
   let next = { role: 'user', content: message };
   for (let step = 0; step < 10; step++) {

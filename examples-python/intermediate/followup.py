@@ -3,7 +3,7 @@ An agent that follows up later: it schedules a check-in with the customer a
 day from now, a one-way call Restate keeps until then. Nothing runs in the
 meantime, and a restart changes nothing.
 
-    ANTHROPIC_API_KEY=... uv run intermediate/followup.py
+    OPENAI_API_KEY=... uv run intermediate/followup.py
     restate deployments register http://localhost:9080
     curl localhost:8080/concierge/alice/chat -d 'My order 103 is late. Can you keep an eye on it?'
 
@@ -15,9 +15,9 @@ import os
 from datetime import timedelta
 
 from checkins import checkin, checkins
-from restate_agents import claude, send, serve
+from restate_agents import openai_agents, send, serve
 
-concierge = claude.agent(
+concierge = openai_agents.agent(
     "concierge",
     system="You are a concierge for an online shop. When a customer needs it, schedule a check-in.",
     tools=[
