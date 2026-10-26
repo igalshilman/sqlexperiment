@@ -520,13 +520,16 @@ fn effects_commit_with_their_transaction() -> Result<()> {
 /// Records under the default durability: set in the turn's mutation, unchanged
 /// until the save makes them durable, discarded with a dropped session. A
 /// large one is a value of its own in a pack, which a collection deletes once
-/// no checkpoint the head names needs it.
+/// a promotion moved what else lives in it, and no checkpoint the head names
+/// needs it.
 #[test]
 fn records_flush_at_save() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
+        // A promotion once L0 holds 4 KiB: about every other checkpoint here.
         let options = || StateOptions {
             checkpoint_entries: 1,
+            l0_bytes: 4096,
             ..StateOptions::default()
         };
         let mut db = Db::open(store.clone(), options()).await?;
@@ -560,8 +563,8 @@ fn records_flush_at_save() -> Result<()> {
         db.mutation().set(&large, Bytes::from_static(b"two"))?;
         db.save().await?;
         // The replaced value is garbage once no checkpoint the head names
-        // holds it: its pack, mostly dead, moves what lives in it into the
-        // next, and two checkpoints later the flush's collection deletes it.
+        // holds it: a promotion moves what lives in its pack into its own,
+        // and two checkpoints later the flush's collection deletes it.
         let mut db = Db::open(store.clone(), options()).await?;
         assert_eq!(db.state().record("large").get(), &b"two"[..]);
         let small = db.state().record("small");

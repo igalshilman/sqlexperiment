@@ -105,7 +105,7 @@ fn noise(n: u8, len: usize) -> Bytes {
 
 /// A truncated entry leaves the tail with the checkpoint after the next, and
 /// is in no checkpoint since: the pack that held it, mostly dead, is
-/// compacted into a later one, then deleted.
+/// compacted by a promotion, then deleted.
 #[test]
 fn a_truncated_entry_is_dropped_by_checkpoints() -> Result<()> {
     futures::executor::block_on(async {
@@ -133,9 +133,13 @@ fn a_truncated_entry_is_dropped_by_checkpoints() -> Result<()> {
             mutation.set(&state.record("n"), Bytes::from(vec![n]))?;
             checkpoints.push(mutation.flush().await?.checkpoint.expect("a checkpoint"));
         }
-        assert_eq!(checkpoints[0].compacted, 1, "{checkpoints:?}");
-        assert!(checkpoints[0].pack_bytes < 10_000, "{checkpoints:?}");
-        assert_eq!(checkpoints[1].deleted, 1, "{checkpoints:?}");
+        // The next checkpoint's manifest drops the entry; the one after
+        // finds its pack mostly dead and promotes, moving what is live.
+        assert!(!checkpoints[0].promoted, "{checkpoints:?}");
+        assert!(checkpoints[1].promoted, "{checkpoints:?}");
+        assert_eq!(checkpoints[1].compacted, 1, "{checkpoints:?}");
+        assert!(checkpoints[1].pack_bytes < 10_000, "{checkpoints:?}");
+        assert_eq!(checkpoints[2].deleted, 1, "{checkpoints:?}");
         assert_eq!(store.tail_entries(), BTreeSet::from([4, 5]));
         assert!(store.stored_bytes() < 20_000, "{}", store.stored_bytes());
         let reopened = State::open(store).await?.log("turns");

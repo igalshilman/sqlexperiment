@@ -202,8 +202,11 @@ impl Known {
     /// The bytes `range` of the pack `pack`, if the monitor sees it.
     fn pack_range(&self, pack: PackId, range: Range<u64>) -> Option<Bytes> {
         let key = pack.key();
-        if pack.tier == Tier::L1 {
-            return self.external.as_ref()?.peek(&key, range);
+        // L1 is in S3 where there is one, else in Restate beside L0.
+        if let Some(external) = &self.external
+            && pack.tier == Tier::L1
+        {
+            return external.peek(&key, range);
         }
         let whole = whole(self.packs.get(&key)?)?;
         let range = range.start as usize..range.end as usize;
@@ -322,9 +325,9 @@ impl Known {
     }
 
     /// What a tail entry of `head` compresses page `page` of the file
-    /// `name` against: the page as its checkpoint holds it (its patch, else
-    /// its frame), else its base's page; `None` where the monitor does not
-    /// see the checkpoint.
+    /// `name` against: the page as its checkpoint's frame in L1 holds it,
+    /// else its base's page; `None` where the monitor does not see the
+    /// checkpoint.
     fn reference(
         &mut self,
         head: &Head,
@@ -338,19 +341,14 @@ impl Known {
         };
         let index = page / head.frame_pages;
         let file = self.manifest(&checkpoint)?.files.get(name);
-        let patch = file.and_then(|file| file.patches.get(&page)).copied();
         let stored = file.and_then(|file| file.frames.get(index as usize).copied().flatten());
-        let stored = match stored {
+        match stored {
             Some(at) => {
                 let frame = self.frame(head.frame_pages, at, base, index)?;
                 let at = ((page % head.frame_pages) * PAGE) as usize;
-                frame.slice(at..at + PAGE as usize)
+                Some(frame.slice(at..at + PAGE as usize))
             }
-            None => based(),
-        };
-        match patch {
-            Some(at) => decode_page(&self.pack_range(at.pack, at.range())?, &stored).ok(),
-            None => Some(stored),
+            None => Some(based()),
         }
     }
 
@@ -418,8 +416,11 @@ impl Known {
                     self.violation(format!("head {v}: {what} does not decode"));
                 }
             }
-            for (&page, &at) in &file.patches {
-                let what = format!("patch of page {page} of {name}");
+            for (&page, &at) in &file.pages {
+                let Some(at) = at else {
+                    continue;
+                };
+                let what = format!("page {page} of {name}, in L0");
                 let Some(base) = &base else {
                     continue;
                 };

@@ -227,13 +227,13 @@ fn noise(seed: u64, pages: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Small changes to a page, a checkpoint each flush, patch its frame rather
-/// than rewrite it, and the tail compresses the next change against the
-/// patched page; a frame rewritten whole is rebuilt, dropping its patches.
-/// The file reads the same in the session and reopened, small enough to be
-/// fetched whole on open or not.
+/// The first checkpoint promotes the file into frames; later ones copy the
+/// pages the tail wrote into L0, as the tail wrote them, compressed against
+/// their frame, so a small change stays small. The file reads the same in
+/// the session and reopened, small enough to be fetched whole on open or
+/// not.
 #[test]
-fn checkpoints_patch_frames_a_few_pages_change() -> Result<()> {
+fn checkpoints_copy_the_pages_written_into_l0() -> Result<()> {
     futures::executor::block_on(async {
         for pages in [8, 64] {
             let store = Arc::new(MemoryKv::default());
@@ -271,23 +271,23 @@ fn checkpoints_patch_frames_a_few_pages_change() -> Result<()> {
                     }
                 }
             }
-            let shape: Vec<Option<(usize, usize)>> = (reports.iter())
-                .map(|report| (report.checkpoint.as_ref()).map(|c| (c.frames, c.patched)))
+            let shape: Vec<Option<(bool, usize, usize)>> = (reports.iter())
+                .map(|report| report.checkpoint.as_ref())
+                .map(|c| c.map(|c| (c.promoted, c.frames, c.pages)))
                 .collect();
             // A checkpoint holds the flushes before its own: the one at
-            // round 1 the file, the one at round 7 the frame round 6 rewrote.
-            let mut expected = vec![None, Some((pages / 4, 0))];
-            expected.extend([Some((0, 1)); 5]);
-            expected.push(Some((1, 0)));
-            expected.extend([Some((0, 1)); 4]);
+            // round 1 the file, into frames; then the page each flush wrote,
+            // and at round 7 the four round 6 rewrote, into L0.
+            let mut expected = vec![None, Some((true, pages / 4, 0))];
+            expected.extend([Some((false, 0, 1)); 5]);
+            expected.push(Some((false, 0, 4)));
+            expected.extend([Some((false, 0, 1)); 4]);
             assert_eq!(shape, expected, "{pages} pages");
-            for (round, report) in reports.iter().enumerate().skip(2) {
-                if round != 6 {
-                    assert!(
-                        report.entry_bytes < 200,
-                        "{pages} pages, round {round}: {report:?}"
-                    );
-                }
+            for (round, report) in reports.iter().enumerate().take(6).skip(2) {
+                assert!(
+                    report.entry_bytes < 200,
+                    "{pages} pages, round {round}: {report:?}"
+                );
             }
         }
         Ok(())

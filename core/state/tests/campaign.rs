@@ -81,7 +81,7 @@ fn random_faults_never_lose_an_acknowledged_flush_or_split_one() {
                 && t.compacted > 0
                 && t.collected > 0
                 && t.frames > 0
-                && t.patched > 0
+                && t.pages > 0
                 && t.reads_beside > 0,
             "{t:?}"
         );
@@ -108,7 +108,8 @@ struct Totals {
     handovers: usize,
     requests_checked: usize,
     /// Tail entries put; checkpoints adopted, packs they compacted, and
-    /// packs deleted as garbage; frames checkpoints rewrote, and patched.
+    /// packs deleted as garbage; frames promotions rebuilt, and pages
+    /// checkpoints copied into L0.
     tail_entries: u64,
     checkpoints: usize,
     compacted: usize,
@@ -116,7 +117,7 @@ struct Totals {
     promoted: usize,
     collected: usize,
     frames: usize,
-    patched: usize,
+    pages: usize,
     /// Reads by readers beside the owner, after it flushed.
     reads_beside: usize,
     /// Garbage collections by the owner or a worker beside it, faulty ones
@@ -142,7 +143,7 @@ impl Totals {
         self.promoted += run.promoted;
         self.collected += run.collected;
         self.frames += run.frames;
-        self.patched += run.patched;
+        self.pages += run.pages;
         self.reads_beside += run.reads_beside;
         self.collections += run.collections;
         self.s3_faults += run.s3_faults;
@@ -410,7 +411,7 @@ impl World {
                     self.adopted += 1;
                     self.totals.checkpoints += 1;
                     self.totals.frames += checkpoint.frames;
-                    self.totals.patched += checkpoint.patched;
+                    self.totals.pages += checkpoint.pages;
                     self.totals.compacted += checkpoint.compacted;
                     self.totals.promoted += checkpoint.promoted as usize;
                     self.totals.collected += checkpoint.deleted;

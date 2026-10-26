@@ -23,16 +23,17 @@
 //! the private `format` and `store` modules, and `docs/ARCHITECTURE.md`). A flush
 //! puts its mutation as one entry of a *tail* in Restate, then the *head*,
 //! and syncs once: one round trip, which Restate fences. Now and then
-//! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as
-//! a *checkpoint*: the frames of pages the tail changed, and the values it
-//! set, into one *pack*, and a manifest of where every frame and value is,
-//! in Restate. Its head then names the checkpoint, and drops the tail it
-//! covered. Packs are tiered: a checkpoint's pack goes to *L0*, in Restate's
-//! state, until L0 holds [`StateOptions::l0_bytes`]; then one goes to *L1*,
-//! a [`blobs::BlobStore`] (S3, through [`Open::checkpoints`]), with
-//! everything L0 held. Without an L1, every pack stays in Restate. Pack
-//! names are unique, and packs never change, so S3 needs no fencing, nor
-//! conditional puts.
+//! ([`StateOptions::checkpoint_entries`]), a flush first writes a
+//! *checkpoint*: the pages the tail wrote, copied as they are into a new
+//! *pack* in L0, in Restate's state, and a manifest of where every page,
+//! frame and value is, in Restate. Its head then names the checkpoint, and
+//! drops the tail it covered. Once L0 holds as much as L1 (at most
+//! [`StateOptions::l0_bytes`]), a checkpoint *promotes* instead: it rebuilds
+//! every frame L0 changed into a pack in L1, in a [`blobs::BlobStore`] (S3,
+//! through [`Open::checkpoints`]) or in Restate too. Every page the tail and
+//! L0 hold is compressed against its frame in L1, so only a promotion
+//! decodes one. Pack names are unique, and packs never change, so S3 needs
+//! no fencing, nor conditional puts.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
@@ -157,23 +158,22 @@ pub struct StateOptions {
     /// Bytes of a record or log entry a checkpoint's manifest holds; a
     /// larger one is a value of its own in the pack.
     pub inline_record_bytes: usize,
-    /// Every frame and patch of a file without a base, of at most this many
+    /// Every frame and L0 page of a file without a base, of at most this many
     /// pages, is fetched at open, alongside the manifest's values.
     pub prefetch_pages: u64,
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
-    /// ... or this many bytes; 0 never does by size. A checkpoint into L0
-    /// (Restate) is due at most at the bytes L0 and the manifest hold, but at
-    /// least a frame's: it costs only its bytes, and spares the tail's,
-    /// though a round trip or two too. One into L1 (S3) is due at exactly
-    /// these.
+    /// ... or this many bytes; 0 never does by size; at most the bytes L0
+    /// and the manifest hold, but at least a frame's. A checkpoint copies
+    /// the tail into L0, in Restate, and costs only its bytes, and the
+    /// manifest's, though a round trip or two too.
     pub checkpoint_bytes: u64,
-    /// With packs in S3 ([`Open::checkpoints`]), a checkpoint's pack goes to
-    /// L0, in Restate, until the packs there hold this many bytes; the
-    /// checkpoint after that puts its pack in S3, and moves everything L0
-    /// holds into it. 0 puts every checkpoint in S3; without S3, every
-    /// pack stays in Restate.
+    /// The most bytes L0 holds, in Restate, before a checkpoint promotes it:
+    /// rebuilds the frames its pages changed into L1, in S3 with
+    /// [`Open::checkpoints`], else in Restate too. A promotion happens once
+    /// L0 holds as much as L1, but at least a frame's bytes, and at most
+    /// these.
     pub l0_bytes: u64,
 }
 
@@ -185,7 +185,7 @@ impl Default for StateOptions {
             prefetch_pages: 16,
             checkpoint_entries: 128,
             checkpoint_bytes: 1 << 20,
-            l0_bytes: 4 << 20,
+            l0_bytes: 1 << 20,
         }
     }
 }
@@ -589,9 +589,9 @@ impl Open {
         Self { options, ..self }
     }
 
-    /// Keep the bulk of the checkpoints in `packs`, S3 say
-    /// ([`blobs::ObjectStoreBlobs`]), as L1: the latest few go to Restate
-    /// first ([`StateOptions::l0_bytes`]). Every state of the namespace must.
+    /// Keep L1 in `packs`, S3 say ([`blobs::ObjectStoreBlobs`]): the frames
+    /// promotions rebuild, rather than in Restate beside L0
+    /// ([`StateOptions::l0_bytes`]). Every state of the namespace must.
     pub fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
         Self {
             packs: Some(packs),

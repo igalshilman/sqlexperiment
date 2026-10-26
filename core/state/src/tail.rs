@@ -1,6 +1,7 @@
 //! The requests a state makes: the head, the tail and the checkpoints'
 //! manifests in Restate, and the packs in two tiers: L0 in Restate
-//! ([`KvBlobs`], by part), L1 in S3 (a [`BlobStore`], if there is one).
+//! ([`KvBlobs`], by part), and L1 in S3 (a [`BlobStore`]) where there is
+//! one, else in Restate too.
 //!
 //! **A flush** puts its tail entry and the head, then syncs: one round trip,
 //! which Restate fences. A flush that adopts a checkpoint deletes, in the
@@ -21,8 +22,7 @@
 use crate::{
     blobs::{BlobStore, KV_PART, KvBlobs},
     format::{
-        Checkpoint, Entry, HEAD_KEY, Head, L0_PREFIX, Manifest, PACK_PREFIX, PackId, Tier,
-        parse_tail_key,
+        Checkpoint, Entry, HEAD_KEY, Head, Manifest, PACK_PREFIX, PackId, Tier, parse_tail_key,
     },
     kv::KvStore,
 };
@@ -33,33 +33,32 @@ use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 /// The stores of a state: see the module documentation.
 pub(crate) struct Tiered {
     pub restate: Arc<dyn KvStore>,
-    /// L0: the packs in Restate, read by part.
-    l0: KvBlobs,
-    /// L1: the packs in S3, where there is one.
-    l1: Option<Arc<dyn BlobStore>>,
+    /// The packs in Restate, L0's and, without S3, L1's: read by part.
+    packs: KvBlobs,
+    /// L1's packs, where they are in S3.
+    s3: Option<Arc<dyn BlobStore>>,
     manifests: KvBlobs,
 }
 
 impl Tiered {
-    pub fn new(restate: Arc<dyn KvStore>, l1: Option<Arc<dyn BlobStore>>) -> Self {
+    pub fn new(restate: Arc<dyn KvStore>, s3: Option<Arc<dyn BlobStore>>) -> Self {
         Self {
-            l0: KvBlobs::new(restate.clone()),
-            l1,
+            packs: KvBlobs::new(restate.clone()),
+            s3,
             manifests: KvBlobs::manifests(restate.clone()),
             restate,
         }
     }
 
-    /// Whether there is an L1 for packs to move to.
-    pub fn has_l1(&self) -> bool {
-        self.l1.is_some()
+    /// Whether `pack` is in Restate: in L0, or in L1 without S3.
+    fn in_restate(&self, pack: PackId) -> bool {
+        pack.tier == Tier::L0 || self.s3.is_none()
     }
 
-    fn store(&self, tier: Tier) -> io::Result<&dyn BlobStore> {
-        match tier {
-            Tier::L0 => Ok(&self.l0),
-            Tier::L1 => (self.l1.as_deref())
-                .ok_or_else(|| io::Error::other("a pack in L1, which this state has no store for")),
+    fn store(&self, pack: PackId) -> &dyn BlobStore {
+        match &self.s3 {
+            Some(s3) if !self.in_restate(pack) => s3.as_ref(),
+            _ => &self.packs,
         }
     }
 
@@ -85,7 +84,7 @@ impl Tiered {
     /// Bytes `range` of `pack`.
     pub async fn get(&self, pack: PackId, range: Range<u64>) -> io::Result<Bytes> {
         let key = pack.key();
-        (self.store(pack.tier)?.get_range(&key, range).await?).ok_or_else(|| {
+        (self.store(pack).get_range(&key, range).await?).ok_or_else(|| {
             io::Error::other(format!(
                 "{key} is gone: the owner collected it since this state opened"
             ))
@@ -93,16 +92,16 @@ impl Tiered {
     }
 
     /// Bytes of the unit a read of `pack` fetches whole, where there is
-    /// one: a part, for a pack in L0.
+    /// one: a part, for a pack in Restate.
     pub fn block(&self, pack: PackId) -> Option<u64> {
-        (pack.tier == Tier::L0).then_some(KV_PART)
+        self.in_restate(pack).then_some(KV_PART)
     }
 
-    /// Block `index` of `pack`, in L0 (see [`Self::block`]): shorter at the
-    /// pack's end.
+    /// Block `index` of `pack`, in Restate (see [`Self::block`]): shorter
+    /// at the pack's end.
     pub async fn get_block(&self, pack: PackId, index: u64) -> io::Result<Bytes> {
         let key = pack.key();
-        (self.l0.part(&key, index).await?).ok_or_else(|| {
+        (self.packs.part(&key, index).await?).ok_or_else(|| {
             io::Error::other(format!(
                 "{key} is gone: the owner collected it since this state opened"
             ))
@@ -134,7 +133,7 @@ impl Tiered {
     }
 
     pub async fn put_pack(&self, pack: PackId, body: Bytes) -> io::Result<()> {
-        self.store(pack.tier)?.put(&pack.key(), body).await
+        self.store(pack).put(&pack.key(), body).await
     }
 
     /// Put a flush's tail entry (`parts`) and its head, and delete the tail
@@ -177,10 +176,10 @@ impl Tiered {
     /// of checkpoints older than its previous one: see the module
     /// documentation. How many packs.
     ///
-    /// L1's packs change only at a promotion, so S3 is listed (a request
-    /// billed) only when the head's checkpoint or the previous one is in L1,
-    /// or with `all`: a checkpoint into L0 lists Restate alone. What L0's
-    /// checkpoints leave dead in L1 waits for the next promotion.
+    /// L1 changes only at a promotion, so S3 is listed (a request billed)
+    /// only when the head's checkpoint or the previous one is a promotion,
+    /// or with `all`: a checkpoint into L0 lists Restate alone. A pack in
+    /// S3 that a crashed promotion put waits for the next.
     pub async fn collect_garbage(&self, head: &Head, all: bool) -> io::Result<usize> {
         let Some(previous) = head.previous else {
             return Ok(0);
@@ -191,20 +190,20 @@ impl Tiered {
             .any(|checkpoint| checkpoint.pack.tier == Tier::L1);
         // One listing of Restate's keys finds the manifests and L0's packs;
         // S3's, L1's. A store that cannot list keeps its garbage.
-        let in_l1 = async {
-            match &self.l1 {
-                Some(l1) if all || promoted => unlisted(l1.list(PACK_PREFIX).await),
+        let in_s3 = async {
+            match &self.s3 {
+                Some(s3) if all || promoted => unlisted(s3.list(PACK_PREFIX).await),
                 _ => Ok(Vec::new()),
             }
         };
-        let (keys, in_l1) =
-            futures::try_join!(async { unlisted(self.restate.keys().await) }, in_l1)?;
-        let in_l0 = self.l0.listed(&keys, L0_PREFIX);
+        let (keys, in_s3) =
+            futures::try_join!(async { unlisted(self.restate.keys().await) }, in_s3)?;
+        let in_restate = self.packs.listed(&keys, "");
         let older = |id: &PackId| id.version < previous.version();
         let manifests: BTreeSet<String> = (self.manifests.listed(&keys, "").into_iter())
             .filter(|name| PackId::manifest_version(name).is_some_and(|v| v < previous.version()))
             .collect();
-        let older: Vec<(PackId, String)> = (in_l0.into_iter().chain(in_l1))
+        let older: Vec<(PackId, String)> = (in_restate.into_iter().chain(in_s3))
             .filter_map(|key| Some((PackId::parse(&key)?, key)))
             .filter(|(id, _)| older(id))
             .collect();
@@ -231,17 +230,17 @@ impl Tiered {
             }
         }
         let doomed: BTreeSet<&str> = (garbage.iter())
-            .filter(|(id, _)| id.tier == Tier::L0)
+            .filter(|(id, _)| self.in_restate(*id))
             .map(|(_, key)| key.as_str())
             .collect();
-        queued |= self.l0.queue_delete(&keys, |key| doomed.contains(key))?;
-        let in_l1: Vec<String> = (garbage.iter())
-            .filter(|(id, _)| id.tier == Tier::L1)
+        queued |= self.packs.queue_delete(&keys, |key| doomed.contains(key))?;
+        let in_s3: Vec<String> = (garbage.iter())
+            .filter(|(id, _)| !self.in_restate(*id))
             .map(|(_, key)| key.clone())
             .collect();
-        let delete_in_l1 = async {
-            match &self.l1 {
-                Some(l1) if !in_l1.is_empty() => l1.delete(&in_l1).await,
+        let delete_in_s3 = async {
+            match &self.s3 {
+                Some(s3) if !in_s3.is_empty() => s3.delete(&in_s3).await,
                 _ => Ok(()),
             }
         };
@@ -251,7 +250,7 @@ impl Tiered {
                 false => Ok(()),
             }
         };
-        futures::try_join!(sync, delete_in_l1)?;
+        futures::try_join!(sync, delete_in_s3)?;
         Ok(garbage.len())
     }
 }

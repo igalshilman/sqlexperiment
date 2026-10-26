@@ -546,15 +546,24 @@ pub(crate) enum Value {
 }
 
 /// A paged file in a checkpoint: its size, its base's id, where each of its
-/// frames is (`None`: its base's pages, or zeros), and its patches: pages
-/// changed since their frame was written, each a zstd frame against the
-/// page as its frame holds it (as the tail keeps them), by page.
+/// frames is in L1 (`None`: its base's pages, or zeros), and its pages in
+/// L0: those written since the frames, as the tail wrote them, a zstd frame
+/// against the page as its frame holds it (`None`: a hole). Its frames'
+/// pages from `cut` on are holes, unless L0 holds them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileIndex {
     pub size: u64,
     pub base: Option<u64>,
+    pub cut: Option<u64>,
     pub frames: Vec<Option<Location>>,
-    pub patches: BTreeMap<u64, Location>,
+    pub pages: BTreeMap<u64, Option<Location>>,
+}
+
+impl FileIndex {
+    /// Whether its frame's page `page` is cut: a hole, unless L0 holds it.
+    pub fn cut(&self, page: u64) -> bool {
+        self.cut.is_some_and(|cut| page >= cut)
+    }
 }
 
 /// A log in a checkpoint: the index of its first entry, and its entries.
@@ -578,7 +587,7 @@ impl Manifest {
     /// Every location it names.
     pub fn locations(&self) -> impl Iterator<Item = &Location> {
         let frames = (self.files.values())
-            .flat_map(|file| file.frames.iter().flatten().chain(file.patches.values()));
+            .flat_map(|file| file.frames.iter().chain(file.pages.values()).flatten());
         let values = (self.records.values())
             .chain(self.logs.values().flat_map(|log| &log.values))
             .filter_map(|value| match value {
@@ -594,8 +603,8 @@ impl Manifest {
         let frames = (self.files.values_mut()).flat_map(|file| {
             file.frames
                 .iter_mut()
+                .chain(file.pages.values_mut())
                 .flatten()
-                .chain(file.patches.values_mut())
         });
         let values = (self.records.values_mut())
             .chain(self.logs.values_mut().flat_map(|log| &mut log.values))
@@ -615,7 +624,7 @@ impl Manifest {
         };
         for file in self.files.values_mut() {
             file.frames.iter_mut().flatten().for_each(&mut relocate);
-            file.patches.values_mut().for_each(&mut relocate);
+            file.pages.values_mut().flatten().for_each(&mut relocate);
         }
         let values = (self.records.values_mut())
             .chain(self.logs.values_mut().flat_map(|log| &mut log.values));
@@ -687,16 +696,17 @@ impl Manifest {
             put_bytes(&mut body, name.as_bytes());
             put_varint(&mut body, file.size / 512);
             put_varint(&mut body, file.base.map_or(0, |id| id + 1));
+            put_varint(&mut body, file.cut.map_or(0, |cut| cut + 1));
             put_varint(&mut body, file.frames.len() as u64);
             for frame in &file.frames {
                 location(&mut body, frame.as_ref());
             }
-            put_varint(&mut body, file.patches.len() as u64);
+            put_varint(&mut body, file.pages.len() as u64);
             let mut next = 0;
-            for (&page, at) in &file.patches {
+            for (&page, at) in &file.pages {
                 put_varint(&mut body, page - next);
                 next = page + 1;
-                location(&mut body, Some(at));
+                location(&mut body, at.as_ref());
             }
         }
         if body.len() > MAX_DECODED {
@@ -764,24 +774,27 @@ impl Manifest {
             let name = r.name()?;
             let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
             let base = r.varint()?.checked_sub(1);
+            let end = size.div_ceil(PAGE);
+            let cut = r.bounded(end + 1)?.checked_sub(1);
             let frames = (0..r.count()?)
                 .map(|_| location(&mut r))
                 .collect::<io::Result<_>>()?;
-            let mut patches = BTreeMap::new();
+            let mut pages = BTreeMap::new();
             let mut next = 0u64;
             for _ in 0..r.count()? {
                 let page = next
                     .checked_add(r.varint()?)
-                    .filter(|&page| page < size.div_ceil(PAGE))
+                    .filter(|&page| page < end)
                     .ok_or_else(|| r.invalid())?;
                 next = page + 1;
-                patches.insert(page, location(&mut r)?.ok_or_else(|| r.invalid())?);
+                pages.insert(page, location(&mut r)?);
             }
             let file = FileIndex {
                 size,
                 base,
+                cut,
                 frames,
-                patches,
+                pages,
             };
             manifest.files.insert(name, file);
         }

@@ -72,7 +72,12 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
                 None,
                 Some(location(old, 1 << 30, 70)),
             ],
-            patches: BTreeMap::from([(5, location(new, 900, 40)), (40, location(old, 3, 9))]),
+            cut: Some(41),
+            pages: BTreeMap::from([
+                (5, Some(location(new, 900, 40))),
+                (40, Some(location(old, 3, 9))),
+                (41, None),
+            ]),
         },
     );
     manifest.files.insert(

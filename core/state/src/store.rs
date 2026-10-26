@@ -182,17 +182,18 @@ pub struct FlushReport {
 pub struct Checkpointed {
     /// The version it holds the state of.
     pub version: u64,
-    /// Frames it wrote, rebuilt from the overlay.
+    /// Frames it rebuilt, at a promotion.
     pub frames: usize,
-    /// Frames it patched instead: their pages written, as the tail held them.
-    pub patched: usize,
+    /// Pages it copied into L0, as the tail wrote them.
+    pub pages: usize,
     /// Large records and log entries it wrote.
     pub values: usize,
     /// Bytes of its pack: none if it stored nothing outside its manifest.
     pub pack_bytes: usize,
     /// Bytes of its manifest, in Restate.
     pub manifest_bytes: usize,
-    /// Packs mostly dead, whose live frames and values it moved into its own.
+    /// Packs whose live ranges it moved into its own, at a promotion: L0's,
+    /// and L1's mostly dead.
     pub compacted: usize,
     /// Packs its garbage collection deleted ([`crate::State::collect_garbage`]).
     pub deleted: usize,
@@ -207,6 +208,28 @@ pub(crate) struct Staged {
     pub report: Checkpointed,
     /// The frames it rebuilt, decoded.
     pub images: HashMap<Location, Arc<Bytes>>,
+}
+
+/// A pack a checkpoint fills: its ranges, back to back, and what it wrote,
+/// with the decoded frames among them, for the cache.
+struct Pack {
+    id: PackId,
+    body: Vec<u8>,
+    written: Vec<(Location, Bytes, Option<Arc<Bytes>>)>,
+}
+
+impl Pack {
+    /// Append `bytes`, the decoded `image` of a frame if one: where they are.
+    fn put(&mut self, bytes: Bytes, image: Option<Arc<Bytes>>) -> Location {
+        let at = Location {
+            pack: self.id,
+            offset: self.body.len() as u64,
+            len: bytes.len() as u64,
+        };
+        self.body.extend_from_slice(&bytes);
+        self.written.push((at, bytes, image));
+        at
+    }
 }
 
 /// A paged file as of a head: its size, its base's id, and the pages written
@@ -248,7 +271,7 @@ impl Durable {
     pub fn estimated_bytes(&self) -> usize {
         const LOCATION: usize = 40;
         let files = (self.manifest.files.values())
-            .map(|file| (file.frames.len() + file.patches.len()) * LOCATION)
+            .map(|file| (file.frames.len() + file.pages.len()) * LOCATION)
             .sum::<usize>();
         let pages = (self.files.values())
             .flat_map(|file| file.pages.values())
@@ -558,7 +581,11 @@ impl Snapshot {
                     .iter()
                     .flat_map(|file| file.frames.iter().flatten().copied()),
             )
-            .chain(small.iter().flat_map(|file| file.patches.values().copied()))
+            .chain(
+                small
+                    .iter()
+                    .flat_map(|file| file.pages.values().flatten().copied()),
+            )
             .collect();
         let fetched = bounded(wanted.iter().copied().map(|at| self.raw(at))).await?;
         let fetched: HashMap<Location, Bytes> = wanted.into_iter().zip(fetched).collect();
@@ -569,7 +596,10 @@ impl Snapshot {
                 })
                 .map(Option::transpose)
                 .collect::<io::Result<_>>()?;
-            for (&page, &at) in &file.patches {
+            for (&page, &at) in &file.pages {
+                let Some(at) = at else {
+                    continue;
+                };
                 let frame = frames
                     .get((page / head.frame_pages) as usize)
                     .cloned()
@@ -647,12 +677,11 @@ impl Snapshot {
             None if file.cut(page) => None,
             None => {
                 let manifest = &self.durable.manifest;
-                match manifest
-                    .files
-                    .get(name)
-                    .and_then(|file| file.patches.get(&page))
-                {
-                    Some(&at) => Some(self.patch(name, page, at).await?),
+                let index = manifest.files.get(name);
+                match index.and_then(|index| index.pages.get(&page)) {
+                    Some(Some(at)) => Some(self.page(name, page, *at).await?),
+                    Some(None) => None,
+                    None if index.is_some_and(|index| index.cut(page)) => None,
                     None => self.stored_page(manifest, None, name, page).await?,
                 }
             }
@@ -679,10 +708,10 @@ impl Snapshot {
         self.decode_frame(&raw, base, self.durable.head.frame_pages, index, at)
     }
 
-    /// Page `page` of the file `name`, as its patch at `at` holds it:
-    /// decoded, or fetched and decoded (and kept). A patch is compressed
-    /// against the page its frame holds, else its base's page.
-    async fn patch(&self, name: &str, page: u64, at: Location) -> io::Result<Page> {
+    /// Page `page` of the file `name`, as L0 holds it at `at`: decoded, or
+    /// fetched and decoded (and kept). It is compressed against its
+    /// reference, as the tail wrote it.
+    async fn page(&self, name: &str, page: u64, at: Location) -> io::Result<Page> {
         if let Some(image) = self.frames.lock().unwrap().get(&at) {
             return Ok((**image).clone());
         }
@@ -697,11 +726,12 @@ impl Snapshot {
         Ok(image)
     }
 
-    /// What the tail compresses page `page` of the file `name` against,
-    /// under the checkpoint `manifest`: the page as the checkpoint holds it
-    /// (its patch, else its frame), else its base's page, else nothing. It
-    /// stays the same for every entry of the tail, so an entry decodes
-    /// alone. `images` are frames and patches the checkpoint just wrote.
+    /// What the tail, and L0, compress page `page` of the file `name`
+    /// against, under the checkpoint `manifest`: the page as its frame in L1
+    /// holds it, else its base's page, else nothing. Only a promotion
+    /// changes it, so every page written since one decodes alone, and an L0
+    /// checkpoint copies them as they are. `images` are frames a promotion
+    /// just wrote.
     async fn reference(
         &self,
         manifest: &Manifest,
@@ -709,13 +739,6 @@ impl Snapshot {
         name: &str,
         page: u64,
     ) -> io::Result<Bytes> {
-        let patched = (manifest.files.get(name)).and_then(|file| file.patches.get(&page));
-        if let Some(&at) = patched {
-            return match images.and_then(|images| images.get(&at)) {
-                Some(image) => Ok((**image).clone()),
-                None => self.patch(name, page, at).await,
-            };
-        }
         match self.stored_page(manifest, images, name, page).await? {
             Some(stored) => Ok(stored),
             None => Ok(Bytes::copy_from_slice(base_page(self.base_of(name)?, page))),
@@ -1036,38 +1059,56 @@ impl Snapshot {
             self.options.checkpoint_entries,
             self.options.checkpoint_bytes,
         );
-        // A checkpoint into L0 costs only its bytes, in Restate: one is due
-        // once the tail passes what L0 and the manifest hold, as it costs
-        // more to read, and to write against its pages, than a checkpoint.
-        // A tail under a frame's bytes is never worth one: a checkpoint, and
-        // the collection after it, costs a round trip or two. A checkpoint
-        // into L1 costs an S3 put: it is due by the thresholds as they are.
+        // A checkpoint copies the tail into L0, in Restate, and rewrites the
+        // manifest: one is due once the tail passes what L0 and the manifest
+        // hold, as it costs more to read, and to write against its pages,
+        // than a checkpoint. A tail under a frame's bytes is never worth
+        // one: a checkpoint, and the collection after it, costs a round trip
+        // or two.
         let manifest = head.checkpoint.map_or(0, |checkpoint| checkpoint.manifest);
-        let held = self.l0_bytes() + manifest;
+        let held = self.tier_bytes(Tier::L0) + manifest;
         let frame = head.frame_pages * PAGE;
-        let limit = match self.promotes() {
-            false => bytes.min(held.max(frame)),
-            true => bytes,
-        };
+        let limit = bytes.min(held.max(frame));
         head.version > 0
             && ((entries > 0 && since >= entries) || (bytes > 0 && head.tail_bytes >= limit))
     }
 
-    /// Bytes L0's packs hold.
-    fn l0_bytes(&self) -> u64 {
+    /// Bytes the packs of `tier` hold.
+    fn tier_bytes(&self, tier: Tier) -> u64 {
         (self.durable.manifest.sizes.iter())
-            .filter(|(pack, _)| pack.tier == Tier::L0)
+            .filter(|(pack, _)| pack.tier == tier)
             .map(|(_, &bytes)| bytes)
             .sum()
     }
 
-    /// Whether the next checkpoint goes to L1, with all of L0: there is an
-    /// L1, and L0 would hold its share ([`StateOptions::l0_bytes`]) with the
-    /// tail the checkpoint folds in, about what it writes: one large
-    /// checkpoint never takes L0 far past it.
+    /// Whether the next checkpoint is a promotion, into L1: once what it
+    /// would rebuild or reclaim (L0, the tail it would copy, and the dead
+    /// bytes of L1's packs under half live) is as much as L1 holds live, but
+    /// at least a frame's bytes and at most [`StateOptions::l0_bytes`]. A
+    /// small state rebuilds its frames about as often as it checkpoints; a
+    /// large one keeps up to `l0_bytes` of pages in Restate between uploads.
     fn promotes(&self) -> bool {
-        let l0 = self.l0_bytes() + self.durable.head.tail_bytes;
-        self.tiered.has_l1() && l0 >= self.options.l0_bytes
+        let head = &self.durable.head;
+        let manifest = &self.durable.manifest;
+        let mut live: HashMap<PackId, u64> = HashMap::new();
+        for at in manifest.locations() {
+            *live.entry(at.pack).or_default() += at.len;
+        }
+        let (mut held, mut dead) = (0, 0);
+        for (pack, &size) in manifest
+            .sizes
+            .iter()
+            .filter(|(pack, _)| pack.tier == Tier::L1)
+        {
+            let live = live.get(pack).copied().unwrap_or(0);
+            held += live;
+            if live * 2 < size {
+                dead += size - live;
+            }
+        }
+        let l0 = self.tier_bytes(Tier::L0) + head.tail_bytes;
+        let frame = head.frame_pages * PAGE;
+        l0 + dead >= held.max(frame).min(self.options.l0_bytes)
     }
 
     /// Flush `writes`, `records` and `logs`, which [`Self::check`] passed,
@@ -1193,22 +1234,27 @@ impl Snapshot {
         Ok((report, self.continued(next)))
     }
 
-    /// Write this state, the head's, as a checkpoint: each frame the overlay
-    /// changed, the records set since the last one, the log entries appended
-    /// since, and the live frames and values of packs mostly dead, into one
-    /// new pack, put, for the next head to name.
+    /// Write this state, the head's, as a checkpoint, into one new pack, put,
+    /// for the next head to name. Into L0, it copies the pages the overlay
+    /// holds as the tail wrote them; a promotion, into L1, rebuilds every
+    /// frame L0 or the overlay changed, and takes along what L0 held, and
+    /// what L1's packs mostly dead hold. Either stores the records set since
+    /// the last checkpoint and the log entries appended since.
     pub(crate) async fn checkpoint(&self) -> io::Result<Staged> {
         let durable = &self.durable;
         let head = &durable.head;
-        let (frame_pages, frame_bytes) = (head.frame_pages, head.frame_bytes());
         let promoted = self.promotes();
-        let pack = PackId {
-            version: head.version,
-            nonce: cache::random(),
-            tier: match promoted {
-                true => Tier::L1,
-                false => Tier::L0,
+        let mut pack = Pack {
+            id: PackId {
+                version: head.version,
+                nonce: cache::random(),
+                tier: match promoted {
+                    true => Tier::L1,
+                    false => Tier::L0,
+                },
             },
+            body: Vec::new(),
+            written: Vec::new(),
         };
         let old = &durable.manifest;
         let mut manifest = Manifest {
@@ -1217,157 +1263,23 @@ impl Snapshot {
             logs: BTreeMap::new(),
             sizes: BTreeMap::new(),
         };
-        let mut body = Vec::new();
-        let put = |body: &mut Vec<u8>, bytes: &[u8]| {
-            let at = Location {
-                pack,
-                offset: body.len() as u64,
-                len: bytes.len() as u64,
-            };
-            body.extend_from_slice(bytes);
-            at
+        let (frames, pages) = match promoted {
+            true => (self.rebuild(&mut manifest, &mut pack).await?, 0),
+            false => (0, self.copy_pages(&mut manifest, &mut pack)),
         };
-        // The frames the overlay changed. One whose patches stay under half
-        // its size is patched: each page it changed is put compressed
-        // against the frame's page. The others are rebuilt, from their old
-        // frames and patches, fetched together, and the overlay.
-        let mut written = Vec::new();
-        let mut patching = Vec::new();
-        let mut rebuilt = Vec::new();
-        let (mut frames, mut patched) = (0, 0);
-        for (name, file) in &durable.files {
-            let count = file.size.div_ceil(frame_bytes);
-            let held = old.files.get(name);
-            let mut dirty: BTreeSet<u64> = (file.pages.keys())
-                .map(|page| page / frame_pages)
-                .filter(|&index| index < count)
-                .collect();
-            // The frames it held past a cut.
-            if let (Some(cut), Some(held)) = (file.cut, held) {
-                let stored = (held.frames.iter().enumerate())
-                    .filter(|&(index, at)| at.is_some() && (index as u64 + 1) * frame_pages > cut)
-                    .map(|(index, _)| index as u64);
-                dirty.extend(stored.filter(|&index| index < count));
-            }
-            let index = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
-                base: file.base,
-                ..FileIndex::default()
-            });
-            index.size = file.size;
-            index.frames.resize(count as usize, None);
-            index.patches.retain(|&page, _| page < count * frame_pages);
-            for frame in dirty {
-                let stored = index.frames[frame as usize];
-                let range = frame * frame_pages..(frame + 1) * frame_pages;
-                let pages: Vec<(u64, &Bytes)> = (file.pages.range(range.clone()))
-                    .filter_map(|(&page, frame)| Some((page, frame.as_ref()?)))
-                    .collect();
-                let patch = stored.is_some_and(|at| {
-                    let holes = file.pages.range(range.clone()).count() > pages.len();
-                    let kept: u64 = (index.patches.range(range.clone()))
-                        .filter(|(page, _)| !file.pages.contains_key(page))
-                        .map(|(_, at)| at.len)
-                        .sum();
-                    let new: u64 = pages.iter().map(|(_, frame)| frame.len() as u64).sum();
-                    !holes && !file.cut(range.end - 1) && (kept + new) * 2 <= at.len
-                });
-                if patch {
-                    patching.extend(pages.into_iter().map(|(page, frame)| (name, page, frame)));
-                    patched += 1;
-                } else {
-                    let patches: Vec<(u64, Location)> = (index.patches.range(range.clone()))
-                        .map(|(&p, &at)| (p, at))
-                        .collect();
-                    index.patches.retain(|page, _| !range.contains(page));
-                    rebuilt.push((name, file, frame, stored, patches));
-                }
-            }
-        }
-        let olds = bounded(rebuilt.iter().cloned().map(
-            |(name, _, index, stored, patches)| async move {
-                let old = match stored {
-                    Some(at) => Some(self.frame(name, index, at).await?),
-                    None => None,
-                };
-                let patches = patches.into_iter().map(|(page, at)| async move {
-                    Ok::<_, io::Error>((page, self.patch(name, page, at).await?))
-                });
-                Ok::<_, io::Error>((old, try_join_all(patches).await?))
-            },
-        ))
-        .await?;
-        for ((name, file, index, _, _), (old, patches)) in rebuilt.into_iter().zip(olds) {
-            let base = self.base_of(name)?;
-            let hole = implicit(base, frame_pages, index);
-            let mut image = old
-                .as_ref()
-                .map_or_else(|| hole.clone(), |old| old.to_vec());
-            let first = index * frame_pages;
-            let at =
-                |page: u64| ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
-            for (page, patched) in patches {
-                image[at(page)].copy_from_slice(&patched);
-            }
-            let end = file.size.div_ceil(PAGE);
-            for page in first..first + frame_pages {
-                let at = at(page);
-                match file.pages.get(&page) {
-                    Some(Some(frame)) if page < end => {
-                        // Its reference: the page as the checkpoint held it.
-                        let reference = match &old {
-                            Some(_) => &image[at.clone()],
-                            None => base_page(base, page),
-                        };
-                        let decoded = decode_page(frame, reference)?;
-                        image[at].copy_from_slice(&decoded)
-                    }
-                    None if page < end && !file.cut(page) => {}
-                    _ => image[at.clone()].copy_from_slice(&hole[at]),
-                }
-            }
-            let stored = match image == hole {
-                true => None,
-                false => {
-                    let prefix = if base.is_some() { &hole[..] } else { &[] };
-                    let frame = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
-                    let at = put(&mut body, &frame);
-                    written.push((at, frame, Some(Arc::new(Bytes::from(image)))));
-                    frames += 1;
-                    Some(at)
-                }
-            };
-            manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
-        }
-        let images = bounded(patching.iter().map(|&(name, page, frame)| async move {
-            let reference = self.reference(old, None, name, page);
-            let stored = self.stored_page(old, None, name, page);
-            let (reference, stored) = futures::try_join!(reference, stored)?;
-            let image = decode_page(frame, &reference)?;
-            let stored = stored.expect("a patched frame is stored");
-            Ok::<_, io::Error>((encode_page(&image, &stored)?, image))
-        }))
-        .await?;
-        for ((name, page, _), (patch, image)) in patching.into_iter().zip(images) {
-            let at = put(&mut body, &patch);
-            written.push((at, patch, Some(Arc::new(image))));
-            let index = manifest.files.get_mut(name).expect("indexed");
-            index.patches.insert(page, at);
-        }
-        let before = written.len();
+        let before = pack.written.len();
         // Values: inline if small, else a frame of their own.
         let inline = self.options.inline_record_bytes;
-        let mut store = |body: &mut Vec<u8>, value: &Bytes| -> io::Result<Value> {
+        let store = |pack: &mut Pack, value: &Bytes| -> io::Result<Value> {
             if value.len() <= inline {
                 return Ok(Value::Inline(value.clone()));
             }
             let frame = zstd::compress(value, &[], Bytes::copy_from_slice)?;
-            let at = put(body, &frame);
-            written.push((at, frame, None));
-            Ok(Value::Stored(at))
+            Ok(Value::Stored(pack.put(frame, None)))
         };
         for (name, value) in &durable.records {
             if durable.dirty.contains(name) || !manifest.records.contains_key(name) {
-                let value = store(&mut body, value)?;
+                let value = store(&mut pack, value)?;
                 manifest.records.insert(name.clone(), value);
             }
         }
@@ -1381,7 +1293,7 @@ impl Snapshot {
                 });
                 values.push(match kept {
                     Some(kept) => kept,
-                    None => store(&mut body, value)?,
+                    None => store(&mut pack, value)?,
                 });
             }
             let first = log.first;
@@ -1389,47 +1301,13 @@ impl Snapshot {
                 .logs
                 .insert(name.clone(), LogIndex { first, values });
         }
-        let values = written.len() - before;
-        // Compaction: what packs of this tier mostly dead still hold moves
-        // into this one; into L1, all of L0 does.
-        let mut live: HashMap<PackId, u64> = HashMap::new();
-        for at in manifest.locations().filter(|at| at.pack != pack) {
-            *live.entry(at.pack).or_default() += at.len;
-        }
-        let mut sparse: Vec<(u64, PackId)> = (live.iter())
-            .filter(|&(held, _)| held.tier == pack.tier)
-            .filter(|&(held, &live)| live * 2 < old.sizes.get(held).copied().unwrap_or(0))
-            .map(|(&held, &live)| (live, held))
-            .collect();
-        // The cheapest to move first, up to a budget, so that no checkpoint
-        // copies a large pack's worth at once.
-        sparse.sort();
-        let mut budget = 0;
-        let mut sparse: BTreeSet<PackId> = (sparse.into_iter())
-            .take_while(|&(live, _)| {
-                let first = budget == 0;
-                budget += live;
-                first || budget <= MAX_MOVED_BYTES
-            })
-            .map(|(_, held)| held)
-            .collect();
-        if promoted {
-            sparse.extend(live.keys().filter(|held| held.tier == Tier::L0));
-        }
-        let moving: BTreeSet<Location> = (manifest.locations())
-            .filter(|at| sparse.contains(&at.pack))
-            .copied()
-            .collect();
-        let moving: Vec<Location> = moving.into_iter().collect();
-        let fetched = self.raw_runs(&moving).await?;
-        let mut moved = HashMap::new();
-        for (at, raw) in moving.into_iter().zip(fetched) {
-            moved.insert(at, put(&mut body, &raw));
-            written.push((moved[&at], raw, None));
-        }
-        manifest.relocate(&moved);
+        let values = pack.written.len() - before;
+        let compacted = match promoted {
+            true => self.compact(&mut manifest, &mut pack).await?,
+            false => 0,
+        };
         for held in manifest.packs() {
-            if held != pack {
+            if held != pack.id {
                 manifest
                     .sizes
                     .insert(held, old.sizes.get(&held).copied().unwrap_or(0));
@@ -1437,34 +1315,35 @@ impl Snapshot {
         }
         // A checkpoint that stores nothing outside its manifest (the values
         // it set are inline) puts no pack.
+        let Pack { id, body, written } = pack;
         if !body.is_empty() {
-            manifest.sizes.insert(pack, body.len() as u64);
+            manifest.sizes.insert(id, body.len() as u64);
         }
         let encoded = manifest.encode()?;
         let checkpoint = Checkpoint {
-            pack,
+            pack: id,
             manifest: encoded.len() as u64,
         };
         let report = Checkpointed {
             version: head.version,
             frames,
-            patched,
+            pages,
             values,
             pack_bytes: body.len(),
             manifest_bytes: encoded.len(),
-            compacted: sparse.len(),
+            compacted,
             deleted: 0,
             promoted,
         };
         if !body.is_empty() {
-            self.tiered.put_pack(pack, body.into()).await?;
+            self.tiered.put_pack(id, body.into()).await?;
         }
-        self.tiered.put_manifest(pack, encoded.clone()).await?;
+        self.tiered.put_manifest(id, encoded.clone()).await?;
         // The pack's name is never reused, and no head names it before it is
         // durable: what it holds may be kept, its manifest too (the next
         // writer's open reads it).
         if let Some(cache) = &self.cache {
-            cache.insert_manifest(pack, encoded);
+            cache.insert_manifest(id, encoded);
         }
         let mut images = HashMap::new();
         for (at, raw, image) in written {
@@ -1482,6 +1361,190 @@ impl Snapshot {
             report,
             images,
         })
+    }
+
+    /// Into L0: each page the overlay holds, copied as the tail wrote it
+    /// (its reference stays), or a hole; the overlay's cuts. How many pages.
+    fn copy_pages(&self, manifest: &mut Manifest, pack: &mut Pack) -> usize {
+        let frame_bytes = self.durable.head.frame_bytes();
+        let mut copied = 0;
+        for (name, file) in &self.durable.files {
+            let index = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
+                base: file.base,
+                ..FileIndex::default()
+            });
+            let end = file.size.div_ceil(PAGE);
+            index.size = file.size;
+            index
+                .frames
+                .resize(file.size.div_ceil(frame_bytes) as usize, None);
+            // A cut since the last checkpoint cuts L0's pages too: those
+            // written after it are in the overlay.
+            if let Some(cut) = file.cut {
+                index.cut = Some(index.cut.map_or(cut, |held| held.min(cut)));
+                index.pages.retain(|&page, _| page < cut);
+            }
+            let stored = index.frames.len() as u64 * self.durable.head.frame_pages;
+            index.cut = index.cut.filter(|&cut| cut < stored);
+            index.pages.retain(|&page, _| page < end);
+            for (&page, frame) in file.pages.range(..end) {
+                let at = frame.as_ref().map(|frame| pack.put(frame.clone(), None));
+                index.pages.insert(page, at);
+                copied += 1;
+            }
+        }
+        copied
+    }
+
+    /// Into L1: every frame with a page in L0 or the overlay, or a page cut,
+    /// rebuilt from its frame and those pages, each decoded against the
+    /// frame's page (its reference); L0 and the cuts emptied. How many
+    /// frames it stored.
+    async fn rebuild(&self, manifest: &mut Manifest, pack: &mut Pack) -> io::Result<usize> {
+        let head = &self.durable.head;
+        let (frame_pages, frame_bytes) = (head.frame_pages, head.frame_bytes());
+        let old = &self.durable.manifest;
+        let mut dirty = Vec::new();
+        for (name, file) in &self.durable.files {
+            let count = file.size.div_ceil(frame_bytes);
+            let held = old.files.get(name);
+            let cut = [file.cut, held.and_then(|held| held.cut)]
+                .into_iter()
+                .flatten()
+                .min();
+            let mut frames: BTreeSet<u64> = (file.pages.keys())
+                .chain(held.into_iter().flat_map(|held| held.pages.keys()))
+                .map(|page| page / frame_pages)
+                .collect();
+            if let (Some(cut), Some(held)) = (cut, held) {
+                let stored = (held.frames.iter().enumerate())
+                    .filter(|&(index, at)| at.is_some() && (index as u64 + 1) * frame_pages > cut)
+                    .map(|(index, _)| index as u64);
+                frames.extend(stored);
+            }
+            let index = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
+                base: file.base,
+                ..FileIndex::default()
+            });
+            index.size = file.size;
+            index.frames.resize(count as usize, None);
+            index.cut = None;
+            index.pages.clear();
+            for frame in frames.into_iter().filter(|&frame| frame < count) {
+                let stored =
+                    held.and_then(|held| held.frames.get(frame as usize).copied().flatten());
+                dirty.push((name, file, held, frame, stored));
+            }
+        }
+        // The old frames and the pages in L0, fetched together.
+        let olds = bounded(
+            dirty
+                .iter()
+                .map(|&(name, _, held, frame, stored)| async move {
+                    let old = match stored {
+                        Some(at) => Some(self.frame(name, frame, at).await?),
+                        None => None,
+                    };
+                    let range = frame * frame_pages..(frame + 1) * frame_pages;
+                    let in_l0: Vec<(u64, Location)> = (held.into_iter())
+                        .flat_map(|held| held.pages.range(range.clone()))
+                        .filter_map(|(&page, at)| Some((page, (*at)?)))
+                        .collect();
+                    let raws = bounded(in_l0.iter().map(|&(_, at)| self.raw(at))).await?;
+                    let in_l0: HashMap<u64, Bytes> =
+                        in_l0.into_iter().map(|(page, _)| page).zip(raws).collect();
+                    Ok::<_, io::Error>((old, in_l0))
+                }),
+        )
+        .await?;
+        let mut frames = 0;
+        for ((name, file, held, index, _), (old, in_l0)) in dirty.into_iter().zip(olds) {
+            let base = self.base_of(name)?;
+            let hole = implicit(base, frame_pages, index);
+            let mut image = old
+                .as_ref()
+                .map_or_else(|| hole.clone(), |old| old.to_vec());
+            let first = index * frame_pages;
+            let end = file.size.div_ceil(PAGE);
+            for page in first..first + frame_pages {
+                let at = ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
+                // The page written last: the overlay's, else L0's; or cut.
+                let written = match file.pages.get(&page) {
+                    Some(frame) => Some(frame.as_ref()),
+                    None if file.cut(page) => Some(None),
+                    None => match held.and_then(|held| held.pages.get(&page)) {
+                        Some(Some(_)) => Some(in_l0.get(&page)),
+                        Some(None) => Some(None),
+                        None if held.is_some_and(|held| held.cut(page)) => Some(None),
+                        None => None,
+                    },
+                };
+                match written {
+                    Some(Some(frame)) if page < end => {
+                        // Its reference: the page as the old frame holds it.
+                        let reference = match &old {
+                            Some(_) => &image[at.clone()],
+                            None => base_page(base, page),
+                        };
+                        let decoded = decode_page(frame, reference)?;
+                        image[at].copy_from_slice(&decoded);
+                    }
+                    None if page < end => {}
+                    _ => image[at.clone()].copy_from_slice(&hole[at]),
+                }
+            }
+            let stored = match image == hole {
+                true => None,
+                false => {
+                    let prefix = if base.is_some() { &hole[..] } else { &[] };
+                    let frame = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
+                    frames += 1;
+                    Some(pack.put(frame, Some(Arc::new(Bytes::from(image)))))
+                }
+            };
+            manifest.files.get_mut(name).expect("indexed").frames[index as usize] = stored;
+        }
+        Ok(frames)
+    }
+
+    /// At a promotion, what L0's packs and L1's packs mostly dead still hold
+    /// moves into the new pack: all of L0, and of L1 the cheapest to move
+    /// first, up to a budget, so that no promotion copies a large pack's
+    /// worth at once. How many packs.
+    async fn compact(&self, manifest: &mut Manifest, pack: &mut Pack) -> io::Result<usize> {
+        let old = &self.durable.manifest;
+        let mut live: HashMap<PackId, u64> = HashMap::new();
+        for at in manifest.locations().filter(|at| at.pack != pack.id) {
+            *live.entry(at.pack).or_default() += at.len;
+        }
+        let mut sparse: Vec<(u64, PackId)> = (live.iter())
+            .filter(|&(held, _)| held.tier == Tier::L1)
+            .filter(|&(held, &live)| live * 2 < old.sizes.get(held).copied().unwrap_or(0))
+            .map(|(&held, &live)| (live, held))
+            .collect();
+        sparse.sort();
+        let mut budget = 0;
+        let mut moved_out: BTreeSet<PackId> = (sparse.into_iter())
+            .take_while(|&(live, _)| {
+                let first = budget == 0;
+                budget += live;
+                first || budget <= MAX_MOVED_BYTES
+            })
+            .map(|(_, held)| held)
+            .collect();
+        moved_out.extend(live.keys().filter(|held| held.tier == Tier::L0));
+        let moving: BTreeSet<Location> = (manifest.locations())
+            .filter(|at| moved_out.contains(&at.pack))
+            .copied()
+            .collect();
+        let moving: Vec<Location> = moving.into_iter().collect();
+        let fetched = self.raw_runs(&moving).await?;
+        let mut moved = HashMap::new();
+        for (at, raw) in moving.into_iter().zip(fetched) {
+            moved.insert(at, pack.put(raw, None));
+        }
+        manifest.relocate(&moved);
+        Ok(moved_out.len())
     }
 
     fn failed(&self, error: io::Error) -> io::Error {

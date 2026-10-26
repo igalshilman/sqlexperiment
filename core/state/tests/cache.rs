@@ -9,14 +9,15 @@ use state::{Result, State, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
-/// Small frames, large records in packs, and a checkpoint
-/// every other flush.
+/// Small frames, large records in packs, a checkpoint every other flush,
+/// and a promotion once L0 holds 4 KiB: packs come and go.
 fn options(cache: Option<&Namespace>) -> Setup {
     Setup {
         options: StateOptions {
             frame_pages: 2,
             inline_record_bytes: 256,
             checkpoint_entries: 2,
+            l0_bytes: 4096,
             ..StateOptions::default()
         },
         cache: cache.cloned(),

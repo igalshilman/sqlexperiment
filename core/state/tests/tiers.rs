@@ -1,7 +1,9 @@
-//! Packs in two tiers: a checkpoint's pack goes to L0, in Restate, until L0
-//! holds `l0_bytes`; the next goes to L1, in S3, with everything L0 held.
+//! Two levels: a checkpoint copies the pages the tail wrote into L0, in
+//! Restate, as they are; once L0 holds as much as L1 (at most `l0_bytes`),
+//! a checkpoint promotes instead: it rebuilds the frames those pages
+//! changed into L1, in S3 if there is one, and takes L0 along.
 #![cfg(feature = "simulation")]
-use state::{Result, State, StateOptions, simulation::*};
+use state::{FlushReport, Result, State, StateOptions, simulation::*};
 use std::sync::Arc;
 
 /// A page that compresses to about its size.
@@ -28,11 +30,7 @@ fn options() -> StateOptions {
 }
 
 /// Write pages `pages` of `db`, seeded by `seed`, in one flush: its report.
-async fn write(
-    state: &State,
-    pages: std::ops::Range<u64>,
-    seed: u64,
-) -> Result<state::FlushReport> {
+async fn write(state: &State, pages: std::ops::Range<u64>, seed: u64) -> Result<FlushReport> {
     let file = state.file("db")?;
     let mut mutation = state.mutation();
     for n in pages {
@@ -41,66 +39,95 @@ async fn write(
     mutation.flush().await
 }
 
-/// A state far below `l0_bytes` keeps every pack in Restate: S3 is never
-/// written, read or listed, not even by the collections after its
-/// checkpoints.
+/// Whether a flush promoted; `None` if it made no checkpoint.
+fn promoted(report: &FlushReport) -> Option<bool> {
+    report.checkpoint.as_ref().map(|c| c.promoted)
+}
+
+/// A state of 128 KiB in S3, written to a page a flush: each checkpoint
+/// copies its page into L0, with no request to S3 but the listing after the
+/// promotion, until L0 holds `l0_bytes`; then one promotes, with one upload.
 #[test]
-fn a_small_state_never_reaches_s3() -> Result<()> {
+fn pages_go_to_l0_until_it_holds_l0_bytes() -> Result<()> {
     futures::executor::block_on(async {
         let (store, s3) = (Arc::new(MemoryKv::default()), MemoryBlobs::default());
         let state = State::open(store.clone())
             .checkpoints(Arc::new(s3.clone()))
             .options(options())
             .await?;
-        for n in 0..20 {
-            write(&state, n % 4..n % 4 + 1, n * 100).await?;
-        }
-        assert_eq!(
-            (s3.puts(), s3.gets(), s3.lists()),
-            (0, 0, 0),
-            "no request to S3"
+        write(&state, 0..32, 0).await?;
+        let report = write(&state, 0..1, 100).await?;
+        assert_eq!(promoted(&report), Some(true), "the first checkpoint");
+        assert_eq!(s3.puts(), 1);
+        let requests = || (s3.puts(), s3.gets(), s3.lists());
+        // The collection after the copy right after a promotion lists S3,
+        // for what the promotion replaced; no later copy makes a request.
+        let mut n = 1;
+        write(&state, n..n + 1, 100).await?;
+        n += 1;
+        let mut copies = 1;
+        let before = requests();
+        let report = loop {
+            let report = write(&state, n % 32..n % 32 + 1, 100).await?;
+            if promoted(&report) == Some(true) {
+                break report;
+            }
+            assert_eq!(requests(), before, "no request to S3 at copy {copies}");
+            copies += 1;
+            n += 1;
+        };
+        // 4 KiB a page: about 16 copies fill 64 KiB.
+        assert!((12..=17).contains(&copies), "{copies} copies");
+        let checkpoint = report.checkpoint.expect("a promotion");
+        assert_eq!(s3.puts(), 2);
+        // The pages L0 held are rebuilt into frames, not moved.
+        assert!(
+            checkpoint.frames > 0 && checkpoint.pages == 0,
+            "{checkpoint:?}"
         );
-        assert!(!store.packs().is_empty());
+        let file = state.file("db")?;
+        for page in 0..32 {
+            let seed = if page <= n { 100 } else { 0 };
+            assert_eq!(
+                file.read(page).await?,
+                Some(noise(seed + page)),
+                "page {page}"
+            );
+        }
         Ok(())
     })
 }
 
-/// Once L0 holds `l0_bytes`, one checkpoint puts its pack in S3, with what
-/// L0 held; the collection after it empties L0; every page still reads, in a
-/// cold open too.
+/// A promotion takes L0 along: two checkpoints later, its packs are
+/// collected, and a cold open reads every page from L1 and the L0 written
+/// since.
 #[test]
-fn a_full_l0_is_promoted_to_s3_in_one_put() -> Result<()> {
+fn a_promotion_empties_l0() -> Result<()> {
     futures::executor::block_on(async {
         let (store, s3) = (Arc::new(MemoryKv::default()), MemoryBlobs::default());
         let state = State::open(store.clone())
             .checkpoints(Arc::new(s3.clone()))
             .options(options())
             .await?;
-        // 8 pages (about 32 KiB) a flush: the third checkpoint finds L0 full.
-        let mut promoted = None;
-        for n in 0..6 {
-            let report = write(&state, n * 8..(n + 1) * 8, 0).await?;
-            if let Some(c) = report.checkpoint.filter(|c| c.promoted)
-                && promoted.is_none()
-            {
-                promoted = Some((n, c.version, s3.puts()));
+        write(&state, 0..32, 0).await?;
+        let mut version = None;
+        for n in 0..40 {
+            let report = write(&state, n % 32..n % 32 + 1, 7).await?;
+            if let Some(c) = report.checkpoint.filter(|c| c.promoted && n > 0) {
+                version = Some(c.version);
+                break;
             }
         }
-        let (at, version, puts) = promoted.expect("a promotion");
-        assert!(at >= 2, "promoted at flush {at}");
-        assert_eq!(puts, 1, "the promotion is one put");
-        // Two more checkpoints: the promotion's is now the previous, and the
-        // packs of L0 it moved are garbage.
-        write(&state, 0..1, 7).await?;
-        write(&state, 1..2, 7).await?;
-        let needed = state.needed_packs().await?;
-        assert!(
-            needed.iter().any(|pack| pack.starts_with("l1/")),
-            "{needed:?}"
-        );
+        let version = version.expect("a second promotion");
+        write(&state, 0..1, 9).await?;
+        write(&state, 1..2, 9).await?;
         // L0 holds only packs written after the promotion.
         let written = |pack: &str| u64::from_str_radix(&pack[3..19], 16).unwrap();
-        for pack in store.packs() {
+        let l0: Vec<String> = (store.packs().into_iter())
+            .filter(|pack| pack.starts_with("l0/"))
+            .collect();
+        assert!(!l0.is_empty());
+        for pack in l0 {
             assert!(written(&pack) > version, "{pack} left in L0");
         }
         let cold = State::open(store.clone())
@@ -108,50 +135,28 @@ fn a_full_l0_is_promoted_to_s3_in_one_put() -> Result<()> {
             .options(options())
             .await?;
         let file = cold.file("db")?;
-        for n in 0..48 {
-            let seed = if n < 2 { 7 } else { 0 };
-            assert_eq!(file.read(n).await?, Some(noise(seed + n)), "page {n}");
-        }
+        assert_eq!(file.read(0).await?, Some(noise(9)));
+        assert_eq!(file.read(1).await?, Some(noise(10)));
         Ok(())
     })
 }
 
-/// A checkpoint that would take L0 past `l0_bytes` on its own goes to L1:
-/// one large write never lands in Restate whole.
+/// A cold read of a page only L1 holds is one S3 GET; of a page in L0, a
+/// get of its part in Restate and, together, its frame in S3, which it is
+/// compressed against.
 #[test]
-fn a_checkpoint_larger_than_l0_goes_to_s3() -> Result<()> {
+fn a_cold_read_of_a_page_in_l0_fetches_its_frame_too() -> Result<()> {
     futures::executor::block_on(async {
         let (store, s3) = (Arc::new(MemoryKv::default()), MemoryBlobs::default());
         let state = State::open(store.clone())
             .checkpoints(Arc::new(s3.clone()))
             .options(options())
             .await?;
-        // About 128 KiB in one flush; the next one checkpoints it.
-        write(&state, 0..32, 0).await?;
-        let report = write(&state, 32..33, 0).await?;
-        let checkpoint = report.checkpoint.expect("a checkpoint");
-        assert!(checkpoint.promoted, "{checkpoint:?}");
-        assert!(store.packs().is_empty(), "{:?}", store.packs());
-        Ok(())
-    })
-}
-
-/// A cold read of a frame in L1 is one S3 GET; of a frame in L0, gets of
-/// its parts in Restate, and none of S3.
-#[test]
-fn a_cold_read_goes_to_the_tier_its_frame_is_in() -> Result<()> {
-    futures::executor::block_on(async {
-        let (store, s3) = (Arc::new(MemoryKv::default()), MemoryBlobs::default());
-        let state = State::open(store.clone())
-            .checkpoints(Arc::new(s3.clone()))
-            .options(options())
-            .await?;
-        // Frames 0-15 reach L1; frame 16 is written after, into L0.
-        for n in 0..4 {
-            write(&state, n * 16..(n + 1) * 16, 0).await?;
-        }
-        write(&state, 64..68, 0).await?;
-        write(&state, 68..69, 0).await?;
+        write(&state, 0..64, 0).await?;
+        write(&state, 64..65, 0).await?;
+        // Page 1 into L0, and a flush to checkpoint it.
+        write(&state, 1..2, 50).await?;
+        write(&state, 65..66, 0).await?;
         let cold = State::open(store.clone())
             .checkpoints(Arc::new(s3.clone()))
             .options(StateOptions {
@@ -162,18 +167,16 @@ fn a_cold_read_goes_to_the_tier_its_frame_is_in() -> Result<()> {
         let file = cold.file("db")?;
         let gets = s3.gets();
         store.reset_stats();
-        assert_eq!(file.read(64).await?, Some(noise(64)));
-        assert_eq!(s3.gets() - gets, 0, "frame 16 is in L0");
-        assert!(store.stats().kind("pack").gets > 0);
-        store.reset_stats();
-        assert_eq!(file.read(1).await?, Some(noise(1)));
-        assert_eq!(s3.gets() - gets, 1, "frame 0 is in L1");
-        assert_eq!(store.stats().kind("pack").gets, 0);
+        assert_eq!(file.read(33).await?, Some(noise(33)));
+        assert_eq!((s3.gets() - gets, store.stats().kind("pack").gets), (1, 0));
+        let gets = s3.gets();
+        assert_eq!(file.read(1).await?, Some(noise(51)));
+        assert_eq!((s3.gets() - gets, store.stats().kind("pack").gets), (1, 1));
         Ok(())
     })
 }
 
-/// A promotion that fails (S3 down) fails nothing: L0 keeps its packs, the
+/// A promotion that fails (S3 down) fails nothing: L0 keeps its pages, the
 /// flushes go on, and once S3 is back a promotion goes through.
 #[test]
 fn a_failed_promotion_leaves_l0_as_it_was() -> Result<()> {
@@ -183,49 +186,53 @@ fn a_failed_promotion_leaves_l0_as_it_was() -> Result<()> {
             .checkpoints(Arc::new(s3.clone()))
             .options(options())
             .await?;
+        write(&state, 0..32, 0).await?;
+        write(&state, 0..1, 0).await?;
         s3.fail_after(Some(0));
         let mut failed = 0;
-        for n in 0..6 {
-            let report = write(&state, n * 8..(n + 1) * 8, 0).await?;
+        for n in 0..40 {
+            let report = write(&state, n % 32..n % 32 + 1, 3).await?;
             failed += report.checkpoint_failed.is_some() as usize;
         }
         assert!(failed > 0);
-        assert!(!store.packs().is_empty());
         s3.fail_after(None);
         let mut promoted = false;
-        for n in 6..80 {
-            let report = write(&state, n % 48..n % 48 + 1, 0).await?;
+        for n in 40..200 {
+            let report = write(&state, n % 32..n % 32 + 1, 3).await?;
             promoted |= report.checkpoint.is_some_and(|c| c.promoted);
         }
         assert!(promoted, "a promotion once S3 is back");
         let file = state.file("db")?;
-        for n in 0..48 {
-            assert_eq!(file.read(n).await?, Some(noise(n)), "page {n}");
+        for page in 0..32 {
+            assert_eq!(file.read(page).await?, Some(noise(3 + page)), "page {page}");
         }
         Ok(())
     })
 }
 
-/// A state whose packs reached L1, opened without S3, says so.
+/// Without S3, L1 is in Restate too: the same levels, the same promotions.
 #[test]
-fn an_open_without_s3_of_a_state_in_l1_fails_clearly() -> Result<()> {
+fn without_s3_l1_is_in_restate() -> Result<()> {
     futures::executor::block_on(async {
-        let (store, s3) = (Arc::new(MemoryKv::default()), MemoryBlobs::default());
-        let state = State::open(store.clone())
-            .checkpoints(Arc::new(s3.clone()))
-            .options(StateOptions {
-                l0_bytes: 0,
-                ..options()
-            })
-            .await?;
+        let store = Arc::new(MemoryKv::default());
+        let state = State::open(store.clone()).options(options()).await?;
         write(&state, 0..32, 0).await?;
-        write(&state, 0..1, 1).await?;
-        let error = match State::open(store.clone()).await {
-            Ok(without) => without.file("db")?.read(5).await.err(),
-            Err(error) => Some(error),
-        };
-        let error = error.expect("an error").to_string();
-        assert!(error.contains("L1"), "{error}");
+        let mut promotions = 0;
+        for n in 0..60 {
+            let report = write(&state, n % 32..n % 32 + 1, 5).await?;
+            promotions += (promoted(&report) == Some(true)) as usize;
+        }
+        assert!(promotions >= 2, "{promotions} promotions");
+        let packs = store.packs();
+        assert!(
+            packs.iter().any(|pack| pack.starts_with("l1/")),
+            "{packs:?}"
+        );
+        let reopened = State::open(store.clone()).options(options()).await?;
+        let file = reopened.file("db")?;
+        for page in 0..32 {
+            assert_eq!(file.read(page).await?, Some(noise(5 + page)), "page {page}");
+        }
         Ok(())
     })
 }
