@@ -37,7 +37,7 @@ use crate::{
     },
     kv::KvStore,
     simulation::MemoryBlobs,
-    store::{base_page, decode_page, decode_value, implicit},
+    store::{FileState, base_page, decode_page, decode_value, hole_page, implicit},
     zstd,
 };
 use bytes::Bytes;
@@ -278,79 +278,118 @@ impl Known {
                 ));
             }
         }
-        for version in head.checkpointed() + 1..=head.version {
-            self.check_entry(&head, version);
-        }
+        self.check_tail(&head);
         let new = held.is_none_or(|held| head.checkpoint != held.checkpoint);
         if let Some(checkpoint) = head.checkpoint.filter(|_| new) {
             self.check_checkpoint(&head, &checkpoint);
         }
     }
 
-    /// The tail entry `version` of `head` is stored, and decodes.
-    fn check_entry(&mut self, head: &Head, version: u64) {
+    /// The tail entries of `head` past its checkpoint are stored and decode,
+    /// in order: each page against the page as the entries before it left it.
+    fn check_tail(&mut self, head: &Head) {
         let v = head.version;
-        let mut parts = Vec::new();
-        for key in head.entry_keys(version) {
-            match self.tail.get(&key) {
-                Some(part) => parts.push(part.clone()),
-                None if self.unknown.contains(&key) => return,
-                None => return self.violation(format!("head {v} names {key}, not stored")),
-            }
-        }
-        let entry = match Entry::decode(&parts) {
-            Ok(entry) => entry,
-            Err(error) => return self.violation(format!("tail entry {version}: {error}")),
-        };
-        for (name, file) in &entry.files {
-            let Some(base) = self.base(name, file.base) else {
-                continue;
-            };
-            for (page, frame) in &file.pages {
-                let Some(frame) = frame else {
-                    continue;
-                };
-                let Some(reference) = self.reference(head, name, *page, base.as_ref()) else {
-                    continue;
-                };
-                if let Err(error) = decode_page(frame, &reference) {
-                    let error = format!("tail entry {version}: page {page} of {name}: {error}");
-                    return self.violation(error);
+        let mut files: BTreeMap<String, FileState> = BTreeMap::new();
+        for version in head.checkpointed() + 1..=head.version {
+            let mut parts = Vec::new();
+            for key in head.entry_keys(version) {
+                match self.tail.get(&key) {
+                    Some(part) => parts.push(part.clone()),
+                    None if self.unknown.contains(&key) => return,
+                    None => return self.violation(format!("head {v} names {key}, not stored")),
                 }
+            }
+            let entry = match Entry::decode(&parts) {
+                Ok(entry) => entry,
+                Err(error) => return self.violation(format!("tail entry {version}: {error}")),
+            };
+            for (name, change) in &entry.files {
+                // Unknown, or its base not known: not checked.
+                let Some(base) = self.base(name, change.base) else {
+                    continue;
+                };
+                let mut file = match files.remove(name) {
+                    Some(file) => file,
+                    None => {
+                        let Some(file) = self.checkpointed_file(head, name, change.base) else {
+                            return;
+                        };
+                        file
+                    }
+                };
+                for (page, frame) in &change.pages {
+                    let Some(frame) = frame else {
+                        continue;
+                    };
+                    let hole = hole_page(base.as_ref(), *page);
+                    let checkpointed = match file.on_checkpoint(*page) {
+                        true => match self.checkpointed(head, name, *page, base.as_ref()) {
+                            Some(page) => page,
+                            None => return,
+                        },
+                        false => hole.clone(),
+                    };
+                    let decoded = (file.image(*page, checkpointed, &hole))
+                        .and_then(|before| decode_page(frame, &before));
+                    if let Err(error) = decoded {
+                        let error = format!("tail entry {version}: page {page} of {name}: {error}");
+                        return self.violation(error);
+                    }
+                }
+                file.apply(change);
+                files.insert(name.clone(), file);
             }
         }
     }
 
-    /// What a tail entry of `head` compresses page `page` of the file
-    /// `name` against: the page as its checkpoint holds it (its patch, else
-    /// its frame), else its base's page; `None` where the monitor does not
-    /// see the checkpoint.
-    fn reference(
+    /// The file `name` as `head`'s checkpoint holds it, with no tail over
+    /// it; `None` where the monitor does not see the checkpoint.
+    fn checkpointed_file(
+        &mut self,
+        head: &Head,
+        name: &str,
+        base: Option<u64>,
+    ) -> Option<FileState> {
+        let size = match head.checkpoint {
+            Some(checkpoint) => {
+                (self.manifest(&checkpoint)?.files.get(name)).map_or(0, |file| file.size)
+            }
+            None => 0,
+        };
+        Some(FileState {
+            size,
+            base,
+            ..FileState::default()
+        })
+    }
+
+    /// Page `page` of the file `name` as `head`'s checkpoint holds it (its
+    /// patch, else its frame's page), else what a hole reads; `None` where
+    /// the monitor does not see the checkpoint.
+    fn checkpointed(
         &mut self,
         head: &Head,
         name: &str,
         page: u64,
         base: Option<&Arc<dyn Base>>,
     ) -> Option<Bytes> {
-        let based = || Bytes::copy_from_slice(base_page(base, page));
+        let hole = hole_page(base, page);
         let Some(checkpoint) = head.checkpoint else {
-            return Some(based());
+            return Some(hole);
         };
         let index = page / head.frame_pages;
         let file = self.manifest(&checkpoint)?.files.get(name);
         let patch = file.and_then(|file| file.patches.get(&page)).copied();
         let stored = file.and_then(|file| file.frames.get(index as usize).copied().flatten());
-        let stored = match stored {
-            Some(at) => {
-                let frame = self.frame(head.frame_pages, at, base, index)?;
-                let at = ((page % head.frame_pages) * PAGE) as usize;
-                frame.slice(at..at + PAGE as usize)
-            }
-            None => based(),
+        let Some(stored) = stored else {
+            return Some(hole);
         };
+        let frame = self.frame(head.frame_pages, stored, base, index)?;
+        let at = ((page % head.frame_pages) * PAGE) as usize;
+        let framed = frame.slice(at..at + PAGE as usize);
         match patch {
-            Some(at) => decode_page(&self.pack_range(at.pack, at.range())?, &stored).ok(),
-            None => Some(stored),
+            Some(at) => decode_page(&self.pack_range(at.pack, at.range())?, &framed).ok(),
+            None => Some(framed),
         }
     }
 
