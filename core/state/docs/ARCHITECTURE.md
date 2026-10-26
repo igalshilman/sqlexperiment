@@ -492,9 +492,11 @@ database under `l0_bytes` never touches S3.
 
 What changes, once a database outgrows L0:
 
-- **A promotion uploads its pack** (one PUT) before the flush puts its
-  head, so a promoting flush also waits for S3: one in about 20,000 for a
-  large database updated a row a flush.
+- **A promotion uploads its pack** before the flush puts its head, so a
+  promoting flush also waits for S3. The pack is what L0 held and what
+  compaction moved with it, up to `l0_bytes` and 64 MiB more: up to 8 MiB
+  goes in one PUT, a larger one in parts of 8 MiB, four at a time (a
+  multipart upload, aborted if a part fails).
 - **A read of a frame in L1 is a ranged GET**, about 20 ms against about
   2 ms for one in L0. The frames checkpoints rewrote since the last
   promotion are in L0.

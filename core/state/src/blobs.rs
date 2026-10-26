@@ -189,11 +189,19 @@ mod object {
     use super::BlobStore;
     use bytes::Bytes;
     use futures::{
-        TryStreamExt,
+        StreamExt, TryStreamExt,
         future::{BoxFuture, try_join_all},
     };
     use object_store::{Error, ObjectStore, ObjectStoreExt, path::Path};
     use std::{io, ops::Range, sync::Arc};
+
+    /// Bytes of a part of an upload. A blob larger than this, a promotion's
+    /// pack carrying what it compacted, say, goes up in parts of this size
+    /// (S3 takes parts of 5 MiB to 5 GiB), a few at a time, rather than in
+    /// one long request.
+    const UPLOAD_PART: usize = 8 << 20;
+    /// Parts of one upload in flight at once.
+    const PARTS_IN_FLIGHT: usize = 4;
 
     /// A [`BlobStore`] in an object store, under a prefix of its own (one per
     /// namespace: the object's key, say): S3 through `object_store`'s
@@ -239,9 +247,34 @@ mod object {
             })
         }
 
+        /// One request up to [`UPLOAD_PART`]; a multipart upload past it.
         fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
             Box::pin(async move {
-                self.store.put(&self.path(key), value.into()).await?;
+                let path = self.path(key);
+                if value.len() <= UPLOAD_PART {
+                    self.store.put(&path, value.into()).await?;
+                    return Ok(());
+                }
+                let mut upload = self.store.put_multipart(&path).await?;
+                let parts: Vec<_> = (0..value.len())
+                    .step_by(UPLOAD_PART)
+                    .map(|at| value.slice(at..(at + UPLOAD_PART).min(value.len())))
+                    .map(|part| upload.put_part(part.into()))
+                    .collect();
+                let uploaded = futures::stream::iter(parts)
+                    .buffered(PARTS_IN_FLIGHT)
+                    .try_collect::<Vec<()>>()
+                    .await;
+                let completed = match uploaded {
+                    Ok(_) => upload.complete().await.map(drop),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = completed {
+                    // Parts uploaded are billed until aborted; an abort that
+                    // fails leaves them to the bucket's lifecycle rule.
+                    let _ = upload.abort().await;
+                    return Err(error.into());
+                }
                 Ok(())
             })
         }
@@ -267,5 +300,38 @@ mod object {
                     .collect())
             })
         }
+    }
+}
+
+#[cfg(all(test, feature = "object-store"))]
+mod tests {
+    use super::{BlobStore, ObjectStoreBlobs};
+    use bytes::Bytes;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    /// A blob past a part's size goes up in parts, and reads back whole and
+    /// in ranges across their boundaries, as one that fits in a request.
+    #[test]
+    fn a_large_blob_is_uploaded_in_parts_and_reads_back() {
+        futures::executor::block_on(async {
+            let blobs = ObjectStoreBlobs::new(Arc::new(InMemory::new()), "objects/42");
+            for (key, len) in [("small", 1000usize), ("large", (20 << 20) + 7)] {
+                let value: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+                blobs.put(key, Bytes::from(value.clone())).await.unwrap();
+                let whole = blobs.get_range(key, 0..len as u64).await.unwrap();
+                assert_eq!(whole.as_deref(), Some(&value[..]), "{key}");
+                // Across the first part's end, where there is one.
+                let range = match len > 8 << 20 {
+                    true => (8 << 20) - 5..(8 << 20) + 5,
+                    false => 10..20,
+                };
+                let read = (blobs.get_range(key, range.start as u64..range.end as u64))
+                    .await
+                    .unwrap();
+                assert_eq!(read.as_deref(), Some(&value[range]), "{key}");
+            }
+            assert_eq!(blobs.list("").await.unwrap().len(), 2);
+        })
     }
 }
