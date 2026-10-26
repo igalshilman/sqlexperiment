@@ -520,16 +520,26 @@ Per flush, with a warm cache:
 
 | Workload           | Database | Bytes put to Restate (tail + pack + manifest + head) | Stored in Restate | Keys  | Cold open and a point read |
 | ------------------ | -------- | ---------------------------------------------------- | ----------------- | ----- | -------------------------- |
-| Chat with effects  | 180 KiB  | 1949 (1593 + 248 + 29 + 79)                          | 170 KiB           | 77    | 4 round trips, 30 gets     |
-| Small, update 1    | 20 KiB   | 675 (489 + 90 + 3 + 93)                              | 34 KiB            | 61    | 3 round trips, 26 gets     |
-| 10k rows, update 1 | 2.8 MiB  | 638                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
-| 1M rows, update 1  | 274 MiB  | 873 (226 + 219 + 251 + 177)                          | 108 MiB           | 1,861 | 5 round trips, 6 gets      |
-| 1M rows, update 10 | 274 MiB  | 1658                                                 | 108 MiB           | 1,863 | 5 round trips, 6 gets      |
-| 100k rows, aged    | 27 MiB   | 1172 (225 + 470 + 235 + 242)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
+| Chat with effects  | 180 KiB  | 1175 (851 + 210 + 15 + 99)                           | 161 KiB           | 121   | 5 round trips, 48 gets     |
+| Small, update 1    | 20 KiB   | 326 (114 + 34 + 0 + 178)                             | 28 KiB            | 156   | 3 round trips, 26 gets     |
+| 10k rows, update 1 | 2.8 MiB  | 631                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
+| 1M rows, update 1  | 274 MiB  | 859 (226 + 206 + 250 + 177)                          | 108 MiB           | 1,860 | 6 round trips, 8 gets      |
+| 1M rows, update 10 | 274 MiB  | 1642                                                 | 108 MiB           | 1,862 | 6 round trips, 8 gets      |
+| 100k rows, aged    | 27 MiB   | 1171 (225 + 470 + 235 + 241)                         | 14 MiB            | 379   | 5 round trips, 7 gets      |
 
 The pack and manifest columns are spread over the flushes: a 1M-row
 database's checkpoint, every 128 flushes, writes about 28 KB of patches
 and a 30 KiB manifest.
+
+A tail entry's page is its change since the flush before, so a page
+written at every flush (a chat's last message page, a log) costs each
+flush only what that flush wrote: the chat's tail is 851 bytes a flush,
+where compressing against the checkpoint's page put 1,593. Its tail then
+fills more slowly, so it is checkpointed less often and runs longer: more
+entries for a cold open to read (48 gets against 30), and a longer head,
+which lists them. A cold read of a page a checkpoint patched long ago
+fetches the patch beside its frame, a round trip more than a frame just
+rebuilt: the 1M-row database's header page is such a page.
 
 The other rows are young, a few hundred flushes old. An aged database
 costs more: its patches pile up, one per page changed since its frame was
