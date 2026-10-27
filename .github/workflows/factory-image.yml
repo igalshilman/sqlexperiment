@@ -1,5 +1,6 @@
 # The software factory's image (examples-typescript/advanced/factory), on
-# GitHub's container registry: ghcr.io/igalshilman/sqlexperiment/factory.
+# GitHub's container registry: ghcr.io/igalshilman/sqlexperiment/factory,
+# for linux/amd64 and linux/arm64 (each built natively, on a runner of its own).
 #
 # A push to main pushes :latest and :sha-<commit>; a pull request only builds
 # it. Run it by hand from the Actions tab (workflow_dispatch).
@@ -23,14 +24,59 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/factory
+  PUSH: ${{ github.event_name != 'pull_request' }}
+
 jobs:
-  image:
-    runs-on: ubuntu-latest
+  # The image for each platform, pushed by its digest alone.
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
+        if: env.PUSH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: examples-typescript/advanced/factory/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUSH }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+      - if: env.PUSH == 'true'
+        run: echo "${{ steps.build.outputs.digest }}" > digest-${{ strategy.job-index }}
+      - if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: digest-${{ strategy.job-index }}
+
+  # One tag for both platforms: :latest and :sha-<commit>.
+  push:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -38,17 +84,12 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/factory
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: examples-typescript/advanced/factory/Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - run: |
+          docker buildx imagetools create \
+            $(jq -r '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(sed "s|^|$IMAGE@|" digest-*)
+      - run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
