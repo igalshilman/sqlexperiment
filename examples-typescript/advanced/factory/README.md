@@ -24,7 +24,7 @@ through Linear's MCP server: on the real Linear, or on a stand-in,
   ┌────────────────────────────────────────────────────────────────────────────────────┐       │
   │ Restate                                                                            │       │
   │                                                                                    │       │
-  │  linear.webhook (a service): checks the signature; one message per                 │       │
+  │  linear.webhook (webhook()): checks the signature; one message per                 │       │
   │    delivery; skips sub-issues                                                      │       │
   │        │ send                                                                      │       │
   │        ▼                                                                           │       │
@@ -155,12 +155,15 @@ and its sub-issues appear, each moving on its own.
 
 ## What it shows
 
-- **A webhook into Restate**: Linear posts to Restate's ingress, and
-  `linear.webhook` sends the issue to its triage agent. A delivery Linear
-  sends again has the same delivery id, the message's idempotency key: it
-  reaches the same message, not a second one. With a secret, a webhook
-  that Linear did not sign is refused (the handler takes the body as it
-  was sent, `restate.serde.binary`, to check its signature).
+- **A webhook into agents**: `webhook()` of restate-agents makes the
+  `linear` service. Linear posts to it at Restate's ingress, and it sends
+  each new issue to the triage agent, keyed by the issue, as a message
+  that says where it comes from (`<webhook name="linear" delivery="…">`).
+  A delivery Linear sends again has the same `linear-delivery`, the
+  message's idempotency key: it reaches the same message, not a second
+  one. With a secret, a webhook that Linear did not sign is refused (401).
+  Its routes, auth and idempotency header are in the handler's metadata,
+  in the admin API and the UI.
 - **A structured answer from an agent**: the planner's answer is a `Plan`,
   checked against its schema when the model hands it in (`submit_plan`),
   not text to parse.

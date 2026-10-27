@@ -387,6 +387,48 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
 [`examples-typescript/intermediate/support.ts`](../../../examples-typescript/intermediate/support.ts).
 
+## Webhooks
+
+`webhook()` takes another system's webhooks (Linear's, GitHub's...) into
+agents: a service whose `webhook` handler checks each delivery's signature,
+and sends it to the `chat` of the agents of `route`, at once (the other
+system does not wait for the agent):
+
+```ts
+import { serve, webhook } from 'restate-agents';
+
+const issues = webhook<LinearWebhook>({
+  name: 'linear', // at /linear/webhook
+  auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
+  idempotencyHeader: 'linear-delivery', // a delivery sent again reaches the same message
+  route: [triage],
+  key: (event) => event.data.identifier, // the conversation it goes to; undefined drops it
+});
+await serve(issues, triage);
+```
+
+| Option              | What                                                                                    |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `name`              | The service: `/<name>/webhook`                                                          |
+| `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401     |
+| `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                    |
+| `route`             | The agents (any objects with `chat`) each delivery goes to                              |
+| `key`               | The agents' key, from the body (`T`), or undefined to drop it; by default, the delivery |
+| `description`       | What it is, for the UI                                                                  |
+
+The agent's message says where it comes from, with the body as JSON:
+
+```
+<webhook name="linear" delivery="5d2…">
+{ "action": "create", "type": "Issue", "data": { … } }
+</webhook>
+```
+
+The handler's metadata says what it is, for the admin API and the UI:
+`restate-agents.kind` (`webhook`), `.routes` (`triage/chat`), `.auth`
+(`hmac-sha256:linear-signature`) and `.idempotency-header`. See
+[`examples-typescript/advanced/factory`](../../../examples-typescript/advanced/factory/README.md).
+
 ## Models
 
 Every agent's `model` is `provider/model-id`, or else the `MODEL`

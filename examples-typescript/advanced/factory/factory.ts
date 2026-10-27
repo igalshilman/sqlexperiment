@@ -27,9 +27,7 @@
  * WORKSPACE. Not MODEL: each agent is on its own provider, with its default
  * model.
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import * as restate from '@restatedev/restate-sdk';
-import { chatHandler, object, serve, subagent } from 'restate-agents';
+import { chatHandler, object, serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import * as deepseek from 'restate-agents/deepseek';
 import * as pi from 'restate-agents/pi';
@@ -94,7 +92,8 @@ const triage = pi.agent({
     }),
     subagent(coder, { description: 'a coder, who builds a part of the plan in the issue’s directory' }),
   ],
-  system: `You triage new Linear issues, and lead the work on those to build. Read the issue first.
+  system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
+(a <webhook> element: the issue is its data.identifier). Read the issue first.
 - If it is not clear enough to build, comment with what you need to know, leave it in "Backlog", and stop.
 - If it is a duplicate or not something to build, comment why, and move it to "Canceled".
 - Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan".
@@ -110,47 +109,24 @@ Answer with what happened to the issue, briefly.`,
 interface LinearWebhook {
   action: 'create' | 'update' | 'remove';
   type: string;
-  data: { identifier: string; title: string; description?: string; parentId?: string | null };
+  data: { identifier: string; parentId?: string | null };
 }
 
-/** Whether Linear signed `body`: its HMAC-SHA256, with the webhook's secret. */
-const signed = (body: Uint8Array, signature: string | undefined, secret: string) => {
-  const expected = createHmac('sha256', secret).update(body).digest();
-  const given = Buffer.from(signature ?? '', 'hex');
-  return given.length === expected.length && timingSafeEqual(given, expected);
-};
-
 /**
- * Linear's webhooks: each new issue goes to the triage agent, keyed by the
- * issue; a sub-issue (the planner's own) does not. Linear sends a webhook
- * again until it is answered, with the same delivery id: the idempotency key
- * makes a delivery that comes again reach the same message, not send it
- * twice. With LINEAR_WEBHOOK_SECRET, a webhook Linear did not sign is
- * refused: the body comes as it was sent, for its signature.
+ * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
+ * agent, keyed by the issue; a sub-issue (the planner's own) does not.
+ * Linear sends a webhook again until it is answered, with the same
+ * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
+ * a webhook Linear did not sign is refused.
  */
-const webhooks = restate.service({
+const issues = webhook<LinearWebhook>({
   name: 'linear',
-  handlers: {
-    webhook: restate.handlers.handler(
-      { input: restate.serde.binary, accept: 'application/json' },
-      async (ctx: restate.Context, body: Uint8Array) => {
-        const headers = ctx.request().headers;
-        if (webhookSecret && !signed(body, headers.get('linear-signature'), webhookSecret)) {
-          throw new restate.TerminalError('Not signed by Linear', { errorCode: 401 });
-        }
-        const event = JSON.parse(new TextDecoder().decode(body)) as LinearWebhook;
-        if (event.type !== 'Issue' || event.action !== 'create' || event.data.parentId) return;
-
-        const { identifier, title, description } = event.data;
-        ctx
-          .objectSendClient(triage, identifier)
-          .chat(
-            `Issue ${identifier}: ${title}\n\n${description ?? ''}`,
-            restate.rpc.sendOpts({ idempotencyKey: headers.get('linear-delivery') ?? ctx.request().id }),
-          );
-      },
-    ),
-  },
+  description: "Linear's new issues, to triage",
+  auth: webhookSecret ? { header: 'linear-signature', secret: webhookSecret } : undefined,
+  idempotencyHeader: 'linear-delivery',
+  route: [triage],
+  key: ({ type, action, data }) =>
+    type === 'Issue' && action === 'create' && !data.parentId ? data.identifier : undefined,
 });
 
-await serve(webhooks, triage, planner, coder);
+await serve(issues, triage, planner, coder);
