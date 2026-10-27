@@ -143,6 +143,15 @@ export interface Steerable {
   has(id: string): Promise<boolean>;
 }
 
+/** The agents that run in the background (`background: true`): no one follows them as they work. */
+const background = new Set<string>();
+
+/** Agent `name` runs in the background: see `background` in object.ts. */
+export const inBackground = (name: string) => void background.add(name);
+
+/** Whether the agent of `ctx` runs in the background. */
+const unfollowed = (ctx: restate.ObjectContext) => background.has(ctx.request().target.service);
+
 /** The `signals` object of the agent of `ctx`. */
 const signalsOfAgent = (ctx: restate.ObjectContext) => ctx.objectClient(signals, signalsOf(ctx));
 
@@ -158,8 +167,13 @@ const publish = async (ctx: restate.ObjectContext) => {
   await signalsOfAgent(ctx).publish();
 };
 
+/** A step of a turn of `ctx`: {@link publish} it, unless the agent runs in the background, which publishes the turn's end only. */
+const stepped = async (ctx: restate.ObjectContext) => {
+  if (!unfollowed(ctx)) await publish(ctx);
+};
+
 /** A tool call of the turn of `ctx` starts: {@link publish} it (its call is stored). */
-export const toolCallStarted = (ctx: restate.ObjectContext) => publish(ctx);
+export const toolCallStarted = (ctx: restate.ObjectContext) => stepped(ctx);
 
 /**
  * A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish}
@@ -168,6 +182,8 @@ export const toolCallStarted = (ctx: restate.ObjectContext) => publish(ctx);
  * framework that takes no steering), they wait for the turn's end.
  */
 export async function toolCallEnded(ctx: restate.ObjectContext, conversation?: Steerable) {
+  // In the background, no one steers: a message steered anyway is answered after the turn.
+  if (unfollowed(ctx)) return;
   const messages = await signalsOfAgent(ctx).progress(ctx.request().id);
   const taken = steerings.get(ctx);
   if (!taken || !conversation) return;
@@ -227,7 +243,7 @@ export const chatHandler = <A = string>(answer: (ctx: restate.ObjectContext, mes
       }
       const taken = new Set<string>();
       steerings.set(ctx, taken);
-      await publish(ctx);
+      await stepped(ctx);
       const end = async (cancelled = false) => {
         ctx.clear(TURN);
         ctx

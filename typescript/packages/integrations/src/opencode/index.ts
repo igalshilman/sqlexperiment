@@ -536,6 +536,7 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   name,
   description,
   schema,
+  background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });

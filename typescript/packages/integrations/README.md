@@ -78,6 +78,14 @@ Every framework takes `model`, `system`, `tools` and `output` (a
 system prompt for Claude and LangGraph, and is added to the framework's own
 (which tells the model about its tools) for pi, OpenCode and DeepSeek.
 
+Every agent takes these too, beside its framework's options:
+
+| Option        | What                                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                    |
+| `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended, and a steer waits for the end |
+| `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                                                          |
+
 ## Calling an agent
 
 Through Restate's ingress (port 8080), the request's body is the message,

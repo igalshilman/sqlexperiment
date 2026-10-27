@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-fns';
-import { type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
+import { inBackground, type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
 import * as log from './log.ts';
 import {
   agentOf,
@@ -216,8 +216,16 @@ export interface Synced extends Messages {
 /** An object's (or agent's) name, its description, and the tables of your own in its database, if any (see `object`). */
 export interface Definition<P extends string> {
   name: P;
+  /** What it is: for the UI, and for the model of a parent that hands it tasks (`subagent`). */
   description?: string;
   schema?: readonly restate.Step[];
+  /**
+   * Whether it works unwatched, such as a subagent: its turn calls its
+   * `signals` only at its end, not at each step, so a client that follows it
+   * sees each turn once it ended, and a steered message waits for the turn's
+   * end. `messages` has every turn as before.
+   */
+  background?: boolean;
 }
 
 /** A handler: `ctx` is the object's context, with `ctx.db`; the input, if any, is annotated. */
@@ -268,6 +276,8 @@ export const object = <P extends string, H extends Record<string, Handler>>(
     options?: restate.ObjectOptions;
   },
 ): restate.VirtualObjectDefinition<P, With<H>> => {
+  const { background, ...rest } = definition;
+  if (background) inBackground(definition.name);
   for (const name of [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED)]) {
     if (name in definition.handlers)
       throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);
@@ -284,7 +294,7 @@ export const object = <P extends string, H extends Record<string, Handler>>(
   };
   return withCompanion(
     restate.object({
-      ...definition,
+      ...rest,
       handlers: handlers as With<H>,
       options: { ...OPTIONS, ...definition.options },
     }),

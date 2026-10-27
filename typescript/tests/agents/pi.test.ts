@@ -216,6 +216,16 @@ describe('pi.chat', () => {
     expect(published).toBe(4);
   });
 
+  it('in the background, publishes only the end of a turn, which answers a steered message after it', async () => {
+    pi.agent({ name: 'unwatched', background: true });
+    const { answer, left, published } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages(), {
+      service: 'unwatched',
+    });
+    expect(answer).not.toContain(STEERED);
+    expect(left).toEqual([STEERED]);
+    expect(published).toBe(1);
+  });
+
   it('takes options for each invocation', async () => {
     const ada = object('ada');
     const chat = pi.chat(async (ctx) => ({ system: `You are ${ctx.key}.` }));
