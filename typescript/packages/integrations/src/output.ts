@@ -5,9 +5,11 @@
 //
 //   const planner = claude.agent({ name: 'planner', output: Plan });   // chat answers with a Plan
 //
-// A reply that is not such JSON is answered with what is wrong with it, once,
-// for the agent to answer again; then the prompt fails (a terminal error). A
-// retried attempt resumes the conversation, so it reads the same reply.
+// The JSON may be in a code fence, or after a sentence. A reply that is not
+// such JSON is answered with what is wrong with it, once, for the agent to
+// answer again; then the prompt fails (a terminal error), saying how the
+// reply starts. A retried attempt resumes the conversation, so it reads the
+// same reply.
 import * as restate from 'restate-fns';
 import { z } from 'zod';
 
@@ -19,17 +21,32 @@ const format = (output: z.ZodObject) =>
   'Your final reply is your answer, as JSON only (no other text): an object of this JSON schema.\n' +
   JSON.stringify(z.toJSONSchema(output));
 
-/** The JSON of `reply`: all of it, or what a code fence (```json) holds. */
-const jsonOf = (reply: string) => /```(?:json)?\s*\n([^]*?)\n?```/.exec(reply)?.[1] ?? reply;
+/**
+ * The JSON `reply` holds: all of it, what a code fence (```json) holds, or
+ * else its object, from its first `{` to its last `}` (a model that ends a
+ * long run often says a sentence first: "Done. Here is the summary: {...}").
+ */
+function jsonOf(reply: string): unknown {
+  const fenced = /```(?:json)?\s*\n([^]*?)\n?```/.exec(reply)?.[1];
+  const object = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1);
+  for (const text of [reply, fenced, object]) {
+    try {
+      if (text?.trim()) return JSON.parse(text);
+    } catch {
+      // the next
+    }
+  }
+  return undefined;
+}
+
+/** The start of `reply`, for an error. */
+const excerpt = (reply: string) => (reply.length > 300 ? `${reply.slice(0, 300)}…` : reply);
 
 /** `reply` as a value of `output`, or what is wrong with it. */
 function parsed<O extends z.ZodObject>(output: O, reply: string): { value: z.infer<O> } | { wrong: string } {
-  let json: unknown;
-  try {
-    json = JSON.parse(jsonOf(reply).trim());
-  } catch {
-    return { wrong: 'it is not JSON' };
-  }
+  if (!reply.trim()) return { wrong: 'it is empty' };
+  const json = jsonOf(reply);
+  if (json === undefined) return { wrong: `it is not JSON: ${JSON.stringify(excerpt(reply))}` };
   const result = output.safeParse(json);
   return result.success ? { value: result.data } : { wrong: z.prettifyError(result.error) };
 }
