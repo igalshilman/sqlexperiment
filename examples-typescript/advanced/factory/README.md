@@ -6,7 +6,12 @@ is ready to build, and leads the work: it asks a planner (Claude) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
 a coder (OpenCode) of its own, all at once: each on a git branch of its
-own, which it opens a pull request of, on GitHub, for people to review. Triage and the coders
+own, which it opens a pull request of, on GitHub. Each coder then has its
+pull request reviewed by a reviewer (Claude) of its own, in a conversation:
+the reviewer posts its review on the pull request, the coder makes the
+changes it asks for and asks again, until it approves. With every pull
+request approved, triage marks the issue Done, and leaves the merging to
+people. Triage and the coders
 move their issues along the team's workflow, and comment on them, through
 Linear's MCP server: on the real Linear, or on a stand-in,
 [`linear.ts`](linear.ts), with the same tools.
@@ -31,7 +36,7 @@ Linear's MCP server: on the real Linear, or on a stand-in,
   │        ▼                                                                           │       │
   │  ┌────────────────────────────────────┐  In Progress, the plan,                    │       │
   │  │ triage/ENG-1                   pi  │  a sub-issue per part,  ───────────────────┼───────┤
-  │  │ (the parent: triages, then leads)  │  In Review at the end                      │       │
+  │  │ (the parent: triages, then leads)  │  Done at the end                           │       │
   │  └──┬───────────────▲───────┬─────────┘  (or Backlog, Canceled)                    │       │
   │     │ subagent:     │ Plan, │ subagent, one per part, all at once                  │       │
   │     │ plan          │ JSON  ├──────────────┐                                       │       │
@@ -41,21 +46,26 @@ Linear's MCP server: on the real Linear, or on a stand-in,
   │  │               Claude │ │ ENG-1.     │ │ ENG-1.     ├────────────────────────────┼───────┘
   │  │                      │ │ parser     │ │ history    │                            │
   │  │ replies with the     │ │  OpenCode  │ │  OpenCode  │                            │
-  │  │ plan, as JSON        │ └─────┬──────┘ └─────┬──────┘                            │
-  │  │ (its output,         │       │              │                                   │
-  │  │  checked)            │       │              │                                   │
-  │  └──────────────────────┘       │              │                                   │
-  └─────────────────────────────────┼──────────────┼───────────────────────────────────┘
-   OpenCode's read, edit, bash;     ▼              ▼
-   each in a clone of its own, ┌────────────┐ ┌────────────┐
-   on its own branch, with     │ eng-1-     │ │ eng-1-     │
-   a pull request on GitHub    │ parser     │ │ history    │
-                               │ PR → main  │ │ PR → main  │
-                               └────────────┘ └────────────┘
+  │  │ plan, as JSON        │ └──┬─────▲───┘ └──┬─────▲───┘                            │
+  │  │ (its output,         │    │     │ Review │     │                                │
+  │  │  checked)            │    ▼     │        ▼     │                                │
+  │  └──────────────────────┘ ┌────────┴───┐ ┌────────┴───┐  each posts its review on  │
+  │                           │ reviewer/  │ │ reviewer/  │  the PR, round by round,   │
+  │                           │ ENG-1.     │ │ ENG-1.     │  until it approves         │
+  │                           │ parser.    │ │ history.   │                            │
+  │                           │ review     │ │ review     │                            │
+  │                           │     Claude │ │     Claude │                            │
+  │                           └────────────┘ └────────────┘                            │
+  └────────────────────────────────────────────────────────────────────────────────────┘
+   each coder in a clone of its own,    ┌────────────┐ ┌────────────┐
+   with OpenCode's read, edit, bash;    │ eng-1-     │ │ eng-1-     │
+   it pushes its branch, and opens a    │ parser     │ │ history    │
+   PR, which its reviewer reads         │ PR → main  │ │ PR → main  │
+                                        └────────────┘ └────────────┘
 ```
 
 The planner only plans: a Claude agent whose `output` is the plan's schema
-([`plan.ts`](plan.ts)), and no tools: triage hands it the issue's title
+([`answers.ts`](answers.ts)), and no tools: triage hands it the issue's title
 and description. Claude replies with the plan as JSON of that schema, which
 is checked, and the planner's `chat` answers with it, as a call answers.
 The parent acts on it: a sub-issue and a coder per part.
@@ -64,8 +74,10 @@ Each agent is a virtual object with its conversation in its own SQL
 database, keyed by its task (`coder/ENG-1.parser`): a crash resumes it
 where it was, and the parent waits for its answers without holding a
 process. Tasks of different names run at once, so the coders work side by
-side. The factory stops with their pull requests open, for people to review
-and merge.
+side. A coder asks its reviewer, a subagent of its own, in one task
+(`reviewer/ENG-1.parser.review`) each round: the reviewer remembers its last
+review, and reads what changed since. The factory stops with the pull
+requests approved and open, for people to merge.
 
 ## An issue's life
 
@@ -87,35 +99,39 @@ and merge.
   ENG-2  In Progress ◀───────────────────────────────────────────────────────┤           │
   ENG-3  In Progress ◀───────────────────────────────────────────────────────────────────┤
     │                                │                        │   code, tests, a PR      │
+    │                                │                        │   ⇅ reviewer (Claude):   │
+    │                                │                        │   rounds, until approved │
   ENG-2  Done, a comment ◀───────────────────────────────────────────────────┤           │
   ENG-3  Done, a comment ◀───────────────────────────────────────────────────────────────┤
     │                                │◀── answers ───────────────────────────┴───────────┘
-    │◀──── comment: what was built ──┤  (the pull requests, open for review)
-  ENG-1  In Review ◀─────────────────┤
+    │◀──── comment: what was built ──┤  (the pull requests, approved, not merged)
+  ENG-1  Done ◀──────────────────────┤
 ```
 
-Not every issue goes the whole way: triage leaves one that is unclear in
-**Backlog**, with a comment asking what it needs to know, and moves one that
-is a duplicate or nothing to build to **Canceled**.
+A pull request its reviewer has not approved after three rounds leaves its
+sub-issue, and the issue, **In Review**. And not every issue goes the whole
+way: triage leaves one that is unclear in **Backlog**, with a comment asking
+what it needs to know, and moves one that is a duplicate or nothing to build
+to **Canceled**.
 
 ## The files
 
-| File                           | What                                                                                                                 |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents                     |
-| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests     |
-| [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                            |
-| [`prompts.ts`](prompts.ts)     | The agents' system prompts: triage's, the planner's, a coder's                                                       |
-| [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                          |
-| [`workspace.ts`](workspace.ts) | The coders' clones of the project, each on its own branch; a first commit for an empty project; the stand-in's       |
-| [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment |
+| File                           | What                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders, each with a reviewer, as subagents                    |
+| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests, and the reviewer's tools |
+| [`answers.ts`](answers.ts)     | The agents' structured answers (`output`): the planner's plan, the reviewer's review, a coder's pull request                               |
+| [`prompts.ts`](prompts.ts)     | The agents' system prompts: triage's, the planner's, a coder's, the reviewer's                                                             |
+| [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                                                |
+| [`workspace.ts`](workspace.ts) | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
+| [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
 
 ## Run it, on the stand-in
 
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
 OpenAI's for triage (in its fast mode: it coordinates), Anthropic's for the
-planner (Claude Opus) and the coders (Claude Sonnet):
+planner and the reviewers (Claude Opus) and the coders (Claude Sonnet):
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
@@ -135,15 +151,17 @@ curl localhost:8080/triage/ENG-1/status            # what triage is doing now
 curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
 curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
 curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
+curl localhost:8080/reviewer/ENG-1.parser.review/messages   # its reviewer's: the review, round by round
 curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
 ```
 
 Restate's UI, at http://localhost:9070, shows the same work as calls:
-triage's, and the planner's and coders' under it.
+triage's, the planner's and coders' under it, and each coder's reviewer
+under the coder.
 
 `linear.ts` prints each issue, move and comment as it happens. Without
 GitHub, a git repository in `WORKSPACE/origin.git` stands in for the
-project's, and `factory.ts` prints each pull request. The coders run real
+project's, and `factory.ts` prints each pull request, and each review. The coders run real
 commands, on this machine, in `WORKSPACE` (`/tmp/restate-factory` by
 default): run it in a sandbox (a container, a VM).
 
@@ -174,7 +192,9 @@ requests. Use a team and a repository of their own, for the factory.
    coders), and a fine-grained personal access token for it alone, with read and write
    access to its contents and pull requests: `GITHUB_TOKEN`. The coders push
    their branches with it, and open pull requests through GitHub's MCP
-   server (`https://api.githubcopilot.com/mcp/`). With Linear's GitHub
+   server (`https://api.githubcopilot.com/mcp/`), where the reviewers post
+   their reviews, as comments (an author cannot approve their own pull
+   request on GitHub: the factory's approval shows in Linear). With Linear's GitHub
    integration, a pull request shows on its issue too: its branch names it
    (`eng-1-parser`).
 
@@ -206,9 +226,13 @@ it takes the comment once they answer.
   one. With a secret, a webhook that Linear did not sign is refused (401).
   Its routes, auth and idempotency header are in the handler's metadata,
   in the admin API and the UI.
-- **A structured answer from an agent**: the planner's answer is a `Plan`,
-  the model's reply checked against its schema (`output`): the subagent
-  call's return value, not text to parse.
+- **Structured answers from agents**: the planner's answer is a `Plan`, the
+  reviewer's a `Review`, a coder's what it `Built` (its pull request, and
+  whether it is approved): the model's reply checked against its schema
+  (`output`), the subagent call's return value, not text to parse.
+- **A conversation between agents**: a coder and its reviewer (OpenCode
+  and Claude) go round by round, the coder asking in the same task each
+  time, so the reviewer reviews what changed against its last review.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.
@@ -218,8 +242,8 @@ it takes the comment once they answer.
   description, opens with who wrote it ("🧭 Triage", "🛠️ Coder · parser"):
   `env.linearTools(who)` adds it, in code. They write for the people
   following the issue, in plain sentences; triage ends with a "✅ Summary"
-  comment: what was built, how to run it, whether its tests pass, and what
-  is left open.
+  comment: what was built, how to run it, whether each pull request is
+  approved, and what is left open.
 - **MCP tools in any agent**: `mcpTools(url)` turns an MCP server's tools
   into `tool()`s, which pi, Claude and OpenCode take alike. A tool call is
   stored once it is done; a crash makes again only one that had not

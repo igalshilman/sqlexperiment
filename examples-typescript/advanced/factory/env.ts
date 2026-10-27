@@ -9,7 +9,7 @@
 import { type Tool, tool, type WebhookAuth } from 'restate-agents';
 import { z } from 'zod';
 import { mcpTools } from './mcp.ts';
-import { clone, project, standInRemote } from './workspace.ts';
+import { clone, project, pushed, standInRemote } from './workspace.ts';
 
 const apiKey = process.env.LINEAR_API_KEY;
 const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
@@ -17,10 +17,13 @@ const { GITHUB_REPO: repo, GITHUB_TOKEN: token } = process.env;
 if (repo && !token) throw new Error(`GITHUB_REPO is ${repo}: set GITHUB_TOKEN too, a token that can push to it`);
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
 
-/** Who wrote a comment or a pull request: the agent `who`, and its task, if it has one (`ENG-1.parser`). */
+/**
+ * Who wrote a comment or a pull request: the agent `who`, and its part, if it
+ * works on one (`ENG-1.parser`, and its reviewer's `ENG-1.parser.review`).
+ */
 const signature = (who: string, key: string) => {
-  const task = key.split('.').slice(1).join('.');
-  return `**${who}${task ? ` · ${task}` : ''}**`;
+  const part = key.split('.')[1];
+  return `**${who}${part ? ` · ${part}` : ''}**`;
 };
 
 /** Linear's tools (issues, sub-issues, states, comments), from its MCP server. */
@@ -89,15 +92,15 @@ const remote = await project(repo ? `https://github.com/${repo}.git` : await sta
 /** A coder's directory: a clone of the project, on a branch of its own (see workspace.ts). */
 export const coderWorkspace = ({ key }: { key: string }) => clone(workspace, remote, key);
 
-/** GitHub's `create_pull_request`, from its MCP server. */
-const createPullRequest = repo ? await githubTool('create_pull_request') : undefined;
-
-async function githubTool(name: string) {
-  const tools = await mcpTools('https://api.githubcopilot.com/mcp/', { authorization: `Bearer ${token}` });
-  const found = tools.find((t) => t.name === name);
+/** GitHub's tools, from its MCP server: those the factory uses. */
+const github = repo ? await mcpTools('https://api.githubcopilot.com/mcp/', { authorization: `Bearer ${token}` }) : [];
+const githubTool = (name: string) => {
+  const found = github.find((t) => t.name === name);
   if (!found) throw new Error(`GitHub's MCP server has no ${name} tool`);
   return found;
-}
+};
+const createPullRequest = repo ? githubTool('create_pull_request') : undefined;
+const addComment = repo ? githubTool('add_issue_comment') : undefined;
 
 let standInPulls = 0;
 
@@ -126,3 +129,47 @@ export const pullRequestTool = (who: string) =>
       return createPullRequest.run({ owner, repo: name, title, body: described, head, base }, call);
     },
   });
+
+/** What a read of a pull request answers: what it read, or why it could not. */
+const reading = (read: () => Promise<string>) =>
+  read().catch((e: Error) => `Could not read it (pushed yet?): ${e.message}`);
+
+/** The pull request the reviewer `key` reviews: its coder's, as pushed. */
+const pullRequest = (key: string) => pushed(workspace, key.split('.').slice(0, 2).join('.'));
+
+/**
+ * The reviewer's tools, for the agent `who`: the pull request it reviews, as
+ * pushed (its coder's: `ENG-1.parser.review` reviews `ENG-1.parser`'s), and a
+ * comment on it, its review. On the stand-in, a comment is only logged.
+ */
+export const reviewTools = (who: string): Tool[] => [
+  tool({
+    name: 'pull_request_diff',
+    description: "The pull request's changes, as pushed: the files it changes, and their diff against main",
+    input: z.object({}),
+    run: (_, call) => reading(() => pullRequest(call.ctx.key).changes()),
+  }),
+  tool({
+    name: 'read_file',
+    description: 'A file of the pull request, as pushed, by its path in the project',
+    input: z.object({ path: z.string() }),
+    run: ({ path }, call) => reading(() => pullRequest(call.ctx.key).file(path)),
+  }),
+  tool({
+    name: 'comment_on_pull_request',
+    description: 'Post your review on the pull request, as a comment',
+    input: z.object({
+      number: z.number().int().describe("The pull request's number"),
+      body: z.string().describe('The review, in Markdown'),
+    }),
+    run: async ({ number, body }, call) => {
+      const signed = `${signature(who, call.ctx.key)}\n\n${body}`;
+      if (!addComment) {
+        console.log(`review of pull request #${number}:\n${signed}`);
+        return 'Posted (on the stand-in: logged)';
+      }
+      const [owner, name] = repo!.split('/');
+      return addComment.run({ owner, repo: name, issue_number: number, body: signed }, call);
+    },
+  }),
+];

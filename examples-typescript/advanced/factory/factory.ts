@@ -1,29 +1,43 @@
 /**
  * A software factory, in miniature: a new Linear issue starts it, through a
  * webhook. Triage (pi) leads the work: a planner (Claude) plans it in parts,
- * and a coder (OpenCode) builds each part on a branch of its own, with a pull
- * request. How to run it, and follow it: README.md.
+ * a coder (OpenCode) builds each part on a branch of its own, with a pull
+ * request, which a reviewer (Claude) reviews with it, round by round, until
+ * it approves. How to run it, and follow it: README.md.
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 import * as env from './env.ts';
-import { Plan } from './plan.ts';
+import { Built, Plan, Review } from './answers.ts';
 import * as prompts from './prompts.ts';
 
 /**
  * Each agent on a model for its work: triage, which coordinates, on OpenAI's,
- * in its fast mode; the coders on Claude Sonnet; the planner on Claude Opus,
- * at medium effort. Their system prompts are in prompts.ts.
+ * in its fast mode; the coders on Claude Sonnet; the planner and the reviewer
+ * on Claude Opus, at medium and high effort. Their system prompts are in
+ * prompts.ts.
  */
+const reviewer = claude.agent({
+  name: 'reviewer',
+  description: 'Reviews a pull request, as pushed, and posts its review on it: approved, or the changes to make',
+  model: 'anthropic/claude-opus-5-5',
+  effort: 'high',
+  maxTokens: 16_000,
+  tools: env.reviewTools('🔍 Reviewer'),
+  system: prompts.REVIEWER,
+  output: Review,
+});
+
 const coder = opencode.agent({
   name: 'coder',
-  description: 'Builds a part of the plan, on a branch of its own, and opens its pull request',
+  description: 'Builds a part of the plan, on a branch of its own, and opens its pull request, reviewed',
   model: 'anthropic/claude-sonnet-5-5',
   workspace: env.coderWorkspace, // a clone of the project, on its own branch
-  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
+  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder'), subagent(reviewer)],
   system: prompts.CODER,
+  output: Built,
 });
 
 /** The planner: no tools, it reads the issue it is given. Its answer is a `Plan`. */
@@ -65,4 +79,4 @@ const linearEvents = webhook({
   },
 });
 
-await serve(linearEvents, triage, planner, coder);
+await serve(linearEvents, triage, planner, coder, reviewer);
