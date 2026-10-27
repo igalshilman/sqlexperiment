@@ -285,7 +285,9 @@ function refused(error: unknown) {
   if (error instanceof ModelError) return true;
   if (error instanceof ToolError) return false;
   if (error instanceof Error && FOR_GOOD.has(error.constructor.name)) return true;
-  return /API key not found|no API key|Could not resolve authentication method|"code":"AUTH"/i.test(String(error));
+  return /API key not found|no API key|Could not resolve authentication method|Provider is not configured|"code":"(AUTH|MISSING_CREDENTIAL)"/i.test(
+    String(error),
+  );
 }
 
 /**

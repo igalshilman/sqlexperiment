@@ -7,8 +7,10 @@
 // with options for each invocation: `deepseek.chat(async (ctx) => ({ system }))`,
 // or a prompt of your own handler: `deepseek.prompt(ctx, text, options)`
 //
-// The model is DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key): `model`,
-// or else MODEL, or else deepseek/deepseek-flash, with DEEPSEEK_API_KEY.
+// The model is `model`, or else MODEL, or else deepseek/deepseek-flash:
+// DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key), with DEEPSEEK_API_KEY,
+// or any model pi-ai knows (@deepseek-ai/dsh-llm-pi-ai), with its provider's
+// key: `openai/gpt-6-sol` with OPENAI_API_KEY, say.
 //
 // The handler is not replayed: a retried attempt (a crash, a lost connection)
 // boots the harness again and resumes the session from the stored log.
@@ -31,11 +33,13 @@ import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
 import * as deepseek from '@deepseek-ai/dsh-llm-deepseek-api-key';
+import * as piAi from '@deepseek-ai/dsh-llm-pi-ai';
 import { LlmRuntime, MessageId, freezeMessage, type Message, type UserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session';
 import * as checkpoints from '@deepseek-ai/dsh-session-checkpoint-policy';
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection';
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import {
   defineTool,
   type InferArgs,
@@ -51,11 +55,13 @@ import {
   cancellationOf,
   chatHandler,
   type Configure,
+  checkModelName,
   configured,
   messagesHandler,
-  modelIdOf,
+  ModelError,
   modelOf,
   nextPromptId,
+  providerOf,
   settleSteering,
   type Steerable,
   toolCallEnded,
@@ -88,8 +94,35 @@ const textTool = <const S extends ParameterSchemaSpec>(options: {
 /** The default model. */
 const DEEPSEEK_MODEL = 'deepseek/deepseek-flash';
 
-/** The harness, its session in `db`: the services an agent loop needs, the persistence and its checkpoints. */
-async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
+/** A model as the harness names it: its provider route, and its id there. */
+interface Route {
+  provider: string;
+  model: string;
+}
+
+/**
+ * `model` (`provider/model-id`) as the harness's route: DeepSeek's own
+ * provider, or else pi-ai's provider of that name, if it has the model.
+ */
+function routeOf(model: string): Route {
+  const [provider, id] = providerOf(model);
+  if (provider === 'deepseek') return { provider: 'deepseek-official', model: id };
+  const from = process.env.MODEL === model ? ' (from MODEL)' : '';
+  const known = builtinProviders().find((p) => p.id === provider);
+  if (!known) {
+    throw new ModelError(`deepseek: the model "${model}"${from} is not provider/model-id of a provider pi-ai knows`);
+  }
+  if (!known.getModels().some((m) => m.id === id)) {
+    throw new ModelError(`deepseek: pi-ai knows no model "${id}" of ${provider} (the model "${model}"${from})`);
+  }
+  return { provider, model: id };
+}
+
+/**
+ * The harness, its session in `db`: the services an agent loop needs, the
+ * persistence and its checkpoints, and the provider of `route`.
+ */
+async function boot(db: restate.SqlSession, route: Route, system?: string): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
@@ -99,7 +132,9 @@ async function boot(db: restate.SqlSession, system?: string): Promise<Context> {
   await harness.plugin(SessionProjectionRegistry);
   await harness.plugin(SqlSessionPersistence, { db });
   await harness.plugin(checkpoints);
-  await harness.plugin(deepseek, {}); // DEEPSEEK_API_KEY
+  // DeepSeek's with DEEPSEEK_API_KEY; another's with the key pi-ai finds for it (OPENAI_API_KEY...).
+  if (route.provider === 'deepseek-official') await harness.plugin(deepseek, {});
+  else await harness.plugin(piAi, { providers: { [route.provider]: {} } });
   await harness.plugin(AgentLoop, { agents: [] });
   return harness;
 }
@@ -214,7 +249,10 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolDefinition =>
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options {
-  /** The model, as `deepseek/model-id`: MODEL, or else deepseek/deepseek-flash. */
+  /**
+   * The model, as `provider/model-id`: MODEL, or else deepseek/deepseek-flash.
+   * DeepSeek's, or any pi-ai knows, such as `openai/gpt-6-sol`.
+   */
   model?: string;
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
@@ -242,7 +280,8 @@ const answerOnce = async (
   { model: named, system, tools = [] }: Options,
 ): Promise<string> => {
   const id = nextPromptId(ctx);
-  const harness = await boot(ctx.db, system);
+  const route = routeOf(modelOf(named, DEEPSEEK_MODEL));
+  const harness = await boot(ctx.db, route, system);
   // A tool's error fails the attempt, which Restate retries: the harness
   // stores nothing more, so the retry finds the tool's call without a result.
   const { promise: failed, reject: fail } = Promise.withResolvers<never>();
@@ -255,7 +294,7 @@ const answerOnce = async (
     const sessionId = SessionId(ctx.key);
     const steerable = () => steeringOf(agent!);
     const options = {
-      agentOptions: { provider: 'deepseek-official', model: modelIdOf(modelOf(named, DEEPSEEK_MODEL), 'deepseek') },
+      agentOptions: route,
       setup: (agentCtx: Context) => {
         for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, steerable, fail));
       },
@@ -358,7 +397,10 @@ const tracked = (
  * a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = (options: Configure<Options> = {}) => {
-  if (typeof options === 'object') modelIdOf(modelOf(options.model, DEEPSEEK_MODEL), 'deepseek');
+  if (typeof options === 'object') {
+    checkModelName('deepseek', options.model);
+    routeOf(modelOf(options.model, DEEPSEEK_MODEL));
+  }
   return chatHandler(async (ctx, text) => prompt(ctx, text, await configured(options, ctx)));
 };
 

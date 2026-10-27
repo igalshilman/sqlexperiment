@@ -70,7 +70,7 @@ and `pending` ([Signals](#signals)).
 | [`restate-agents/opencode`](src/opencode/README.md)   | OpenCode 2.0, embedded          | You want a coding agent: OpenCode's own tools (read, edit, bash, grep...) in a directory      |
 | [`restate-agents/langgraph`](src/langgraph/README.md) | LangGraph                       | You use LangChain: its tools, or a chat model of your own                                     |
 | [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
-| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's models, on DeepSeek's harness                                             |
+| [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
 
 Every framework takes `model`, `system` and `tools`; pi and OpenCode take a
 `workspace` too, a directory for their coding tools. `system` is the whole
@@ -399,9 +399,9 @@ environment variable, or else OpenAI's `openai/gpt-6-sol`, with
 pi.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with ANTHROPIC_API_KEY
 ```
 
-pi and OpenCode take any provider they know; LangGraph OpenAI's and
-Anthropic's models (and any LangChain chat model, as `model`); Claude
-Anthropic's.
+pi, OpenCode and the DeepSeek Harness take any provider they know (the
+DeepSeek Harness, pi-ai's); LangGraph OpenAI's and Anthropic's models (and
+any LangChain chat model, as `model`); Claude Anthropic's.
 
 A wrong model fails at once: a model that is not `provider/model-id`, or
 another provider's for an agent of one provider's models, when the agent is

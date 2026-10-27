@@ -7,7 +7,7 @@ model service, a tool registry, and an event-sourced session that is the
 source of truth for everything the agent did. Here the session is in the
 agent's SQL database ([SQL in Restate virtual objects](../../../sql/README.md)),
 and is the object's key. The integration pins the harness's `next` release
-line, 0.2.0-rc.2, exactly: its packages are release candidates that require
+line, 0.2.1-rc.2, exactly: its packages are release candidates that require
 each other's exact versions.
 
 ## Use
@@ -21,11 +21,27 @@ const assistant = deepseek.agent({ name: 'assistant', system: 'Answer briefly.',
 await serve(assistant);
 ```
 
-| Option   | What                                                                                         |
-| -------- | -------------------------------------------------------------------------------------------- |
-| `model`  | `deepseek/model-id`; or else `MODEL`, or else `deepseek/deepseek-flash` (`DEEPSEEK_API_KEY`) |
-| `system` | The system prompt                                                                            |
-| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the harness's `defineTool`s            |
+| Option   | What                                                                                |
+| -------- | ----------------------------------------------------------------------------------- |
+| `model`  | `provider/model-id`; or else `MODEL`, or else `deepseek/deepseek-flash` (see below) |
+| `system` | The system prompt                                                                   |
+| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the harness's `defineTool`s   |
+
+## Models
+
+DeepSeek's models go to DeepSeek, with `DEEPSEEK_API_KEY`. Any other model
+pi-ai knows goes through the harness's pi-ai adapter
+(`@deepseek-ai/dsh-llm-pi-ai`), with its provider's usual key: nothing else
+to set up.
+
+```ts
+deepseek.agent({ name: 'assistant' }); // deepseek/deepseek-flash, with DEEPSEEK_API_KEY
+deepseek.agent({ name: 'assistant', model: 'openai/gpt-6-sol' }); // with OPENAI_API_KEY
+deepseek.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with ANTHROPIC_API_KEY
+```
+
+A provider or model pi-ai does not know fails when the agent is defined; a
+missing or wrong key fails the invocation with a terminal error (424).
 
 For an object of your own, `deepseek.chat(options)` and
 `deepseek.messages()` are the handlers; `options` may be a function of the
@@ -70,6 +86,7 @@ it, and leaves the model to decide what to do about it. So:
 
 ```sh
 cd examples-typescript && DEEPSEEK_API_KEY=… node deepseek.ts
+cd examples-typescript && MODEL=openai/gpt-6-sol OPENAI_API_KEY=… node deepseek.ts   # on GPT
 ```
 
 With a Restate server, and the agent registered with it: see
