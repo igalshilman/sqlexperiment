@@ -34,17 +34,13 @@ export { webhook, webhookMessage, type WebhookAuth, type WebhookEvent, type Webh
 /**
  * Serve `services` on PORT (default 9080), with what the agents need beside
  * them (the `signals` object). RESTATE_SERVE_ONLY, names separated by commas
- * (`triage,planner`), serves only those of them: one image, deployed in parts.
+ * (`triage,planner,signals`), serves only those of them: one image, deployed
+ * in parts. The agents reach `signals` through Restate, so one part serves it
+ * for them all.
  */
 export const serve = (...services: restate.ServeOptions['services']) =>
   restate.serve({
-    services: [
-      ...only(
-        services.filter((s) => s !== signals),
-        process.env.RESTATE_SERVE_ONLY,
-      ),
-      signals,
-    ],
+    services: only([...services.filter((s) => s !== signals), signals], process.env.RESTATE_SERVE_ONLY),
     port: Number(process.env.PORT ?? 9080),
   });
 
