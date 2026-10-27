@@ -21,14 +21,14 @@ const coder = opencode.agent({ name: 'coder', workspace: '/work/coder' });
 await serve(coder);
 ```
 
-| Option      | What                                                                                                                                                                                                        |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                                                                        |
-| `system`    | The system prompt                                                                                                                                                                                           |
-| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                                           |
-| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                              |
-| `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools`                                     |
-| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples-typescript/intermediate/review.ts`](../../../../../examples-typescript/intermediate/review.ts)) |
+| Option      | What                                                                                                                                                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                                                                                                                   |
+| `system`    | The system prompt                                                                                                                                                                                                                                      |
+| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                                                                                      |
+| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                                                                         |
+| `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools` |
+| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples-typescript/intermediate/review.ts`](../../../../../examples-typescript/intermediate/review.ts))                                            |
 
 For an object of your own, `opencode.chat(options)` and
 `opencode.messages()` are the handlers; `options` may be a function of the
