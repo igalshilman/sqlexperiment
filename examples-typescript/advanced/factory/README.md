@@ -263,6 +263,22 @@ and its sub-issues appear, each moving on its own. Comment on the issue
 it takes the comment once they answer. Comment on a pull request, or review
 it, on GitHub: its coder answers there, and pushes what you asked for.
 
+## Run it, in a container
+
+The factory's image, [`Dockerfile`](Dockerfile), is built and pushed to
+`ghcr.io/igalshilman/sqlexperiment/factory` on each push to `main`
+([the workflow](../../../.github/workflows/factory-image.yml)). It runs the
+factory on Linear and GitHub, as above; Restate registers it at port 9080.
+It holds no secrets (`.dockerignore` keeps every `.env` out): give them to it.
+
+```sh
+docker run -p 9080:9080 -v factory:/data --env-file examples-typescript/.env \
+  ghcr.io/igalshilman/sqlexperiment/factory
+```
+
+The coders run real commands in it, in `/data/workspace`: the container is
+their sandbox.
+
 ## What it shows
 
 - **A webhook into agents**: `webhook()` of restate-agents makes the

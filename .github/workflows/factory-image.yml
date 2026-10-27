@@ -1,0 +1,54 @@
+# The software factory's image (examples-typescript/advanced/factory), on
+# GitHub's container registry: ghcr.io/igalshilman/sqlexperiment/factory.
+#
+# A push to main pushes :latest and :sha-<commit>; a pull request only builds
+# it. Run it by hand from the Actions tab (workflow_dispatch).
+name: factory image
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - examples-typescript/advanced/factory/**
+      - examples-typescript/package.json
+      - typescript/**
+      - core/**
+      - .dockerignore
+      - .github/workflows/factory-image.yml
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/factory
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: examples-typescript/advanced/factory/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
