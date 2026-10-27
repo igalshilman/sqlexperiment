@@ -214,10 +214,12 @@ it takes the comment once they answer.
   waits for them all, holding no process.
 - **Status in Linear**: triage and each coder move their own issue with
   Linear's tools, so the board shows the work as it goes, down to each part.
-  They all comment as one Linear user, so each comment opens with who wrote
-  it ("🧭 Triage", "🛠️ Coder · parser"): `env.linearTools(who)` adds it to
-  every comment, in code. Triage ends with a "✅ Summary" comment: what was
-  built, how to run it, whether its tests pass, and what is left open.
+  They all write as one Linear user, so each comment, and each sub-issue's
+  description, opens with who wrote it ("🧭 Triage", "🛠️ Coder · parser"):
+  `env.linearTools(who)` adds it, in code. They write for the people
+  following the issue, in plain sentences; triage ends with a "✅ Summary"
+  comment: what was built, how to run it, whether its tests pass, and what
+  is left open.
 - **MCP tools in any agent**: `mcpTools(url)` turns an MCP server's tools
   into `tool()`s, which pi, Claude and OpenCode take alike. A tool call is
   stored once it is done; a crash makes again only one that had not
