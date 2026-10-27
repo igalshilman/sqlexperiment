@@ -16,7 +16,7 @@
 // The other system posts to Restate's ingress, at `/<name>/webhook`.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { signals } from './signals.ts';
+import { deliver, hasCompanion } from './signals.ts';
 
 /** How a webhook is signed: the HMAC-SHA256 of its body with `secret`, in hex, in the request's `header`. */
 export interface WebhookAuth {
@@ -26,8 +26,8 @@ export interface WebhookAuth {
   secret: string;
 }
 
-/** An agent (an `object()` with a `chat` handler) that webhooks go to. */
-type Route = restate.VirtualObjectDefinition<string, { chat: unknown; status: unknown }>;
+/** An agent (an `object()` or `agent()` of restate-agents, with a `chat` handler) that webhooks go to. */
+type Route = restate.VirtualObjectDefinition<string, { chat: unknown }>;
 
 /** A webhook service's options. */
 export interface WebhookOptions<T, P extends string> {
@@ -100,6 +100,9 @@ export const webhook = <T = unknown, P extends string = string>({
   key,
 }: WebhookOptions<T, P>) => {
   if (route.length === 0) throw new Error(`webhook ${name}: route it to at least one agent`);
+  for (const agent of route) {
+    if (!hasCompanion(agent)) throw new Error(`webhook ${name}: ${agent.name} is not an object() or agent()`);
+  }
   if (auth && !auth.secret) throw new Error(`webhook ${name}: its auth has no secret (unset in the environment?)`);
   const what = description ?? `A webhook into ${route.map((r) => r.name).join(', ')}`;
   return restate.service({
@@ -127,14 +130,8 @@ export const webhook = <T = unknown, P extends string = string>({
           const delivery = (idempotencyHeader && headers.get(idempotencyHeader)) || ctx.request().id;
           const to = key ? key(event) : delivery;
           if (to === undefined) return;
-          for (const agent of route) {
-            ctx
-              .objectSendClient(signals, `${agent.name}:${to}`)
-              .deliver(
-                { agent: { service: agent.name, key: to }, text: webhookMessage(name, delivery, event) },
-                restate.rpc.sendOpts({ idempotencyKey: `webhook:${name}:${delivery}` }),
-              );
-          }
+          const text = webhookMessage(name, delivery, event);
+          for (const agent of route) deliver(ctx, agent, to, text, { idempotencyKey: `webhook:${name}:${delivery}` });
         },
       ),
     },

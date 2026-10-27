@@ -422,6 +422,11 @@ next step (as `steer`); else as a message of its own (as `chat`). A turn
 that ends, or is stopped, before it takes it answers it after: a delivery is
 never dropped, as a steer to a stopped turn is.
 
+The same delivery is yours from any handler, for events of other kinds (a
+queue, a schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
+Every `object()` and `agent()` knows its companion, `companionOf(agent, key)`
+(its `signals` object and key), so whoever holds an agent can reach it.
+
 The agent's message says where it comes from, with the body as JSON:
 
 ```
