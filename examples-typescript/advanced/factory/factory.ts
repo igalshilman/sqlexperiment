@@ -42,7 +42,6 @@ const linear = await linearTools();
 const coder = deepseek.agent({
   name: 'coder',
   description: "Builds a part of the plan, in the issue's directory",
-  background: true, // a subagent: triage waits for its answer, no one watches it work
   tools: [...linear, ...workspaceTools(workspace)], // the issue's directory, shared by its coders
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
@@ -63,7 +62,6 @@ const planner = claude.agent({
   description: 'Plans the work on an issue, from its title and description: a summary, and parts to build at once',
   system: PLANNER,
   output: Plan,
-  background: true,
 });
 
 const triage = pi.agent({
