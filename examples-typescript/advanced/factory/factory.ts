@@ -2,8 +2,8 @@
  * A software factory, in miniature: a new Linear issue starts it, through a
  * webhook. Triage (pi) leads the work: a planner (Claude) plans it in parts,
  * a coder (OpenCode) builds each part on a branch of its own, with a pull
- * request, which a reviewer (Claude) reviews with it, round by round, until
- * it approves. How to run it, and follow it: README.md.
+ * request, and a reviewer (Claude) reviews it, its changes going back to the
+ * coder, until it approves. How to run it, and follow it: README.md.
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
@@ -32,10 +32,11 @@ const reviewer = claude.agent({
 
 const coder = opencode.agent({
   name: 'coder',
-  description: 'Builds a part of the plan, on a branch of its own, and opens its pull request, reviewed',
+  description:
+    "Builds a part of the plan, on a branch of its own, and opens its pull request; makes a review's changes",
   model: 'anthropic/claude-sonnet-5-5',
   workspace: env.coderWorkspace, // a clone of the project, on its own branch
-  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder'), subagent(reviewer)],
+  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
   system: prompts.CODER,
   output: Built,
 });
@@ -54,7 +55,7 @@ const triage = pi.agent({
   name: 'triage',
   model: 'openai/gpt-6-sol',
   serviceTier: 'fast', // OpenAI's fast mode
-  tools: [...env.linearTools('🧭 Triage'), subagent(planner), subagent(coder)],
+  tools: [...env.linearTools('🧭 Triage'), subagent(planner), subagent(coder), subagent(reviewer)],
   system: prompts.TRIAGE,
 });
 

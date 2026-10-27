@@ -39,11 +39,9 @@ export const Review = z.object({
   changes: z.array(z.string()).describe('What to change before it is ready, each in a sentence; none if approved'),
 });
 
-/** A coder's: its part's pull request, and whether the reviewer approved it. */
+/** A coder's: its part's pull request, as it pushed it. */
 export const Built = z.object({
   pullRequest: z.string().describe("The pull request's link, as create_pull_request answered"),
-  approved: z.boolean().describe('Whether the reviewer approved it'),
-  summary: z
-    .string()
-    .describe('What was built, and its tests, in a sentence or two; and what the reviewer still asks for, if anything'),
+  number: z.number().int().describe("The pull request's number"),
+  summary: z.string().describe('What was built, or changed, and its tests, in a sentence or two'),
 });
