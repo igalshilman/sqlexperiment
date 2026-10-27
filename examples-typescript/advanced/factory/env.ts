@@ -137,7 +137,7 @@ const pullRequest = (key: string) => pushed(workspace, key);
 /**
  * The reviewer's tools, for the agent `who`: the pull request it reviews, as
  * pushed (its coder's: `reviewer/ENG-1.parser` reviews `coder/ENG-1.parser`'s),
- * and a comment on it, its review. On the stand-in, a comment is only logged.
+ * and a comment on it, its review.
  */
 export const reviewTools = (who: string): Tool[] => [
   tool({
@@ -152,21 +152,29 @@ export const reviewTools = (who: string): Tool[] => [
     input: z.object({ path: z.string() }),
     run: ({ path }, call) => reading(() => pullRequest(call.ctx.key).file(path)),
   }),
+  pullRequestCommentTool(who),
+];
+
+/**
+ * `comment_on_pull_request` for the agent `who`: a comment on a pull request,
+ * signed, such as a review, or a coder's answer to one. On the stand-in, a
+ * comment is only logged.
+ */
+export const pullRequestCommentTool = (who: string) =>
   tool({
     name: 'comment_on_pull_request',
-    description: 'Post your review on the pull request, as a comment',
+    description: 'Comment on a pull request: a review, or an answer to one',
     input: z.object({
       number: z.number().int().describe("The pull request's number"),
-      body: z.string().describe('The review, in Markdown'),
+      body: z.string().describe('The comment, in Markdown'),
     }),
     run: async ({ number, body }, call) => {
       const signed = `${signature(who, call.ctx.key)}\n\n${body}`;
       if (!addComment) {
-        console.log(`review of pull request #${number}:\n${signed}`);
+        console.log(`comment on pull request #${number}:\n${signed}`);
         return 'Posted (on the stand-in: logged)';
       }
       const [owner, name] = repo!.split('/');
       return addComment.run({ owner, repo: name, issue_number: number, body: signed }, call);
     },
-  }),
-];
+  });

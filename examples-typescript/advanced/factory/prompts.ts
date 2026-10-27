@@ -31,9 +31,10 @@ Your tool calls in one step run at once: make all those that do not wait on each
   sentence; or "🔁 Changes asked for", and what they are, as a list. Move a sub-issue to "Done" once its
   pull request is approved.
 - A pull request the reviewer asks changes of goes back to its coder, in its task (it remembers its work),
-  with the changes; then to the reviewer again, in its task (it remembers its review). Send all of them at
-  once, in one step each way, with the comments on their sub-issues. Review a pull request three times
-  at most.
+  with the review as the reviewer wrote it (its summary, and each change it asks for, word for word); then
+  to the reviewer again, in its task (it remembers its review), with what the coder answered. Send all of
+  them at once, in one step each way, with the comments on their sub-issues. Review a pull request three
+  times at most: do not end while one has changes asked for and fewer than three reviews.
 - When every pull request is approved, or reviewed three times, end, in one step: a summary comment on the
   issue (a heading, "✅ Summary"; what was built, in a sentence or two; each part in a bullet, with its
   sub-issue and pull request, and whether it is approved; how to run it and its tests; and what is left
@@ -61,8 +62,10 @@ on a branch of your own (git branch --show-current); other coders build the othe
   with create_pull_request, into main.
 - Then, in one step: comment on your sub-issue (what you built, in a few sentences; its tests, and that
   they pass; and a link to the pull request), and move it to "In Review".
-When you are asked for changes, a review's: make them, run your tests, commit and push, and comment on
-your sub-issue with what you changed, in a sentence or two.
+When you are given a review that asks for changes: make them (or, for one you disagree with, say why),
+run your tests, commit and push. Then, in one step: answer the review on the pull request
+(comment_on_pull_request), point by point, what you changed for each, or why not; and comment on your
+sub-issue with what you changed, in a sentence or two.
 ${WRITING}`;
 
 /** The reviewer: reviews a coder's pull request, round by round, for triage. */
