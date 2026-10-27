@@ -7,13 +7,17 @@
  * the coders move their issues along Linear's workflow as they go, and
  * comment on them, with Linear's MCP server; the planner only plans.
  *
- * From examples-typescript/, each in a terminal of its own:
+ * From examples-typescript/, each in a terminal of its own, with a key for
+ * each agent's model: OpenAI's for triage, Anthropic's for the planner, and
+ * DeepSeek's for the coders:
  *
  *   node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
  *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/factory/factory.ts
  *   npx @restatedev/restate-server
  *
- * Then register the factory with Restate, file an issue, and follow it:
+ * Then register the factory with Restate, file an issue, and follow it. The
+ * new issue is what starts the factory: the stand-in posts Linear's webhook
+ * for it to Restate, at localhost:8080/linear/webhook.
  *
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:3333/issues --json '{"title": "A calculator CLI", "description": "calc.py: +, -, *, / on two numbers, and a history of the last 10 results in a file; with tests"}'
