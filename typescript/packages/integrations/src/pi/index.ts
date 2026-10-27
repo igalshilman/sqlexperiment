@@ -67,6 +67,7 @@ import {
   type Transcript,
   transcribing,
 } from '../common.ts';
+import { type Answer, withOutput } from '../output.ts';
 import { type Definition, object } from '../object.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
 import { z } from 'zod';
@@ -87,7 +88,7 @@ const textOf = (content: Message['content']): string =>
   typeof content === 'string' ? content : content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
 /** An agent's options: `chat`, `prompt` and `withPi` take them. */
-export interface Options {
+export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undefined> {
   /** The model, as `provider/model-id`: MODEL, or else openai/gpt-6-sol. */
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
@@ -98,6 +99,11 @@ export interface Options {
   tools?: (ToolRegistration | AnyTool)[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
   workspace?: string;
+  /**
+   * The answer as data: a zod object, which the agent hands in with a tool
+   * (`submit_answer`), and `chat` and `prompt` answer with (see output.ts).
+   */
+  output?: O;
 }
 
 /** A registry of `provider`'s models, such as anthropicProvider() from @earendil-works/pi-ai/providers/anthropic. */
@@ -276,12 +282,21 @@ export const withPi = async <T>(
   }
 };
 
+/** {@link prompt}, answering with the agent's text. */
+const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+  withPi(ctx, options, (session) => session.prompt(text));
+
 /**
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
+ * With `output`, it answers with the value the agent hands in (see
+ * output.ts), not its text.
  */
-export const prompt = (ctx: restate.ObjectContext, text: string, options: Options = {}) =>
-  withPi(ctx, options, (session) => session.prompt(text));
+export const prompt = <O extends z.ZodObject | undefined = undefined>(
+  ctx: restate.ObjectContext,
+  text: string,
+  options: Options<O> = {},
+): Promise<Answer<O>> => withOutput(ctx, text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
 
 /**
  * A chat handler: each message an invocation, the conversation in the
@@ -289,7 +304,7 @@ export const prompt = (ctx: restate.ObjectContext, text: string, options: Option
  * invocation's context gives (each user's model, say). It takes the message
  * as plain text (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
-export const chat = (options: Configure<Options> = {}) => {
+export const chat = <O extends z.ZodObject | undefined = undefined>(options: Configure<Options<O>> = {}) => {
   if (typeof options === 'object') checkModelName('pi', options.model);
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
@@ -319,5 +334,10 @@ const transcribe = async (root: Conversation, context: Context, transcript: Tran
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
-export const agent = <P extends string>({ name, description, schema, ...options }: Options & Definition<P>) =>
+export const agent = <P extends string, O extends z.ZodObject | undefined = undefined>({
+  name,
+  description,
+  schema,
+  ...options
+}: Options<O> & Definition<P>) =>
   object({ name, description, schema, handlers: { chat: chat(options), messages: messages() } });

@@ -72,7 +72,8 @@ and `pending` ([Signals](#signals)).
 | [`restate-agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
 | [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
 
-Every framework takes `model`, `system` and `tools`; pi and OpenCode take a
+Every framework takes `model`, `system`, `tools` and `output` (a
+[structured answer](#structured-answers)); pi and OpenCode take a
 `workspace` too, a directory for their coding tools. `system` is the whole
 system prompt for Claude and LangGraph, and is added to the framework's own
 (which tells the model about its tools) for pi, OpenCode and DeepSeek.
@@ -386,6 +387,27 @@ A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
 [`examples-typescript/intermediate/support.ts`](../../../examples-typescript/intermediate/support.ts).
+
+## Structured answers
+
+With `output`, a zod object, an agent answers with data rather than text:
+the model hands its answer in with a tool, `submit_answer`, whose input is
+the schema (so its call is checked against it), and `chat` answers with
+it, as JSON. Every framework takes it.
+
+```ts
+const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
+const planner = claude.agent({ name: 'planner', output: Plan });
+
+const plan = await ctx.objectClient(planner, 'ENG-1').chat('Plan the work on ENG-1'); // a Plan
+```
+
+A model that ends its turn without handing the answer in is asked once
+more; then the invocation fails, with a terminal error. The answer is kept
+in the agent's database with its conversation: a retried attempt answers
+with what was handed in. In a handler of your own, `prompt(ctx, text, {
+output })` answers with it too. As a subagent's, the parent's model gets it
+as JSON.
 
 ## Webhooks
 

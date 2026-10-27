@@ -22,6 +22,7 @@ await serve(assistant);
 | `model`  | `openai/model-id` (`ChatOpenAI`) or `anthropic/model-id` (`ChatAnthropic`); or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`); or any LangChain chat model that calls tools |
 | `system` | The system prompt                                                                                                                                                                        |
 | `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                                                  |
+| `output` | A zod object: the answer as data, which the agent hands in, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                       |
 
 For an object of your own, `langgraph.chat(options)` and
 `langgraph.messages()` are the handlers; `options` may be a function of the

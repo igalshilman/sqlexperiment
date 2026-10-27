@@ -217,7 +217,7 @@ export const aborted = (signal: AbortSignal) =>
  * when it starts and ends ({@link publish}), for the clients that follow the
  * conversation.
  */
-export const chatHandler = (answer: (ctx: restate.ObjectContext, message: string) => Promise<string>) =>
+export const chatHandler = <A = string>(answer: (ctx: restate.ObjectContext, message: string) => Promise<A>) =>
   restate.handlers.object.exclusive(
     { input: messageSerde, accept: '*/*', explicitCancellation: true },
     async (ctx: restate.ObjectContext, text: string) => {
@@ -243,7 +243,7 @@ export const chatHandler = (answer: (ctx: restate.ObjectContext, message: string
         turn.abort(new restate.CancelledError());
         await (internal.cancelPreviousCalls() as unknown as Promise<unknown>);
       })().catch(() => {});
-      let answered: string;
+      let answered: A;
       try {
         answered = await answer(ctx, text);
         // Cancelled once answered: the answer stands.
