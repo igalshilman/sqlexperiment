@@ -391,8 +391,8 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 
 `webhook()` takes another system's webhooks (Linear's, GitHub's...) into
 agents: a service whose `webhook` handler checks each delivery's signature,
-and sends it to the `chat` of the agents of `route`, at once (the other
-system does not wait for the agent):
+and delivers it to the agents of `route`, at once (the other system does not
+wait for the agent):
 
 ```ts
 import { serve, webhook } from 'restate-agents';
@@ -412,9 +412,15 @@ await serve(issues, triage);
 | `name`              | The service: `/<name>/webhook`                                                          |
 | `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401     |
 | `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                    |
-| `route`             | The agents (any objects with `chat`) each delivery goes to                              |
+| `route`             | The agents each delivery goes to                                                        |
 | `key`               | The agents' key, from the body (`T`), or undefined to drop it; by default, the delivery |
 | `description`       | What it is, for the UI                                                                  |
+
+A delivery goes through the agent's `signals`, which knows what the agent is
+doing: to the message it answers, if it answers one, which takes it at its
+next step (as `steer`); else as a message of its own (as `chat`). A turn
+that ends, or is stopped, before it takes it answers it after: a delivery is
+never dropped, as a steer to a stopped turn is.
 
 The agent's message says where it comes from, with the body as JSON:
 
@@ -425,7 +431,7 @@ The agent's message says where it comes from, with the body as JSON:
 ```
 
 The handler's metadata says what it is, for the admin API and the UI:
-`restate-agents.kind` (`webhook`), `.routes` (`triage/chat`), `.auth`
+`restate-agents.kind` (`webhook`), `.routes` (`triage`), `.auth`
 (`hmac-sha256:linear-signature`) and `.idempotency-header`. See
 [`examples-typescript/advanced/factory`](../../../examples-typescript/advanced/factory/README.md).
 

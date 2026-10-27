@@ -156,9 +156,11 @@ and its sub-issues appear, each moving on its own.
 ## What it shows
 
 - **A webhook into agents**: `webhook()` of restate-agents makes the
-  `linear` service. Linear posts to it at Restate's ingress, and it sends
-  each new issue to the triage agent, keyed by the issue, as a message
-  that says where it comes from (`<webhook name="linear" delivery="…">`).
+  `linear` service. Linear posts to it at Restate's ingress, and it
+  delivers each new issue to the triage agent, keyed by the issue, as a
+  message that says where it comes from (`<webhook name="linear"
+  delivery="…">`): to the turn it is in, if it is in one, or else as a
+  message of its own.
   A delivery Linear sends again has the same `linear-delivery`, the
   message's idempotency key: it reaches the same message, not a second
   one. With a secret, a webhook that Linear did not sign is refused (401).

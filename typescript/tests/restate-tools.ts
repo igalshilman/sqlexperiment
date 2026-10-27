@@ -8,7 +8,9 @@
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; `stop` stops a message being
 // answered, and `steer` adds to it; `follow` gives the conversation as it
-// changes; a message may be plain text;
+// changes; a message may be plain text; a webhook's delivery goes to the
+// message being answered, once, or else is a message of its own, and is
+// answered after a turn that is stopped;
 // and a handler's terminal error is the tool's answer.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
@@ -19,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { call, signal, signals, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
+import { call, signal, signals, webhook, workflow, type Messages, type Status, type Waiting } from 'restate-agents';
 import * as clients from '@restatedev/restate-sdk-clients';
 import { agent, type ChatMessage, follow, type Followed } from 'restate-agents/client';
 import * as pi from 'restate-agents/pi';
@@ -89,6 +91,14 @@ const triage = restate.workflow({
   },
 });
 
+// Deliveries to the support agent, keyed by the customer they are about.
+const hooks = webhook<{ customer: string; note: string }>({
+  name: 'hooks',
+  idempotencyHeader: 'x-delivery',
+  route: [support],
+  key: ({ customer }) => customer,
+});
+
 /** `messages` as lines: each message's role, then its parts. */
 const lines = (messages: Messages['messages']) =>
   messages.map((m) => [
@@ -102,7 +112,7 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [orders, refund, support, triage, signals], port: PORT });
+  await restate.serve({ services: [orders, refund, support, triage, hooks, signals], port: PORT });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(
@@ -273,6 +283,67 @@ try {
     ['assistant', 'refund({"order":"103"}): refunded 103'],
     ['assistant', 'order 103: delivered / approved / refunded 103'],
   ]);
+  /** Post a delivery of `note` about `customer`, as delivery `id`, and wait until the agent's signals have it. */
+  const hook = async (customer: string, note: string, id: string) => {
+    const response = await fetch(`${INGRESS}/hooks/webhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-delivery': id },
+      body: JSON.stringify({ customer, note }),
+    });
+    assert.ok(response.ok, await response.text());
+    const delivered = `SELECT status FROM sys_invocation WHERE target = 'signals/support:${customer}/deliver' AND idempotency_key = 'webhook:hooks:${id}'`;
+    for (let i = 0; ; i++) {
+      const query = await fetch(`${ADMIN}/query`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ query: delivered }),
+      });
+      const { rows } = (await query.json()) as { rows: { status: string }[] };
+      if (rows[0]?.status === 'completed') return;
+      if (i > 300) throw new Error(`delivery ${id} was not delivered: ${JSON.stringify(rows)}`);
+      await sleep(50);
+    }
+  };
+  const userTexts = async (customer: string) =>
+    lines((await ingress.objectClient(agent('support'), customer).messages()).messages)
+      .filter(([role]) => role === 'user')
+      .map(([, text]) => text);
+
+  // A webhook's delivery goes to the message being answered, as a steer
+  // does (once, though Linear, say, sends it twice); with none answered, it
+  // is a message of its own.
+  const noras = await ingress
+    .objectSendClient(agent('support'), 'nora')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-nora' }));
+  await waits('support/nora');
+  await hook('nora', 'She called again', 'd-1');
+  await hook('nora', 'She called again', 'd-1');
+  await ingress.objectClient(agent('support'), 'nora').signal({ name: 'approval', value: 'approved' });
+  assert.equal(await ingress.result(noras), 'order 103: delivered / approved / refunded 103');
+  const steeredHook = (await userTexts('nora'))[1];
+  assert.match(steeredHook ?? '', /^<webhook name="hooks" delivery="d-1">\n[^]*"She called again"[^]*<\/webhook>$/);
+  assert.equal((await userTexts('nora')).length, 2);
+  await hook('nora', 'All good now', 'd-2');
+  for (let i = 0; !(await userTexts('nora')).some((t) => t?.includes('All good now')); i++) {
+    if (i > 300) throw new Error('the delivery to no turn was not answered');
+    await sleep(50);
+  }
+
+  // A turn stopped before it takes a delivery answers it after, as a message
+  // of its own (a steer it drops).
+  const olive = ingress.objectClient(agent('support'), 'olive');
+  const olives = await ingress
+    .objectSendClient(agent('support'), 'olive')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-olive' }));
+  await waits('support/olive');
+  await hook('olive', 'Urgent', 'd-3');
+  assert.deepEqual(await olive.stop(), { stopped: olives.invocationId });
+  await assert.rejects(ingress.result(olives), /409/);
+  for (let i = 0; !(await userTexts('olive')).some((t) => t?.includes('"Urgent"')); i++) {
+    if (i > 300) throw new Error('the delivery to a stopped turn was not answered');
+    await sleep(50);
+  }
+
   // `follow` gives the conversation as it changes, without polling: the wait
   // for approval, then the answer, as the turn stores them.
   // A message comes once, and again once it changes: kept by id, as a UI keeps them.
