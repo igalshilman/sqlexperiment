@@ -71,7 +71,7 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 
 The examples take OpenAI's models, with `OPENAI_API_KEY` (all but
 `claude.ts` and `deepseek.ts`, on their providers' own, and
-`factory/`, on all three). `MODEL` picks
+`factory/`, on OpenAI's and Anthropic's). `MODEL` picks
 another model, such as `MODEL=anthropic/claude-sonnet-5-5` with
 `ANTHROPIC_API_KEY`, for the agents on pi, OpenCode and LangGraph
 (LangGraph takes OpenAI's and Anthropic's); Claude takes Anthropic's

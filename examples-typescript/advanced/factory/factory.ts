@@ -15,19 +15,26 @@ import { Plan } from './plan.ts';
 const WRITING = `What you write in Linear is read by people following the work: write as a teammate would,
 in plain, friendly sentences, short paragraphs, and lists where they help. No task names, tool names or JSON.`;
 
+/**
+ * Each agent on a model for its work: triage, which coordinates, on a fast
+ * one (OpenAI's); the coders on Claude Sonnet; the planner on Anthropic's
+ * strongest. A step's tool calls run at once: the prompts ask for steps that
+ * do all they can together.
+ */
 const coder = opencode.agent({
   name: 'coder',
   description: 'Builds a part of the plan, on a branch of its own, and opens its pull request',
+  model: 'anthropic/claude-sonnet-5-5',
   workspace: env.coderWorkspace, // a clone of the project, on its own branch
   tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
   system: `You build one part of a plan for a Linear issue. Your directory is a clone of the project,
 on a branch of your own (git branch --show-current); other coders build the other parts on theirs, at once.
-- If your task names a sub-issue, first move it to "In Progress".
-- Write tests for your part, and run them after each change.
+- If your task names a sub-issue, move it to "In Progress" as you start reading the project, in one step.
+- Build your part, with tests; then run them, and fix what fails.
 - Once your tests pass, commit, push your branch (git push), and open a pull request
   with create_pull_request, into the branch your task names.
-- Then comment on your sub-issue: what you built, in a few sentences; its tests, and that they pass;
-  and a link to the pull request. Move it to "Done".
+- Then, in one step: comment on your sub-issue (what you built, in a few sentences; its tests, and that
+  they pass; and a link to the pull request), and move it to "Done".
 ${WRITING}
 Answer with what you did and the pull request, briefly.`,
 });
@@ -40,32 +47,34 @@ and each with a task its coder can build from alone (one part, if the issue is s
 const planner = claude.agent({
   name: 'planner',
   description: 'Plans the work on an issue, from its title and description: a summary, and parts to build at once',
+  model: 'anthropic/claude-fable-5-1',
   system: PLANNER,
   output: Plan,
 });
 
 const triage = pi.agent({
   name: 'triage',
+  model: 'openai/gpt-6-luna',
   tools: [...env.linearTools('🧭 Triage'), subagent(planner), subagent(coder)],
   system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
-(a <webhook> element: the issue is its data.identifier). Read the issue first.
+(a <webhook> element: the issue is its data.identifier, with its title and description).
+Your tool calls in one step run at once: make all those that do not wait on each other together.
 - If it is not clear enough to build, comment with what you need to know, leave it in "Backlog", and stop.
 - If it is a duplicate or not something to build, comment why, and move it to "Canceled".
-- Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan",
+- Otherwise, in one step: move it to "In Progress", and ask the planner for a plan, in a task named "plan",
   with the issue's title and description.
-- Comment on the issue with the plan: a heading, "📐 The plan", its summary, and each part in a bullet,
-  its title in bold, then its description.
-- Create a sub-issue of the issue for each part: titled as the part, its description the part's, then the
-  files it owns, as a list.
-- Then hand every part to a coder at once, in one step: a task each, named after its part (such as "parser"),
+- Then, in one step: comment on the issue with the plan (a heading, "📐 The plan", its summary, and each
+  part in a bullet, its title in bold, then its description), and create a sub-issue of the issue for each
+  part (titled as the part; its description the part's, then the files it owns, as a list).
+- Then hand every part to a coder, in one step: a task each, named after its part (such as "parser"),
   with its sub-issue, its task and files, the plan's summary, and the branch its pull request goes into:
   the issue's branch, its identifier in lower case (eng-1 for ENG-1).
 - When they are all done, hand one more task, "integrate", to a coder. Its branch is the issue's: it merges
-  each part's branch into it (git merge eng-1-parser, and so on), runs all the tests and fixes what fails,
-  pushes it, and opens a pull request from it into main.
-- End with a summary comment on the issue: a heading, "✅ Summary"; what was built, in a sentence or two;
-  each part in a bullet, with its sub-issue and pull request; the pull request into main; how to run it
-  and its tests, and whether they pass; and what is left open, if anything. Then move it to "In Review".
+  each part's branch into it (git merge origin/eng-1-parser, and so on; the parts own separate files),
+  runs all the tests and fixes what fails, pushes it, and opens a pull request from it into main.
+- End, in one step: a summary comment on the issue (a heading, "✅ Summary"; what was built, in a sentence
+  or two; each part in a bullet, with its sub-issue and pull request; the pull request into main; how to run
+  it and its tests, and whether they pass; and what is left open, if anything), and move it to "In Review".
 A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
 If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 ${WRITING}
