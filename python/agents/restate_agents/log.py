@@ -9,11 +9,16 @@ place (a tool call's output comes) keeps its id and takes a new ``seq``; a
 transcript replaced (compacted, reset) leaves its messages in the log, and
 the messages after them are new ones. So a client reads from a cursor, and
 gets each message that is new or changed since, once.
+
+``clear`` forgets the log with the rest of the conversation, but not where it
+got to: the next conversation's ids and cursors go on from there (``START``),
+so a client following it reads on, and drops the messages before ``first``.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from restate_fns.schema import Schema
@@ -21,6 +26,10 @@ from restate_fns.schema import Schema
 from restate_agents.common import ChatMessage, Messages, MessagesRequest
 
 TABLE = "restate_agent_log"
+
+# The agent's state key of where its log starts, ``{"seq": cursor, "id": first id}``, past the conversations
+# ``clear`` forgot: ``clear`` sets it, none before.
+START = "restate-agents.log.start"
 SCHEMA = Schema(
     "restate_agents.log",
     [
@@ -34,7 +43,7 @@ SCHEMA = Schema(
 )
 
 
-async def sync(db: Any, messages: list[dict[str, Any]]) -> None:
+async def sync(db: Any, messages: list[dict[str, Any]], start: Callable[[], Awaitable[dict[str, int] | None]]) -> None:
     """
     Store the transcript's ``messages`` (each ``{role, parts}``, in order) in
     the log: those that changed since the last time, in one transaction.
@@ -54,7 +63,10 @@ async def sync(db: Any, messages: list[dict[str, Any]]) -> None:
         grown += 1
     if same == len(head) == len(messages):
         return
-    [(seq, next_id)] = await db.query(f"SELECT COALESCE(MAX(seq), 0), COALESCE(MAX(id), -1) + 1 FROM {TABLE}")
+    [(seq, next_id)] = await db.query(f"SELECT MAX(seq), MAX(id) + 1 FROM {TABLE}")
+    if seq is None:
+        begin = await start() or {"seq": 0, "id": 0}
+        seq, next_id = begin["seq"], begin["id"]
     async with db.transaction() as tx:
         for position in range(same, grown):
             seq += 1
@@ -72,7 +84,7 @@ async def sync(db: Any, messages: list[dict[str, Any]]) -> None:
             next_id += 1
 
 
-async def page(db: Any, request: MessagesRequest | None = None) -> Messages:
+async def page(db: Any, request: MessagesRequest | None, start: dict[str, int] | None) -> Messages:
     """
     A page of the log. With ``cursor``: the messages new or changed since it,
     by when they changed, and the cursor to read on from. Without: the latest
@@ -81,6 +93,7 @@ async def page(db: Any, request: MessagesRequest | None = None) -> Messages:
     """
     request = request or {}
     limit = request.get("limit", 50)
+    first: dict[str, Any] = {"first": start["id"]} if start else {}
     await SCHEMA.ensure(db)
     if "cursor" in request:
         rows = await db.query(
@@ -89,15 +102,15 @@ async def page(db: Any, request: MessagesRequest | None = None) -> Messages:
         more = len(rows) > limit
         rows = rows[:limit]
         cursor = rows[-1][1] if rows else request["cursor"]
-        return Messages(messages=[_message(id, m) for id, _, m in rows], more=more, cursor=cursor)
-    [(cursor,)] = await db.query(f"SELECT COALESCE(MAX(seq), 0) FROM {TABLE}")
+        return Messages(messages=[_message(id, m) for id, _, m in rows], more=more, cursor=cursor, **first)
+    [(cursor,)] = await db.query(f"SELECT COALESCE(MAX(seq), ?) FROM {TABLE}", [start["seq"] if start else 0])
     before = request.get("before")
     rows = await db.query(
         f"SELECT id, message FROM {TABLE} WHERE id < ? ORDER BY id DESC LIMIT ?",
         [before if before is not None else 1 << 62, limit + 1],
     )
     more = len(rows) > limit
-    return Messages(messages=[_message(id, m) for id, m in reversed(rows[:limit])], more=more, cursor=cursor)
+    return Messages(messages=[_message(id, m) for id, m in reversed(rows[:limit])], more=more, cursor=cursor, **first)
 
 
 def _message(id: int, message: str) -> ChatMessage:

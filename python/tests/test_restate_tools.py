@@ -127,6 +127,29 @@ def test_status_and_stop_a_turn(agent):
     assert call(f"{agent}/{k}/chat", "hello") == (200, "You said: hello")
 
 
+def test_clear_forgets_the_conversation(agent):
+    k = key()
+    assert call(f"{agent}/{k}/chat", "hello") == (200, "You said: hello")
+    with ThreadPoolExecutor() as pool:
+        answer = pool.submit(call, f"{agent}/{k}/chat", use(("wait_for_approval", REFUND)), None, 60)
+        wait_until(lambda: len(pending(agent, k)) == 1, timeout=20, what="the wait")
+        _, before = call(f"{agent}/{k}/messages")
+        _, now = call(f"{agent}/{k}/status")
+        # It stops the message being answered, then forgets the conversation, its waits and its database.
+        assert call(f"{agent}/{k}/clear") == (200, {"stopped": now["answering"]["invocationId"]})
+        status, body = answer.result()
+        assert status == 409, body
+    assert call(f"{agent}/{k}/status") == (200, {"answering": None, "waiting": []})
+    assert call(f"{agent}/{k}/messages")[1]["messages"] == []
+    # The next message starts anew; its ids and cursors go on, so a follower reads on and drops those before `first`.
+    assert call(f"{agent}/{k}/chat", "hello again") == (200, "You said: hello again")
+    _, anew = call(f"{agent}/{k}/messages", {"cursor": before["cursor"]})
+    # (The stopped turn logged its cancellation before it was forgotten: `first` is past that too.)
+    assert anew["first"] > before["messages"][-1]["id"]
+    assert anew["messages"] and anew["messages"][0]["id"] == anew["first"]
+    assert call(f"{agent}/{k}/clear") == (200, {"stopped": None})
+
+
 def test_steer_a_turn_at_its_next_tool_call(agent):
     k = key()
     with ThreadPoolExecutor() as pool:
