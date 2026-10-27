@@ -277,7 +277,14 @@ docker run -p 9080:9080 -v factory:/data --env-file examples-typescript/.env \
 ```
 
 The coders run real commands in it, in `/data/workspace`: the container is
-their sandbox.
+their sandbox. `RESTATE_SERVE_ONLY` serves only the services it names, so
+the same image deploys in parts: the coders in a sandbox of their own, say,
+and the rest beside them.
+
+```sh
+docker run -e RESTATE_SERVE_ONLY=coder ...                                   # the coders
+docker run -e RESTATE_SERVE_ONLY=linear,github,triage,planner,reviewer ...   # the rest
+```
 
 ## What it shows
 

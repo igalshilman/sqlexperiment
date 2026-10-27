@@ -33,10 +33,31 @@ export { webhook, webhookMessage, type WebhookAuth, type WebhookEvent, type Webh
 
 /**
  * Serve `services` on PORT (default 9080), with what the agents need beside
- * them (the `signals` object).
+ * them (the `signals` object). RESTATE_SERVE_ONLY, names separated by commas
+ * (`triage,planner`), serves only those of them: one image, deployed in parts.
  */
 export const serve = (...services: restate.ServeOptions['services']) =>
   restate.serve({
-    services: [...services.filter((s) => s !== signals), signals],
+    services: [
+      ...only(
+        services.filter((s) => s !== signals),
+        process.env.RESTATE_SERVE_ONLY,
+      ),
+      signals,
+    ],
     port: Number(process.env.PORT ?? 9080),
   });
+
+/** The `services` that `names` (comma separated) names, or all of them without names; a name of none is an error. */
+function only(services: restate.ServeOptions['services'], names: string | undefined) {
+  const wanted = (names ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (wanted.length === 0) return services;
+  const known = services.map((s) => s.name);
+  const unknown = wanted.filter((name) => !known.includes(name));
+  if (unknown.length > 0)
+    throw new Error(`RESTATE_SERVE_ONLY names ${unknown.join(', ')}: the services are ${known.join(', ')}`);
+  return services.filter((s) => wanted.includes(s.name));
+}

@@ -55,6 +55,8 @@ conversation of its own, with a database of its own, and answers one
 message at a time. `serve` serves it on PORT (default 9080), with the
 `signals` object every agent uses (its waits and steering); an endpoint of
 your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
+`RESTATE_SERVE_ONLY=triage,planner` serves only the services it names, so
+that one program (or image) deploys in parts.
 
 ## Choose a framework
 
