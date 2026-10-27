@@ -32,7 +32,7 @@ on a branch of your own (git branch --show-current); other coders build the othe
 - If your task names a sub-issue, move it to "In Progress" as you start reading the project, in one step.
 - Build your part, with tests; then run them, and fix what fails.
 - Once your tests pass, commit, push your branch (git push), and open a pull request
-  with create_pull_request, into the branch your task names.
+  with create_pull_request, into main.
 - Then, in one step: comment on your sub-issue (what you built, in a few sentences; its tests, and that
   they pass; and a link to the pull request), and move it to "Done".
 ${WRITING}
@@ -68,14 +68,10 @@ Your tool calls in one step run at once: make all those that do not wait on each
   part in a bullet, its title in bold, then its description), and create a sub-issue of the issue for each
   part (titled as the part; its description the part's, then the files it owns, as a list).
 - Then hand every part to a coder, in one step: a task each, named after its part (such as "parser"),
-  with its sub-issue, its task and files, the plan's summary, and the branch its pull request goes into:
-  the issue's branch, its identifier in lower case (eng-1 for ENG-1).
-- When they are all done, hand one more task, "integrate", to a coder. Its branch is the issue's: it merges
-  each part's branch into it (git merge origin/eng-1-parser, and so on; the parts own separate files),
-  runs all the tests and fixes what fails, pushes it, and opens a pull request from it into main.
-- End, in one step: a summary comment on the issue (a heading, "✅ Summary"; what was built, in a sentence
-  or two; each part in a bullet, with its sub-issue and pull request; the pull request into main; how to run
-  it and its tests, and whether they pass; and what is left open, if anything), and move it to "In Review".
+  with its sub-issue, its task and files, and the plan's summary.
+- When they are all done, end, in one step: a summary comment on the issue (a heading, "✅ Summary"; what
+  was built, in a sentence or two; each part in a bullet, with its sub-issue and pull request, open for
+  review; how to run it and its tests; and what is left open, if anything), and move it to "In Review".
 A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
 If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 ${WRITING}

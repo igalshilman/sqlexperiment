@@ -6,7 +6,7 @@ is ready to build, and leads the work: it asks a planner (Claude) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
 a coder (OpenCode) of its own, all at once: each on a git branch of its
-own, which it opens a pull request of, on GitHub. Triage and the coders
+own, which it opens a pull request of, on GitHub, for people to review. Triage and the coders
 move their issues along the team's workflow, and comment on them, through
 Linear's MCP server: on the real Linear, or on a stand-in,
 [`linear.ts`](linear.ts), with the same tools.
@@ -34,24 +34,24 @@ Linear's MCP server: on the real Linear, or on a stand-in,
   │  │ (the parent: triages, then leads)  │  In Review at the end                      │       │
   │  └──┬───────────────▲───────┬─────────┘  (or Backlog, Canceled)                    │       │
   │     │ subagent:     │ Plan, │ subagent, one per part, all at once                  │       │
-  │     │ plan          │ JSON  ├──────────────┬──────────────┐                        │       │
-  │     ▼               │       ▼              ▼              ▼                        │       │
-  │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐ ┌────────────┐             │       │
-  │  │ planner/ENG-1.plan   │ │ coder/     │ │ coder/     │ │ coder/     │  each moves │       │
-  │  │               Claude │ │ ENG-1.     │ │ ENG-1.     │ │ ENG-1.     │  its sub-   │       │
-  │  │                      │ │ parser     │ │ history    │ │ integrate  │  issue      │       │
-  │  │ replies with the     │ │  OpenCode  │ │  OpenCode  │ │  OpenCode  ├─────────────┼───────┘
-  │  │ plan, as JSON        │ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘             │
-  │  │ (its output,         │       │              │              │                    │
-  │  │  checked)            │       │              │              │                    │
-  │  └──────────────────────┘       │              │              │                    │
-  └─────────────────────────────────┼──────────────┼──────────────┼────────────────────┘
-   OpenCode's read, edit, bash;     ▼              ▼              ▼
-   each in a clone of its own, ┌────────────┐ ┌────────────┐ ┌────────────┐
-   on its own branch, with     │ eng-1-     │ │ eng-1-     │ │ eng-1      │
-   a pull request on GitHub    │ parser     │ │ history    │ │ (merged)   │
-                               │ PR → eng-1 │ │ PR → eng-1 │ │ PR → main  │
-                               └────────────┘ └────────────┘ └────────────┘
+  │     │ plan          │ JSON  ├──────────────┐                                       │       │
+  │     ▼               │       ▼              ▼                                       │       │
+  │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │       │
+  │  │ planner/ENG-1.plan   │ │ coder/     │ │ coder/     │  each moves its sub-issue  │       │
+  │  │               Claude │ │ ENG-1.     │ │ ENG-1.     ├────────────────────────────┼───────┘
+  │  │                      │ │ parser     │ │ history    │                            │
+  │  │ replies with the     │ │  OpenCode  │ │  OpenCode  │                            │
+  │  │ plan, as JSON        │ └─────┬──────┘ └─────┬──────┘                            │
+  │  │ (its output,         │       │              │                                   │
+  │  │  checked)            │       │              │                                   │
+  │  └──────────────────────┘       │              │                                   │
+  └─────────────────────────────────┼──────────────┼───────────────────────────────────┘
+   OpenCode's read, edit, bash;     ▼              ▼
+   each in a clone of its own, ┌────────────┐ ┌────────────┐
+   on its own branch, with     │ eng-1-     │ │ eng-1-     │
+   a pull request on GitHub    │ parser     │ │ history    │
+                               │ PR → main  │ │ PR → main  │
+                               └────────────┘ └────────────┘
 ```
 
 The planner only plans: a Claude agent whose `output` is the plan's schema
@@ -64,7 +64,8 @@ Each agent is a virtual object with its conversation in its own SQL
 database, keyed by its task (`coder/ENG-1.parser`): a crash resumes it
 where it was, and the parent waits for its answers without holding a
 process. Tasks of different names run at once, so the coders work side by
-side; an `integrate` task runs the whole test suite once they are done.
+side. The factory stops with their pull requests open, for people to review
+and merge.
 
 ## An issue's life
 
@@ -89,8 +90,7 @@ side; an `integrate` task runs the whole test suite once they are done.
   ENG-2  Done, a comment ◀───────────────────────────────────────────────────┤           │
   ENG-3  Done, a comment ◀───────────────────────────────────────────────────────────────┤
     │                                │◀── answers ───────────────────────────┴───────────┘
-    │                                ├── subagent: integrate (merges the parts, runs every test, PR into main)
-    │◀──── comment: what was built ──┤
+    │◀──── comment: what was built ──┤  (the pull requests, open for review)
   ENG-1  In Review ◀─────────────────┤
 ```
 

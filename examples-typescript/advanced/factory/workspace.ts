@@ -1,9 +1,8 @@
 /**
  * The coders' workspace, in git: a clone of the project per coder
  * (WORKSPACE/ENG-1.parser), on a branch of its own (eng-1-parser), off the
- * issue's branch (eng-1), which its pull request goes into. The `integrate`
- * coder's clone is on the issue's branch itself: it merges the parts there.
- * Coders run real commands, on this machine: use a sandbox.
+ * project's default branch, which its pull request goes into. Coders run
+ * real commands, on this machine: use a sandbox.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -32,9 +31,6 @@ const has = (cwd: string, ref: string) =>
 const helper = '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f';
 const credentials = ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`];
 
-/** The issue's branch: its identifier, in lower case (ENG-1: eng-1). */
-export const issueBranch = (issue: string) => issue.toLowerCase();
-
 /** A coder's key as its issue and task (`ENG-1.parser`). */
 function taskOf(key: string) {
   const [issue = '', task = '', ...rest] = key.split('.');
@@ -50,8 +46,7 @@ function taskOf(key: string) {
 export async function clone(root: string, remote: string, key: string) {
   const { issue, task } = taskOf(key);
   const dir = resolve(root, key);
-  const base = issueBranch(issue);
-  const branch = task === 'integrate' ? base : `${base}-${task}`;
+  const branch = `${issue.toLowerCase()}-${task}`; // ENG-1.parser: eng-1-parser
   if (await has(dir, `refs/heads/${branch}`)) return dir;
 
   if (!existsSync(join(dir, '.git'))) {
@@ -65,19 +60,9 @@ export async function clone(root: string, remote: string, key: string) {
   await git(dir, 'config', 'user.email', 'factory@restate.localhost');
   await git(dir, 'config', 'push.autoSetupRemote', 'true'); // a plain `git push` pushes the coder's branch
 
-  // The issue's branch, on the remote: the first of its coders makes it, off the default branch
-  // (they start at once: the others' push fails, as it is there already).
+  // The coder's branch: the remote's, if a run before pushed it, or else a new one off the default branch.
   await git(dir, 'fetch', '--quiet', 'origin');
-  if (!(await has(dir, `origin/${base}`))) {
-    const failed = await git(dir, 'push', '--quiet', 'origin', `origin/HEAD:refs/heads/${base}`).then(
-      () => undefined,
-      (error: Error) => error,
-    );
-    await git(dir, 'fetch', '--quiet', 'origin');
-    if (failed && !(await has(dir, `origin/${base}`))) throw failed;
-  }
-  // The coder's branch: the remote's, if a run before pushed it, or else a new one off the issue's.
-  const from = (await has(dir, `origin/${branch}`)) ? `origin/${branch}` : `origin/${base}`;
+  const from = (await has(dir, `origin/${branch}`)) ? `origin/${branch}` : 'origin/HEAD';
   await git(dir, 'checkout', '--quiet', '--no-track', '-b', branch, from);
   return dir;
 }
