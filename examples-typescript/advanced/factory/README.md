@@ -105,6 +105,7 @@ is a duplicate or nothing to build to **Canceled**.
 | [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents                     |
 | [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests     |
 | [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                            |
+| [`prompts.ts`](prompts.ts)     | The agents' system prompts: triage's, the planner's, a coder's                                                       |
 | [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                          |
 | [`workspace.ts`](workspace.ts) | The coders' clones of the project, each on its own branch; a first commit for an empty project; the stand-in's       |
 | [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment |
