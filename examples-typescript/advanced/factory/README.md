@@ -119,6 +119,10 @@ curl localhost:3333/issues/ENG-1      # its state, history, sub-issues and comme
 curl localhost:8080/triage/ENG-1/messages
 ```
 
+No DeepSeek key? The coder's harness takes any model pi-ai knows: give it
+`model: 'openai/gpt-6-sol'` in [`factory.ts`](factory.ts), and it needs only
+`OPENAI_API_KEY`.
+
 `linear.ts` prints each issue, move and comment as it happens. The coders
 run real commands, on this machine, in `WORKSPACE/<issue>`
 (`/tmp/restate-factory` by default): run it in a sandbox (a container, a VM).

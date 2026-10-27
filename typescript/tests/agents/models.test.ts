@@ -39,10 +39,31 @@ describe('a wrong model', () => {
   });
 
   it("of another provider fails at the definition, for an agent of one provider's models", () => {
-    expect(() => deepseek.chat({ model: 'anthropic/claude-sonnet-5-5' })).toThrow(/not deepseek's/);
     expect(() => langgraph.chat({ model: 'google/gemini-2.5-pro' })).toThrow(
       /neither openai\/<model-id> nor anthropic/,
     );
+  });
+
+  it("that pi-ai does not know fails at the definition, for DeepSeek's agent", () => {
+    expect(() => deepseek.chat({ model: 'openai/gpt-6-sol' })).not.toThrow();
+    expect(() => deepseek.chat({ model: 'anthropic/claude-sonnet-5-5' })).not.toThrow();
+    expect(() => deepseek.chat({ model: 'deepseek' })).toThrow(/not provider\/model-id/);
+    expect(() => deepseek.chat({ model: 'nobody/gpt-6-sol' })).toThrow(
+      /not provider\/model-id of a provider pi-ai knows/,
+    );
+    expect(() => deepseek.chat({ model: 'openai/gpt-0' })).toThrow(/pi-ai knows no model "gpt-0" of openai/);
+  });
+
+  it("without its provider's API key fails the invocation, for DeepSeek's agent on another provider", async () => {
+    const key = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const refused = conversation(deepseek.chat({ model: 'openai/gpt-6-sol' }), 'k').attempt('inv1', 'Hi');
+      await expect(refused).rejects.toMatchObject({ code: REFUSED });
+      await expect(refused).rejects.toThrow(/API key.*Provider is not configured: openai/);
+    } finally {
+      if (key !== undefined) process.env.OPENAI_API_KEY = key;
+    }
   });
 
   it('that the provider refuses for good fails the invocation, saying what to check', async () => {
