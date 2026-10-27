@@ -1,6 +1,7 @@
 // An agent's answer as data, with `output` (every framework's option): a zod
 // object schema. The agent's reply is its answer, as JSON: the system prompt
-// asks for it, with the schema, and the reply is checked against it. The
+// asks for it, with the schema, and each prompt again, at its end; the reply
+// is checked against it. The
 // prompt (and so `chat`) then answers with the value, as an RPC answers.
 //
 //   const planner = claude.agent({ name: 'planner', output: Plan });   // chat answers with a Plan
@@ -20,6 +21,14 @@ export type Answer<O> = O extends z.ZodObject ? z.infer<O> : string;
 const format = (output: z.ZodObject) =>
   'Your final reply is your answer, as JSON only (no other text): an object of this JSON schema.\n' +
   JSON.stringify(z.toJSONSchema(output));
+
+/**
+ * What each prompt ends with, with `output`: the system prompt's ask, again,
+ * where an agent reads it last (after a long run of tool calls, it may have
+ * drifted from its system prompt to a summary in prose).
+ */
+const reminder =
+  '\n\nWhen you are done, reply with your answer as JSON only, of the schema you were given: no other text.';
 
 /**
  * The JSON `reply` holds: all of it, what a code fence (```json) holds, or
@@ -82,5 +91,5 @@ export const withOutput = <T extends { system?: string; output?: z.ZodObject }>(
   const { output } = options;
   if (!output) return prompt(text, options) as Promise<Answer<T['output']>>;
   const asked = { ...options, system: [options.system, format(output)].filter(Boolean).join('\n\n') };
-  return answerWith(text, output, (t) => prompt(t, asked)) as Promise<Answer<T['output']>>;
+  return answerWith(text + reminder, output, (t) => prompt(t, asked)) as Promise<Answer<T['output']>>;
 };
