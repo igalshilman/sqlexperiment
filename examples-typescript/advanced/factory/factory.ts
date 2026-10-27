@@ -26,6 +26,7 @@
  *   curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
  *   curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
  *   curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
+ *   curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
  *
  * With the real Linear, LINEAR_API_KEY instead of the stand-in, and Linear's
  * webhook pointed at Restate's ingress (see the README).
@@ -89,25 +90,33 @@ const triage = pi.agent({
   with its sub-issue, its task and files, and the plan's summary.
 - When they are all done, hand one more task, "integrate", to a coder: run all the tests, and fix what fails.
 - Comment on the issue with what was built and how to run it, and move it to "In Review".
+A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
+If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 Answer with what happened to the issue, briefly.`,
 });
 
 /**
  * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
- * agent, keyed by the issue; a sub-issue (triage's own) does not. Linear
+ * agent, keyed by the issue, and so does each comment on it, but for the
+ * factory's own; a sub-issue (triage's own) does not. A comment reaches the
+ * turn triage is in, if it is in one, or else is a message of its own. Linear
  * sends a webhook again until it is answered, with the same
  * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
  * a webhook Linear did not sign is refused.
  */
-const issues = webhook({
+const linearEvents = webhook({
   name: 'linear',
-  description: "Linear's new issues, to triage",
+  description: "Linear's new issues, and comments on them, to triage",
   auth: env.webhookAuth,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
   // Linear's webhook: https://linear.app/developers/webhooks
-  key: ({ type, action, data }) =>
-    type === 'Issue' && action === 'create' && !data.parentId ? data.identifier : undefined,
+  key: ({ type, action, actor, data }) => {
+    if (action !== 'create') return undefined;
+    if (type === 'Issue' && !data.parentId) return data.identifier;
+    if (type === 'Comment' && actor?.id !== env.linearUser) return data.issue.identifier;
+    return undefined;
+  },
 });
 
-await serve(issues, triage, planner, coder);
+await serve(linearEvents, triage, planner, coder);

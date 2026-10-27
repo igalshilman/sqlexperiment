@@ -1,11 +1,15 @@
 /**
  * A stand-in for Linear: issues and sub-issues in memory, the tools of
  * Linear's MCP server that the factory uses, and a webhook to the factory for
- * each new issue.
+ * each new issue and comment.
  *
  *   node advanced/factory/linear.ts        # on port 3333: its MCP server at /mcp
  *   curl localhost:3333/issues --json '{"title": "…", "description": "…"}'   # a new issue, and its webhook
+ *   curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # a comment, and its webhook
  *   curl localhost:3333/issues/ENG-1       # the issue: its state, history, sub-issues and comments
+ *
+ * You are the user `you`; the factory, through the MCP server, is the user
+ * `factory`. A webhook says who acted (its `actor`), as Linear's do.
  *
  * The tools are named as Linear's (`get_issue`, `create_issue`,
  * `update_issue`, `create_comment`, `list_issue_statuses`), and its states
@@ -38,8 +42,11 @@ interface Issue {
   children: string[];
   state: string;
   history: { state: string; at: string }[];
-  comments: { body: string; at: string }[];
+  comments: { body: string; by: User; at: string }[];
 }
+
+/** Who acts: you, through the HTTP API, or the factory, through the MCP server. */
+type User = 'you' | 'factory';
 
 const issues = new Map<string, Issue>();
 
@@ -49,8 +56,31 @@ const issueOf = (id: string) => {
   return issue;
 };
 
+/** Linear's webhook of `type` (Issue, Comment) for `data`, made by `by`, signed as Linear signs them. */
+async function sendWebhook(type: string, data: object, by: User) {
+  const actor = { id: by, name: by, type: 'user' };
+  const body = JSON.stringify({ action: 'create', type, actor, data, webhookTimestamp: Date.now() });
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'linear-event': type,
+    'linear-delivery': randomUUID(),
+  };
+  if (secret) headers['linear-signature'] = createHmac('sha256', secret).update(body).digest('hex');
+  try {
+    const response = await fetch(webhook, { method: 'POST', headers, body });
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  } catch (error) {
+    console.log(`the webhook of a new ${type} failed: ${String(error)}`);
+  }
+}
+
 /** A new issue, in the backlog, or a sub-issue of `parentId`: Linear sends its webhook. */
-async function createIssue(title: string, description: string, parentId: string | null = null): Promise<Issue> {
+async function createIssue(
+  title: string,
+  description: string,
+  by: User,
+  parentId: string | null = null,
+): Promise<Issue> {
   if (parentId) issueOf(parentId);
   const identifier = `ENG-${issues.size + 1}`;
   const at = new Date().toISOString();
@@ -69,21 +99,18 @@ async function createIssue(title: string, description: string, parentId: string 
   if (parentId) issueOf(parentId).children.push(identifier);
   console.log(`${identifier}: created, "${title}"${parentId ? `, a sub-issue of ${parentId}` : ''}`);
 
-  const data = { id: issue.id, identifier, title, description, parentId };
-  const body = JSON.stringify({ action: 'create', type: 'Issue', data, webhookTimestamp: Date.now() });
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    'linear-event': 'Issue',
-    'linear-delivery': randomUUID(),
-  };
-  if (secret) headers['linear-signature'] = createHmac('sha256', secret).update(body).digest('hex');
-  try {
-    const response = await fetch(webhook, { method: 'POST', headers, body });
-    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-  } catch (error) {
-    console.log(`${identifier}: the webhook failed: ${String(error)}`);
-  }
+  await sendWebhook('Issue', { id: issue.id, identifier, title, description, parentId }, by);
   return issue;
+}
+
+/** A comment on the issue `id`, by `by`: Linear sends its webhook, with the issue. */
+async function createComment(id: string, body: string, by: User) {
+  const issue = issueOf(id);
+  issue.comments.push({ body, by, at: new Date().toISOString() });
+  console.log(`${id}: ${by} commented, "${body.split('\n')[0]}"`);
+  const about = { id: issue.id, identifier: issue.identifier, title: issue.title };
+  await sendWebhook('Comment', { id: randomUUID(), body, userId: by, issueId: issue.id, issue: about }, by);
+  return issue.comments.length;
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
@@ -112,7 +139,7 @@ function linear() {
       }),
     },
     async ({ title, description, parentId }) => {
-      const { identifier } = await createIssue(title, description ?? '', parentId);
+      const { identifier } = await createIssue(title, description ?? '', 'factory', parentId);
       return text({ identifier });
     },
   );
@@ -146,12 +173,7 @@ function linear() {
       description: 'Comment on an issue, in Markdown.',
       inputSchema: z.object({ issueId: z.string().describe('The issue, such as ENG-1'), body: z.string() }),
     },
-    async ({ issueId, body }) => {
-      const issue = issueOf(issueId);
-      issue.comments.push({ body, at: new Date().toISOString() });
-      console.log(`${issueId}: commented, "${body.split('\n')[0]}"`);
-      return text({ issueId, comments: issue.comments.length });
-    },
+    async ({ issueId, body }) => text({ issueId, comments: await createComment(issueId, body, 'factory') }),
   );
 
   return server;
@@ -174,7 +196,12 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     else res.end();
   } else if (url.pathname === '/issues' && req.method === 'POST') {
     const { title, description = '' } = JSON.parse(String(body));
-    json(201, await createIssue(title, description));
+    json(201, await createIssue(title, description, 'you'));
+  } else if (/^\/issues\/[^/]+\/comments$/.test(url.pathname) && req.method === 'POST') {
+    const id = url.pathname.split('/')[2]!;
+    const { body: comment } = JSON.parse(String(body));
+    if (issues.has(id)) json(201, { comments: await createComment(id, comment, 'you') });
+    else json(404, { error: 'no such issue' });
   } else if (url.pathname.startsWith('/issues/')) {
     const issue = issues.get(url.pathname.slice('/issues/'.length));
     json(issue ? 200 : 404, issue ?? { error: 'no such issue' });

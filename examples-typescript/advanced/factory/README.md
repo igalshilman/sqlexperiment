@@ -97,14 +97,14 @@ is a duplicate or nothing to build to **Canceled**.
 
 ## The files
 
-| File                           | What                                                                                                     |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents         |
-| [`env.ts`](env.ts)             | The environment: Linear's tools and webhook auth (the real Linear or the stand-in); the coders' tools    |
-| [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                |
-| [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts              |
-| [`workspace.ts`](workspace.ts) | The coders' directory, one per issue, and `commit`, which commits one coder's files at a time            |
-| [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue |
+| File                           | What                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents                     |
+| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); the coders' tools          |
+| [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                            |
+| [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                          |
+| [`workspace.ts`](workspace.ts) | The coders' directory, one per issue, and `commit`, which commits one coder's files at a time                        |
+| [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment |
 
 ## Run it, on the stand-in
 
@@ -130,6 +130,7 @@ curl localhost:8080/triage/ENG-1/status            # what triage is doing now
 curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
 curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
 curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
+curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
 ```
 
 Restate's UI, at http://localhost:9070, shows the same work as calls:
@@ -144,14 +145,21 @@ run real commands, on this machine, in `WORKSPACE/<issue>`
 The same agents, on your Linear workspace: they move and comment on real
 issues, and make real sub-issues. Use a team of its own, for the factory.
 
-1. **An API key**: in Linear's settings, under Security & access, a
-   personal API key. The factory sends it to Linear's MCP server
-   (`https://mcp.linear.app/mcp`) as a bearer token.
+1. **A key the factory acts with**: an OAuth app's token, of an app
+   installed with `actor=app` (which takes a workspace admin), so that the
+   factory acts in Linear as itself
+   ([Linear's docs](https://linear.app/developers/oauth-actor-authorization)).
+   A personal API key (Settings, Security & access) works too, but the
+   factory then acts as you: it cannot tell your comments from its own, so
+   it drops them all, and you cannot talk to it in comments. Either needs
+   to write issues and comments. The factory sends it to Linear's MCP server
+   (`https://mcp.linear.app/mcp`) as a bearer token, and asks Linear's API
+   who it is (`viewer`) when it starts.
 2. **Restate, reachable by Linear**: a tunnel to Restate's ingress, such as
    `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`).
 3. **A webhook**: in Linear's settings, under API, a webhook to
-   `https://<the tunnel>/linear/webhook`, for Issues, on the factory's team
-   only. Its signing secret is `LINEAR_WEBHOOK_SECRET`.
+   `https://<the tunnel>/linear/webhook`, for Issues and Comments, on the
+   factory's team only. Its signing secret is `LINEAR_WEBHOOK_SECRET`.
 4. **The team's states**: the agents move issues to Todo, In Progress,
    In Review, Done and Canceled. Add any the team has not (In Review, say),
    under the team's workflow settings.
@@ -164,16 +172,20 @@ npx @restatedev/restate-server              # and register the factory, as above
 ```
 
 Then create an issue on the team, in Linear: it moves as the agents work,
-and its sub-issues appear, each moving on its own.
+and its sub-issues appear, each moving on its own. Comment on the issue
+("How is it going?"): triage answers there. While it waits for its coders,
+it takes the comment once they answer.
 
 ## What it shows
 
 - **A webhook into agents**: `webhook()` of restate-agents makes the
   `linear` service. Linear posts to it at Restate's ingress, and it
-  delivers each new issue to the triage agent, keyed by the issue, as a
-  message that says where it comes from (`<webhook name="linear"
-  delivery="…">`): to the turn it is in, if it is in one, or else as a
-  message of its own.
+  delivers each new issue, and each comment on it, to the triage agent,
+  keyed by the issue, as a message that says where it comes from
+  (`<webhook name="linear" delivery="…">`): to the turn it is in, if it is
+  in one, or else as a message of its own. The factory's own comments come
+  back too, and are dropped: their author (the webhook's `actor`) is the
+  factory's Linear user.
   A delivery Linear sends again has the same `linear-delivery`, the
   message's idempotency key: it reaches the same message, not a second
   one. With a secret, a webhook that Linear did not sign is refused (401).
