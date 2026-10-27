@@ -7,7 +7,7 @@
 import { z } from 'zod';
 
 export const Plan = z.object({
-  summary: z.string().describe('What will be built, and how its parts fit together'),
+  summary: z.string().describe('What will be built, and how its parts fit together: a short paragraph, for people'),
   parts: z
     .array(
       z.object({
@@ -16,6 +16,11 @@ export const Plan = z.object({
           .regex(/^[a-z0-9-]+$/)
           .describe('A short name, such as "parser"'),
         title: z.string().describe('The part, in a line: the title of its sub-issue'),
+        description: z
+          .string()
+          .describe(
+            "The part, for the people following the issue: two or three plain sentences, its sub-issue's description",
+          ),
         files: z.array(z.string()).describe('The files the part owns: no other part changes them'),
         task: z.string().describe('What to build, in full: its coder sees nothing else'),
       }),

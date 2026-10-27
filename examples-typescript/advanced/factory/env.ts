@@ -27,25 +27,41 @@ const signature = (who: string, key: string) => {
 const linear = apiKey
   ? await mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
   : await mcpTools('http://localhost:3333/mcp');
+console.log(`Linear's tools: ${linear.map((t) => t.name).join(', ')}`);
 
 /**
- * Linear's tools for the agent `who` (such as "🧭 Triage"): each comment it
- * makes opens with its name, and its task, if it has one (`ENG-1.parser`:
- * "🛠️ Coder · parser"). The agents all comment as one Linear user: this
- * tells them apart.
+ * Linear's tools for the agent `who` (such as "🧭 Triage"): what it writes,
+ * each comment and each issue it creates, opens with its name, and its task,
+ * if it has one (`ENG-1.parser`: "🛠️ Coder · parser"). The agents all write
+ * as one Linear user: this tells them apart.
  */
 export const linearTools = (who: string): Tool[] =>
   linear.map((t) =>
-    t.name !== 'create_comment'
-      ? t
-      : tool({
-          name: t.name,
-          description: t.description,
-          input: t.input,
-          run: ({ body, ...input }, call) =>
-            t.run({ ...input, body: `${signature(who, call.ctx.key)}\n\n${String(body)}` }, call),
-        }),
+    tool({
+      name: t.name,
+      description: t.description,
+      input: t.input,
+      run: (input, call) => {
+        const field = writing(t, input);
+        if (!field) return t.run(input, call);
+        return t.run({ ...input, [field]: `${signature(who, call.ctx.key)}\n\n${String(input[field])}` }, call);
+      },
+    }),
   );
+
+/**
+ * The field of a Linear tool's input that an agent writes, to sign: a
+ * comment's `body`, or a new issue's `description` (an issue with an `id` is
+ * updated: it is signed already). By the input, not the tool's name: Linear
+ * names its tools as it likes.
+ */
+function writing(t: Tool, input: Record<string, unknown>) {
+  const fields = t.input.shape;
+  if (/comment/.test(t.name) && 'body' in fields && typeof input.body === 'string') return 'body';
+  if (/issue/.test(t.name) && 'description' in fields && typeof input.description === 'string' && !('id' in input))
+    return 'description';
+  return undefined;
+}
 
 /**
  * The factory's own Linear user (`viewer`, the user of LINEAR_API_KEY), or the
