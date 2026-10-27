@@ -68,7 +68,7 @@ export async function clone(root: string, remote: string, key: string) {
   }
   await git(dir, 'config', '--replace-all', 'credential.helper', '');
   await git(dir, 'config', '--add', 'credential.helper', helper);
-  await git(dir, 'config', 'user.name', `Coder · ${task}`); // each coder's commits are its own
+  await git(dir, 'config', 'user.name', `🛠️ Coder · ${task}`); // each coder's commits are its own, signed as its comments are
   await git(dir, 'config', 'user.email', 'factory@restate.localhost');
   await git(dir, 'config', 'push.autoSetupRemote', 'true'); // a plain `git push` pushes the coder's branch
 
