@@ -1,8 +1,8 @@
-// An agent's answer as data (`output`): the agent hands it in with
-// `submit_answer`, and `chat` answers with it; one that does not is reminded
-// once, then the invocation fails; a crash at any point still answers with it.
-// On pi's chat, with a fake model (../fakes/pi.ts), and Claude's (the
-// teller's client, ../fakes/claude.ts); the others share the same code
+// An agent's answer as data (`output`): its reply, as JSON of the schema,
+// is what `chat` answers with; a reply that is not is answered with what is
+// wrong, once, then the invocation fails; a crash at any point still answers
+// with it. On pi's chat, with a fake model (../fakes/pi.ts), and Claude's
+// (the teller's client, ../fakes/claude.ts); the others share the same code
 // (output.ts).
 import * as restate from 'restate-fns';
 import * as claude from 'restate-agents/claude';
@@ -10,24 +10,23 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { z } from 'zod';
 import { teller } from '../fakes/claude.ts';
-import { callTools, fakeProvider, say, textOf } from '../fakes/pi.ts';
+import { fakeProvider, say, textOf } from '../fakes/pi.ts';
 import { conversation, type PromptHandler } from '../testing.ts';
 
 const PLAN = { summary: 'A calculator', parts: ['parser', 'history'] };
 
-// Asked to plan, it hands a plan in; asked lazily, only once reminded; asked
-// to refuse, never.
+// Asked to plan, it answers with the plan, as JSON; asked lazily, in prose,
+// then in a code fence once told; asked to refuse, in prose always.
 vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
   openaiProvider: () =>
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
-      const last = messages.at(-1)!;
-      if (last.role === 'toolResult') return say('Handed in.');
-      const asked = textOf(last.content);
-      if (asked === 'Plan it' || asked.startsWith('Hand in your answer')) {
-        const first = textOf(messages.find((m) => m.role === 'user')!.content);
-        if (first === 'Refuse') return say('No.');
-        if (first === 'Plan it' || asked.startsWith('Hand in')) return callTools([['submit_answer', PLAN]]);
+      const asked = textOf(messages.at(-1)!.content);
+      const first = textOf(messages.find((m) => m.role === 'user')!.content);
+      if (first === 'Plan it') return say(JSON.stringify(PLAN));
+      if (first === 'Plan lazily' && asked.startsWith('Your reply is not')) {
+        return say('```json\n' + JSON.stringify(PLAN) + '\n```');
       }
+      if (first === 'Plan wrongly') return say(JSON.stringify({ summary: 1 }));
       return say('A plan, in prose');
     }),
 }));
@@ -38,21 +37,22 @@ const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
 const chat = pi.chat({ output: Plan }) as unknown as PromptHandler;
 
 describe("an agent's output", () => {
-  it('is what chat answers with: the value the agent handed in, not its text', async () => {
+  it('is what chat answers with: the value of the reply, not its text', async () => {
     expect(await conversation(chat, 'a').attempt('inv1', 'Plan it')).toEqual(PLAN);
   });
 
-  it('is asked for once more if the agent ended its turn without it', async () => {
+  it('is asked for once more, with what is wrong, if the reply is not it (a code fence is taken)', async () => {
     expect(await conversation(chat, 'b').attempt('inv1', 'Plan lazily')).toEqual(PLAN);
   });
 
-  it('fails the invocation if the agent never hands it in', async () => {
+  it('fails the invocation if the reply is never it', async () => {
     const refused = conversation(chat, 'c').attempt('inv1', 'Refuse');
     await expect(refused).rejects.toBeInstanceOf(restate.TerminalError);
-    await expect(refused).rejects.toThrow(/handed in no answer/);
+    await expect(refused).rejects.toThrow(/not the answer asked for: it is not JSON/);
+    await expect(conversation(chat, 'd').attempt('inv1', 'Plan wrongly')).rejects.toThrow(/summary/);
   });
 
-  it('survives a crash at any point: the retry answers with it, handed in again if need be', async () => {
+  it('survives a crash at any point: the retry answers with the same reply', async () => {
     for (let crashAt = 1; ; crashAt++) {
       const c = conversation(chat, `crash-${crashAt}`);
       if ((await c.attempt('inv1', 'Plan it', crashAt)) !== 'crashed') break;
@@ -61,19 +61,15 @@ describe("an agent's output", () => {
   }, 60_000);
 
   it("is Claude's too", async () => {
-    // It hands the plan in, then says it did.
+    // It answers with the plan, as JSON.
     teller.reply = (messages) => {
-      const done = messages.length > 1;
-      const content = done
-        ? [{ type: 'text', text: 'Handed in.' }]
-        : [{ type: 'tool_use', id: 'toolu_1', name: 'submit_answer', input: PLAN }];
       return {
         id: `msg_${messages.length}`,
         type: 'message',
         role: 'assistant',
         model: 'teller',
-        content,
-        stop_reason: done ? 'end_turn' : 'tool_use',
+        content: [{ type: 'text', text: JSON.stringify(PLAN) }],
+        stop_reason: 'end_turn',
         stop_sequence: null,
         usage: { input_tokens: 0, output_tokens: 0 },
       } as unknown as ReturnType<typeof teller.reply>;

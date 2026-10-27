@@ -78,6 +78,14 @@ Every framework takes `model`, `system`, `tools` and `output` (a
 system prompt for Claude and LangGraph, and is added to the framework's own
 (which tells the model about its tools) for pi, OpenCode and DeepSeek.
 
+Every agent takes these too, beside its framework's options:
+
+| Option        | What                                                                                                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                    |
+| `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended, and a steer waits for the end |
+| `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                                                          |
+
 ## Calling an agent
 
 Through Restate's ingress (port 8080), the request's body is the message,
@@ -406,9 +414,10 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 ## Structured answers
 
 With `output`, a zod object, an agent answers with data rather than text:
-the model hands its answer in with a tool, `submit_answer`, whose input is
-the schema (so its call is checked against it), and `chat` answers with
-it, as JSON. Every framework takes it.
+its reply is its answer, as JSON of the schema (which its system prompt
+asks for, with the schema), and `chat` answers with the value, checked
+against the schema: the answer is the call's return value, as with any
+handler. Every framework takes it.
 
 ```ts
 const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
@@ -417,11 +426,10 @@ const planner = claude.agent({ name: 'planner', output: Plan });
 const plan = await ctx.objectClient(planner, 'ENG-1').chat('Plan the work on ENG-1'); // a Plan
 ```
 
-A model that ends its turn without handing the answer in is asked once
-more; then the invocation fails, with a terminal error. The answer is the
-tool's input, returned as it is: nothing is stored beside the conversation.
-A crash that cuts the turn after the answer was handed in makes the retry
-ask for it again (one more model call, rarely). In a handler of your own, `prompt(ctx, text, {
+A reply that is not such JSON (a code fence around it is fine) is answered
+with what is wrong with it, once, for the model to reply again; then the
+invocation fails, with a terminal error. A retried attempt resumes the
+conversation, and reads the same reply. In a handler of your own, `prompt(ctx, text, {
 output })` answers with it too. As a subagent's, the parent's model gets it
 as JSON.
 
@@ -440,7 +448,7 @@ const issues = webhook({
   auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
   idempotencyHeader: 'linear-delivery', // a delivery sent again reaches the same message
   route: [triage],
-  key: (event) => event.data.identifier, // the conversation it goes to; undefined drops it
+  key: (event: { data: { identifier: string } }) => event.data.identifier, // its conversation; undefined drops it
 });
 await serve(issues, triage);
 ```

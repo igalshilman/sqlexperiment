@@ -26,7 +26,7 @@ await serve(coder);
 | `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                                                                        |
 | `system`    | The system prompt                                                                                                                                                                                           |
 | `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                                           |
-| `output`    | A zod object: the answer as data, which the agent hands in, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                                          |
+| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                              |
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...); use a sandbox. Without one, the agent has only `tools`                                     |
 | `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples-typescript/intermediate/review.ts`](../../../../../examples-typescript/intermediate/review.ts)) |
 

@@ -39,13 +39,12 @@ import { workspaceTools } from './workspace.ts';
 /** Linear's tools: issues, sub-issues, states, comments. */
 const linear = await linearTools();
 
-/** The issue a key is about: `ENG-1`, of `ENG-1.parser`. */
-const issueOf = (key: string) => key.split('.')[0]!;
-
 const coder = deepseek.agent({
   name: 'coder',
+  description: "Builds a part of the plan, in the issue's directory",
+  background: true, // a subagent: triage waits for its answer, no one watches it work
   // Every coder of an issue works in the issue's directory, at once.
-  tools: [...linear, ...workspaceTools((key) => `${workspace}/${issueOf(key)}`)],
+  tools: [...linear, ...workspaceTools(workspace)],
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
 - If your task names a sub-issue, first move it to "In Progress".
@@ -55,26 +54,28 @@ Other coders build the other parts in the same directory at the same time: chang
 Answer with what you did, briefly.`,
 });
 
-const PLANNER = `You plan the work on a Linear issue: read it, then hand in a plan.
+const PLANNER = `You plan the work on an issue, from its title and description.
 Divide the work into parts that can be built at the same time, each owning files of its own,
-and each with a task its coder can build from alone (one part, if the issue is small).
-Do not move or comment on the issue: the one who asked does.`;
+and each with a task its coder can build from alone (one part, if the issue is small).`;
 
-/** The planner: its answer is a `Plan`, as JSON, which the model hands in, not text. */
-const planner = claude.agent({ name: 'planner', system: PLANNER, tools: linear, output: Plan });
+/** The planner: no tools, it reads the issue it is given. Its answer is a `Plan`. */
+const planner = claude.agent({
+  name: 'planner',
+  description: 'Plans the work on an issue, from its title and description: a summary, and parts to build at once',
+  system: PLANNER,
+  output: Plan,
+  background: true,
+});
 
 const triage = pi.agent({
   name: 'triage',
-  tools: [
-    ...linear,
-    subagent(planner, { description: 'a planner, who answers with a plan as JSON: a summary, and parts at once' }),
-    subagent(coder, { description: 'a coder, who builds a part of the plan in the issue’s directory' }),
-  ],
+  tools: [...linear, subagent(planner), subagent(coder)],
   system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
 (a <webhook> element: the issue is its data.identifier). Read the issue first.
 - If it is not clear enough to build, comment with what you need to know, leave it in "Backlog", and stop.
 - If it is a duplicate or not something to build, comment why, and move it to "Canceled".
-- Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan".
+- Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan",
+  with the issue's title and description.
 - Comment on the issue with the plan, and create a sub-issue of it for each part, titled as the part.
 - Then hand every part to a coder at once, in one step: a task each, named after its part,
   with its sub-issue, its task and files, and the plan's summary.
@@ -85,10 +86,8 @@ Answer with what happened to the issue, briefly.`,
 
 /**
  * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
- * agent, keyed by the issue; a sub-issue (triage's own) does not. A webhook
- * is Linear's JSON (https://linear.app/developers/webhooks): `type`,
- * `action`, and the issue as `data`.
- * Linear sends a webhook again until it is answered, with the same
+ * agent, keyed by the issue; a sub-issue (triage's own) does not. Linear
+ * sends a webhook again until it is answered, with the same
  * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
  * a webhook Linear did not sign is refused.
  */
@@ -98,7 +97,8 @@ const issues = webhook({
   auth: linearSignature,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
-  key: ({ type, action, data }) =>
+  // The part of Linear's webhook (https://linear.app/developers/webhooks) read here.
+  key: ({ type, action, data }: { type: string; action: string; data: { identifier: string; parentId?: string } }) =>
     type === 'Issue' && action === 'create' && !data.parentId ? data.identifier : undefined,
 });
 

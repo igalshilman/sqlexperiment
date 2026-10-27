@@ -39,10 +39,10 @@ through Linear's MCP server: on the real Linear, or on a stand-in,
   │  │ planner/ENG-1.plan   │ │ coder/     │ │ coder/     │ │ coder/     │  each moves │       │
   │  │               Claude │ │ ENG-1.     │ │ ENG-1.     │ │ ENG-1.     │  its sub-   │       │
   │  │                      │ │ parser     │ │ history    │ │ integrate  │  issue      │       │
-  │  │ hands in its plan    │ │  DeepSeek  │ │  DeepSeek  │ │  DeepSeek  ├─────────────┼───────┘
-  │  │ (its output)         │ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘             │
-  │  │ (checked, and kept   │       │              │              │                    │
-  │  │  in its database)    │       │              │              │                    │
+  │  │ replies with the     │ │  DeepSeek  │ │  DeepSeek  │ │  DeepSeek  ├─────────────┼───────┘
+  │  │ plan, as JSON        │ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘             │
+  │  │ (its output,         │       │              │              │                    │
+  │  │  checked)            │       │              │              │                    │
   │  └──────────────────────┘       │              │              │                    │
   └─────────────────────────────────┼──────────────┼──────────────┼────────────────────┘
    list, read, write, bash;         ▼              ▼              ▼
@@ -52,9 +52,10 @@ through Linear's MCP server: on the real Linear, or on a stand-in,
 ```
 
 The planner only plans: a Claude agent whose `output` is the plan's schema
-([`plan.ts`](plan.ts)). Claude hands its plan in with a tool whose input is
-that schema, and the planner answers with the plan as JSON, not text. The
-parent acts on it: a sub-issue and a coder per part.
+([`plan.ts`](plan.ts)), and no tools: triage hands it the issue's title
+and description. Claude replies with the plan as JSON of that schema, which
+is checked, and the planner's `chat` answers with it, as a call answers.
+The parent acts on it: a sub-issue and a coder per part.
 
 Each agent is a virtual object with its conversation in its own SQL
 database, keyed by its task (`coder/ENG-1.parser`): a crash resumes it
@@ -71,8 +72,8 @@ side; an `integrate` task runs the whole test suite once they are done.
     │                                │                        │            parser     history
   ENG-1  Backlog ──── webhook ──────▶│ reads it               │              │           │
     │◀──────── In Progress ──────────┤                        │              │           │
-    │                                ├── subagent: plan ─────▶│ reads ENG-1  │           │
-    │                                │                        │ hands it in  │           │
+    │                                ├── subagent: plan ─────▶│ the issue in │           │
+    │                                │                        │ the task     │           │
     │                                │◀── Plan, as JSON ──────┤              │           │
     │◀──────── comment: the plan ────┤                        │              │           │
   ENG-2  sub-issue: parser ◀─────────┤                        │              │           │
@@ -170,8 +171,8 @@ and its sub-issues appear, each moving on its own.
   Its routes, auth and idempotency header are in the handler's metadata,
   in the admin API and the UI.
 - **A structured answer from an agent**: the planner's answer is a `Plan`,
-  checked against its schema when the model hands it in (`output`),
-  not text to parse.
+  the model's reply checked against its schema (`output`): the subagent
+  call's return value, not text to parse.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.

@@ -20,6 +20,7 @@ const workspace = process.env.WORKSPACE ?? '/tmp/coding';
 // Each coder works in a directory of its own: options for each invocation.
 const coder = object({
   name: 'coder',
+  description: 'A coding agent, with files of its own',
   handlers: {
     chat: opencode.chat((ctx) => ({ workspace: `${workspace}/${ctx.key}` })),
     messages: opencode.messages(),
@@ -28,7 +29,7 @@ const coder = object({
 
 const coordinator = pi.agent({
   name: 'coordinator',
-  tools: [subagent(coder, { description: 'a coding agent with files of its own' })],
+  tools: [subagent(coder)],
 });
 
 await serve(coordinator, coder);

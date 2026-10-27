@@ -123,8 +123,8 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
   /**
-   * The answer as data: a zod object, which the agent hands in with a tool
-   * (`submit_answer`), and `chat` and `prompt` answer with (see output.ts).
+   * The answer as data: a zod object, whose JSON the agent replies with
+   * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
   output?: O;
 }
@@ -488,7 +488,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
 /**
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
- * With `output`, it answers with the value the agent hands in (see
+ * With `output`, it answers with the value the agent replies with (see
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
@@ -536,6 +536,7 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   name,
   description,
   schema,
+  background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });

@@ -1,8 +1,8 @@
 /**
  * The planner's answer, structured: a plan the parent can act on, part by
- * part. It is the planner's `output`: the model hands it in with a tool whose
- * input is this schema, so its call is checked against it, and the planner's
- * `chat` answers with it.
+ * part. It is the planner's `output`: the model replies with it, as JSON of
+ * this schema (checked against it), and the planner's `chat` answers with
+ * it.
  */
 import { z } from 'zod';
 

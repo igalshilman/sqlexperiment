@@ -15,7 +15,8 @@ const issues = webhook({
   auth: { header: 'linear-signature', secret: 'shh' },
   idempotencyHeader: 'linear-delivery',
   route: [triage, audit],
-  key: ({ action, data }) => (action === 'create' ? data.identifier : undefined),
+  key: ({ action, data }: { action: string; data: { identifier: string } }) =>
+    action === 'create' ? data.identifier : undefined,
 });
 
 type Handler = (ctx: unknown, body: Uint8Array) => Promise<void>;

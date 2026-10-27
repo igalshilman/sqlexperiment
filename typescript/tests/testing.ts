@@ -484,6 +484,7 @@ export const STEERED = 'Only from account 1, please';
 export async function steeredWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
   messages: (ctx: restate.ObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  { service }: { service?: string } = {},
 ) {
   const map = new Map<string, Uint8Array>();
   const steering = steeringOf(map);
@@ -497,7 +498,7 @@ export async function steeredWhileWorking(
     },
   });
   const attempt = (id: string, shared = false) => {
-    const sql = sqlAttempt({ map, key: 'steer', id, shared });
+    const sql = sqlAttempt({ map, key: 'steer', id, shared, service });
     return { sql, ctx: { key: 'steer', ...sql } as unknown as restate.ObjectContext };
   };
   const turn = attempt('inv1');
