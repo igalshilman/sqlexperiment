@@ -5,9 +5,10 @@ frameworks take it from there. A triage agent (pi) decides whether the issue
 is ready to build, and leads the work: it asks a planner (Claude) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
-a coder (OpenCode) of its own, all at once, in the issue's repository.
-Triage and the coders move their issues along the team's workflow, and
-comment on them, through Linear's MCP server: on the real Linear, or on a stand-in,
+a coder (OpenCode) of its own, all at once: each on a git branch of its
+own, which it opens a pull request of, on GitHub. Triage and the coders
+move their issues along the team's workflow, and comment on them, through
+Linear's MCP server: on the real Linear, or on a stand-in,
 [`linear.ts`](linear.ts), with the same tools.
 
 ## How it fits together
@@ -45,10 +46,12 @@ comment on them, through Linear's MCP server: on the real Linear, or on a stand-
   │  │  checked)            │       │              │              │                    │
   │  └──────────────────────┘       │              │              │                    │
   └─────────────────────────────────┼──────────────┼──────────────┼────────────────────┘
-   OpenCode's read, edit,           ▼              ▼              ▼
-   bash; commit (only its own  ┌─────────────────────────────────────┐
-   files, one at a time)       │  WORKSPACE/ENG-1 (a git repository) │
-                               └─────────────────────────────────────┘
+   OpenCode's read, edit, bash;     ▼              ▼              ▼
+   each in a git worktree,     ┌────────────┐ ┌────────────┐ ┌────────────┐
+   on its own branch, with     │ eng-1-     │ │ eng-1-     │ │ eng-1      │
+   a pull request on GitHub    │ parser     │ │ history    │ │ (merged)   │
+                               │ PR → eng-1 │ │ PR → eng-1 │ │ PR → main  │
+                               └────────────┘ └────────────┘ └────────────┘
 ```
 
 The planner only plans: a Claude agent whose `output` is the plan's schema
@@ -82,11 +85,11 @@ side; an `integrate` task runs the whole test suite once they are done.
     │                                ├── subagent: history ─────────────────────────────▶│
   ENG-2  In Progress ◀───────────────────────────────────────────────────────┤           │
   ENG-3  In Progress ◀───────────────────────────────────────────────────────────────────┤
-    │                                │                        │   code, tests, commit    │
+    │                                │                        │   code, tests, a PR      │
   ENG-2  Done, a comment ◀───────────────────────────────────────────────────┤           │
   ENG-3  Done, a comment ◀───────────────────────────────────────────────────────────────┤
     │                                │◀── answers ───────────────────────────┴───────────┘
-    │                                ├── subagent: integrate (a coder runs every test)
+    │                                ├── subagent: integrate (merges the parts, runs every test, PR into main)
     │◀──── comment: what was built ──┤
   ENG-1  In Review ◀─────────────────┤
 ```
@@ -100,10 +103,10 @@ is a duplicate or nothing to build to **Canceled**.
 | File                           | What                                                                                                                 |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
 | [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents                     |
-| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); the coders' tools          |
+| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests     |
 | [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                            |
 | [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                          |
-| [`workspace.ts`](workspace.ts) | The coders' directory, one per issue, and `commit`, which commits one coder's files at a time                        |
+| [`workspace.ts`](workspace.ts) | The coders' git worktrees: a clone per issue, a worktree and a branch per coder; the stand-in's repository           |
 | [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment |
 
 ## Run it, on the stand-in
@@ -136,14 +139,17 @@ curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}' 
 Restate's UI, at http://localhost:9070, shows the same work as calls:
 triage's, and the planner's and coders' under it.
 
-`linear.ts` prints each issue, move and comment as it happens. The coders
-run real commands, on this machine, in `WORKSPACE/<issue>`
-(`/tmp/restate-factory` by default): run it in a sandbox (a container, a VM).
+`linear.ts` prints each issue, move and comment as it happens. Without
+GitHub, a git repository in `WORKSPACE/origin.git` stands in for the
+project's, and `factory.ts` prints each pull request. The coders run real
+commands, on this machine, in `WORKSPACE` (`/tmp/restate-factory` by
+default): run it in a sandbox (a container, a VM).
 
-## Run it, on Linear
+## Run it, on Linear and GitHub
 
-The same agents, on your Linear workspace: they move and comment on real
-issues, and make real sub-issues. Use a team of its own, for the factory.
+The same agents, on your Linear workspace and a GitHub repository: they
+move and comment on real issues, make real sub-issues, and open real pull
+requests. Use a team and a repository of their own, for the factory.
 
 1. **A key the factory acts with**: an OAuth app's token, of an app
    installed with `actor=app` (which takes a workspace admin), so that the
@@ -163,9 +169,18 @@ issues, and make real sub-issues. Use a team of its own, for the factory.
 4. **The team's states**: the agents move issues to Todo, In Progress,
    In Review, Done and Canceled. Add any the team has not (In Review, say),
    under the team's workflow settings.
+5. **A repository, and a token for it**: a repository with a first commit
+   on `main` (a README, say; a test runner helps the coders), and a
+   fine-grained personal access token for it alone, with read and write
+   access to its contents and pull requests: `GITHUB_TOKEN`. The coders push
+   their branches with it, and open pull requests through GitHub's MCP
+   server (`https://api.githubcopilot.com/mcp/`). With Linear's GitHub
+   integration, a pull request shows on its issue too: its branch names it
+   (`eng-1-parser`).
 
 ```sh
 LINEAR_API_KEY=lin_api_… LINEAR_WEBHOOK_SECRET=lin_wh_… \
+GITHUB_REPO=igalshilman/demos GITHUB_TOKEN=github_pat_… \
 OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   node advanced/factory/factory.ts
 npx @restatedev/restate-server              # and register the factory, as above
