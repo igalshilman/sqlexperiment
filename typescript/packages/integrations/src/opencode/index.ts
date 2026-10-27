@@ -117,9 +117,10 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /**
    * A directory of the local machine, made if missing: OpenCode keeps its own tools (read,
    * write, edit, bash, glob, grep...) there, besides `tools`, and the
-   * session works in it.
+   * session works in it. Or a function of the invocation's context that
+   * gives one: `(ctx) => \`/work/${ctx.key}\``, a directory per key.
    */
-  workspace?: string;
+  workspace?: string | ((ctx: restate.ObjectContext) => string);
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
   /**
@@ -409,10 +410,11 @@ async function interruptOn(host: Host, failure: Promise<never>): Promise<never> 
  */
 export const withOpenCode = async <T>(
   ctx: restate.ObjectContext,
-  { plugins = [], model: named, system, tools = [], workspace }: Options,
+  { plugins = [], model: named, system, tools = [], workspace: where }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named));
+  const workspace = typeof where === 'function' ? where(ctx) : where;
   if (workspace) await mkdir(workspace, { recursive: true });
   const fence: Fence = { closed: false };
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();

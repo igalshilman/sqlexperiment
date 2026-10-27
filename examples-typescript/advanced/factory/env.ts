@@ -6,7 +6,7 @@
  */
 import type { WebhookAuth } from 'restate-agents';
 import { mcpTools } from './mcp.ts';
-import { codingTools } from './workspace.ts';
+import { commitTool, issueDirectory } from './workspace.ts';
 
 const apiKey = process.env.LINEAR_API_KEY;
 const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
@@ -23,5 +23,8 @@ export const webhookAuth: WebhookAuth | undefined = webhookSecret
   ? { header: 'linear-signature', secret: webhookSecret }
   : undefined;
 
-/** The coders' tools: files, bash and commit, in a directory of the workspace per issue. */
-export const workspaceTools = () => codingTools(workspace);
+/** A coder's directory: its issue's, in the workspace, shared by the issue's coders. */
+export const issueWorkspace = ({ key }: { key: string }) => issueDirectory(workspace, key);
+
+/** `commit`: a coder's files, as its own commit, in its issue's directory. */
+export const commit = commitTool(workspace);

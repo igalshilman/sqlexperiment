@@ -3,16 +3,16 @@
  * a webhook. A triage agent (pi) decides whether the issue is ready to build,
  * and leads the work: it asks a planner (Claude) for a plan, which comes back
  * structured, part by part; then it makes a sub-issue for each part, and
- * hands every part to a coder (DeepSeek) of its own, all at once. Triage and
+ * hands every part to a coder (OpenCode) of its own, all at once. Triage and
  * the coders move their issues along Linear's workflow as they go, and
  * comment on them, with Linear's MCP server; the planner only plans.
  *
  * From examples-typescript/, each in a terminal of its own, with a key for
- * each agent's model: OpenAI's for triage, Anthropic's for the planner, and
- * DeepSeek's for the coders:
+ * each agent's model: OpenAI's for triage and the coders, Anthropic's for the
+ * planner:
  *
  *   node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
- *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/factory/factory.ts
+ *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… node advanced/factory/factory.ts
  *   npx @restatedev/restate-server
  *
  * Then register the factory with Restate, file an issue, and follow it. The
@@ -41,7 +41,7 @@
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
-import * as deepseek from 'restate-agents/deepseek';
+import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 import * as env from './env.ts';
 import { Plan } from './plan.ts';
@@ -49,14 +49,15 @@ import { Plan } from './plan.ts';
 /** Linear's tools: issues, sub-issues, states, comments. */
 const linear = await env.linearTools();
 
-const coder = deepseek.agent({
+const coder = opencode.agent({
   name: 'coder',
   description: "Builds a part of the plan, in the issue's directory",
-  tools: [...linear, ...env.workspaceTools()], // the issue's directory, shared by its coders
+  workspace: env.issueWorkspace, // the issue's directory, shared by its coders
+  tools: [...linear, env.commit],
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
 - If your task names a sub-issue, first move it to "In Progress".
-- Read a file before you change it; write tests for your part, and run them after each change.
+- Write tests for your part, and run them after each change.
 - Once your tests pass, commit your files with \`commit\` (never git in bash).
 - Then comment on your sub-issue with what you did, and move it to "Done".
 Answer with what you did, briefly.`,
