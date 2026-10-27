@@ -1,6 +1,6 @@
 // An agent's answer as data (`output`): the agent hands it in with
 // `submit_answer`, and `chat` answers with it; one that does not is reminded
-// once, then the invocation fails; a crash after it was handed in keeps it.
+// once, then the invocation fails; a crash at any point still answers with it.
 // On pi's chat, with a fake model (../fakes/pi.ts), and Claude's (the
 // teller's client, ../fakes/claude.ts); the others share the same code
 // (output.ts).
@@ -23,10 +23,10 @@ vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
       const last = messages.at(-1)!;
       if (last.role === 'toolResult') return say('Handed in.');
       const asked = textOf(last.content);
-      if (asked === 'Plan it' || asked.startsWith('You did not hand in')) {
+      if (asked === 'Plan it' || asked.startsWith('Hand in your answer')) {
         const first = textOf(messages.find((m) => m.role === 'user')!.content);
         if (first === 'Refuse') return say('No.');
-        if (first === 'Plan it' || asked.startsWith('You did not')) return callTools([['submit_answer', PLAN]]);
+        if (first === 'Plan it' || asked.startsWith('Hand in')) return callTools([['submit_answer', PLAN]]);
       }
       return say('A plan, in prose');
     }),
@@ -52,7 +52,7 @@ describe("an agent's output", () => {
     await expect(refused).rejects.toThrow(/handed in no answer/);
   });
 
-  it('is kept through a crash at any point: the retry answers with it', async () => {
+  it('survives a crash at any point: the retry answers with it, handed in again if need be', async () => {
     for (let crashAt = 1; ; crashAt++) {
       const c = conversation(chat, `crash-${crashAt}`);
       if ((await c.attempt('inv1', 'Plan it', crashAt)) !== 'crashed') break;

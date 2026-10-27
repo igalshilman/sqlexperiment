@@ -403,9 +403,10 @@ const plan = await ctx.objectClient(planner, 'ENG-1').chat('Plan the work on ENG
 ```
 
 A model that ends its turn without handing the answer in is asked once
-more; then the invocation fails, with a terminal error. The answer is kept
-in the agent's database with its conversation: a retried attempt answers
-with what was handed in. In a handler of your own, `prompt(ctx, text, {
+more; then the invocation fails, with a terminal error. The answer is the
+tool's input, returned as it is: nothing is stored beside the conversation.
+A crash that cuts the turn after the answer was handed in makes the retry
+ask for it again (one more model call, rarely). In a handler of your own, `prompt(ctx, text, {
 output })` answers with it too. As a subagent's, the parent's model gets it
 as JSON.
 
