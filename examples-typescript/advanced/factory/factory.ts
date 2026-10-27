@@ -45,14 +45,10 @@ const triage = pi.agent({
 });
 
 /**
- * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
- * agent, keyed by the issue, and so does each comment on it, but for the
- * agents' own (signed, see env.ts); a sub-issue (triage's own) does not. A
- * comment reaches the turn triage is in, if it is in one, or else is a
- * message of its own. Linear
- * sends a webhook again until it is answered, with the same
- * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
- * a webhook Linear did not sign is refused.
+ * Linear's events, to triage's conversation for the issue:
+ * - a new issue starts one (a sub-issue, triage's own, does not);
+ * - a new comment on it, but for the agents' own, joins it.
+ * Anything else is dropped.
  */
 const linearEvents = webhook({
   name: 'linear',
@@ -60,7 +56,7 @@ const linearEvents = webhook({
   auth: env.webhookAuth,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
-  // Linear's webhook: https://linear.app/developers/webhooks
+  // The event's shape: https://linear.app/developers/webhooks
   key: ({ type, action, data }) => {
     if (action !== 'create') return undefined;
     if (type === 'Issue' && !data.parentId) return data.identifier;
