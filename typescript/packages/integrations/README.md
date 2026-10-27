@@ -61,8 +61,8 @@ your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
 conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), `clear` (forget it all), `sync`, `notifications` and `watch` (to follow it), and `signal`
-and `pending` ([Signals](#signals)).
+message it answers), `clear` (forget it all), `sync`, `notifications` and
+`watch` (to follow it), and `signal` and `pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
 | ----------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -331,14 +331,14 @@ in every framework, and a framework's own tools:
 import { call, send, signal, subagent, tool, workflow } from 'restate-agents';
 ```
 
-| Tool                                                           | What the model gets                                                                                                                                   |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool({ name, description, input, run })`                      | A tool of your own: `input` is a zod object; `run(input, { ctx, callId, idempotencyKey })` returns text or JSON, or a promise of it                   |
-| `call(target, handler, { description, input?, key? })`         | Calls a handler of a service, virtual object or workflow, and answers with its result. Of an object, the model chooses the key, unless `key` gives it |
-| `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                            |
-| `workflow(target, { description, input?, key? })`              | Runs a workflow to the end, and answers with its result: a workflow of its own per tool call, unless `key` gives its id                               |
-| `signal(name, { description, input? })`                        | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value ([Signals](#signals))         |
-| `subagent(agent, { description?, handler?, name? })`           | Hands a named task to another agent (of any framework), keyed `<this key>.<task>`, and answers with its answer: the same name continues the task      |
+| Tool                                                           | What the model gets                                                                                                                                                                          |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool({ name, description, input, run })`                      | A tool of your own: `input` is a zod object; `run(input, { ctx, callId, idempotencyKey })` returns text or JSON, or a promise of it                                                          |
+| `call(target, handler, { description, input?, key? })`         | Calls a handler of a service, virtual object or workflow, and answers with its result. Of an object, the model chooses the key, unless `key` gives it                                        |
+| `send(target, handler, { description, input?, key?, delay? })` | Sends to a handler without waiting: a one-way call, after `delay` if given                                                                                                                   |
+| `workflow(target, { description, input?, key? })`              | Runs a workflow to the end, and answers with its result: a workflow of its own per tool call, unless `key` gives its id                                                                      |
+| `signal(name, { description, input? })`                        | Waits for a signal (a person's approval, another system's result) without holding a process, and answers with its value ([Signals](#signals))                                                |
+| `subagent(agent, { description?, handler?, name? })`           | Hands a named task to another agent (of any framework), keyed `<this key>.<task>`, and answers with its answer: the same name continues the task. Its description is the agent's, by default |
 
 Handler names are checked against the target's handlers: a typo does not
 compile. A `key` is a string, or a function of the invocation's context
@@ -576,7 +576,9 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop`, `steer`, `clear`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
+`pending`, `status`, `stop`, `steer`, `notifications` or `watch`, which
+every object has, nor `sync`, `clear` or `erase`, which an agent has (one
+with `messages`). A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

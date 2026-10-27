@@ -44,8 +44,8 @@ export interface Stopped {
  * `pending`, the waits, `status`, what the object is doing, `stop`, which
  * stops the message it answers, `steer`, which adds to it, and
  * `notifications` and `watch`, the revision of its conversation, and a wait
- * for a newer one, and `clear`, which forgets it all (an agent's has `sync`
- * too: `FOLLOWED`). They are shared, so they run while the object's handler
+ * for a newer one (an agent's has `clear` and `sync` too: `FOLLOWED`).
+ * They are shared, so they run while the object's handler
  * works, and replay their journal: they use no `ctx.db`.
  */
 const BUILT_IN = {
@@ -72,20 +72,6 @@ const BUILT_IN = {
     if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
     return { stopped: turn?.invocationId ?? null } satisfies Stopped;
   }),
-  /**
-   * Forget everything of this key: stop the message being answered (as
-   * `stop`), then clear its conversation, database and state, and what its
-   * `signals` hold (waits, kept signals, steered messages). Its revision
-   * goes on, so followers see the conversation empty. A message sent before
-   * it is answered first, then forgotten too; one sent after starts anew.
-   */
-  clear: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
-    const turn = await ctx.get<Turn>(TURN);
-    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
-    await own(ctx, 'erase');
-    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
-  }),
-  erase: eraser(false),
   /**
    * Add `text` to the message being answered (`status`'s), such as "Only
    * Monday, please": the agent takes it at its next tool call, as its
@@ -120,15 +106,28 @@ const BUILT_IN = {
 };
 
 /**
- * The handler that agents (an object with `messages`) have beside those of
- * every object: `sync`, the conversation since `cursor` (by default, all of
+ * The handlers that agents (an object with `messages`) have beside those of
+ * every object: `clear`, which forgets the conversation; and `sync`, the conversation since `cursor` (by default, all of
  * it), what the agent is doing, and the revision, in one request; with
  * `revision`, once there is a newer one, or at the timeout. A client follows
  * the conversation by sending each answer's `revision` and `cursor` back, at
  * once while it has `more`.
  */
 const FOLLOWED = {
-  erase: eraser(true),
+  /**
+   * Forget the conversation: stop the message being answered (as `stop`),
+   * then clear the key's conversation, database and state, and what its
+   * `signals` hold (waits, kept signals, steered messages). The log's ids
+   * and cursors go on (see log.ts), so a follower reads on, and drops the
+   * messages before `first`. A message sent before it is answered first,
+   * then forgotten too; one sent after starts anew.
+   */
+  clear: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
+    const turn = await ctx.get<Turn>(TURN);
+    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
+    await own(ctx, 'erase');
+    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
+  }),
   sync: restate.handlers.object.shared(
     { journalReplay: true },
     async (
@@ -147,21 +146,22 @@ const FOLLOWED = {
 };
 
 /**
- * @internal `clear`'s work, once the object's handlers before it are done:
- * clear its state (its database too), and its signals'. An agent's log
- * (`followed`) goes on where it got to: see log.ts.
+ * The agents' handlers that only their own handlers call (Restate's ingress
+ * refuses them), and their types leave out: `erase`, `clear`'s work, once
+ * the handlers before it are done. It clears the key's state (its database
+ * too) and its signals', and the log goes on where it got to (see log.ts).
  */
-function eraser(followed: boolean) {
-  return restate.handlers.object.exclusive(
+const INTERNAL = {
+  erase: restate.handlers.object.exclusive(
     { journalReplay: true, ingressPrivate: true },
     async (ctx: restate.JournaledObjectContext) => {
-      const start = followed ? startAfter(await own<Messages>(ctx, 'messages', { limit: 1 })) : null;
+      const start = startAfter(await own<Messages>(ctx, 'messages', { limit: 1 }));
       ctx.clearAll();
-      if (start) ctx.set(log.START, start);
+      ctx.set(log.START, start);
       await ctx.objectClient(signals, signalsOf(ctx)).reset();
     },
-  );
-}
+  ),
+};
 
 /** Where the log starts after `latest`, its latest message: past its ids and cursor. */
 const startAfter = ({ messages: [latest], cursor, first = 0 }: Messages): log.Start => ({
@@ -233,10 +233,12 @@ type Handler = (ctx: restate.ObjectContext, input: never) => unknown;
 
 /** The names of the handlers every object (or agent) has, which its own handlers cannot take. */
 type Reserved = {
-  [name in keyof typeof BUILT_IN | keyof typeof FOLLOWED]?: 'a handler every object has: name yours otherwise';
+  [
+    name in keyof typeof BUILT_IN | keyof typeof FOLLOWED | keyof typeof INTERNAL
+  ]?: 'a handler every object has: name yours otherwise';
 };
 
-/** The handlers an object with `handlers` has: those of every object, an agent's `sync`, and its own. */
+/** The handlers an object with `handlers` has: those of every object, an agent's `clear` and `sync`, and its own. */
 type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLOWED : unknown) & H;
 
 /**
@@ -253,11 +255,11 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
  * message, `steer`, which adds to it, `pending`, the waits of its tools
- * (`signal()`), `signal({ id, value })`, which resolves one,
- * `notifications` and `watch({ revision })`, to follow its conversation,
- * and `clear`, which forgets it (its database and state too).
+ * (`signal()`), `signal({ id, value })`, which resolves one, and
+ * `notifications` and `watch({ revision })`, to follow its conversation.
  * An agent, an object with a `messages` handler (such as `claude.messages()`),
- * has `sync` too, which `follow()` of restate-agents/client reads.
+ * has `clear` too, which forgets its conversation (its database and state
+ * too), and `sync`, which `follow()` of restate-agents/client reads.
  *
  * `schema`, optional: tables of your own, beside the agent's (which are its
  * own business), made in each key's database as restate-fns's `object` makes
@@ -278,9 +280,9 @@ export const object = <P extends string, H extends Record<string, Handler>>(
 ): restate.VirtualObjectDefinition<P, With<H>> => {
   const { background, ...rest } = definition;
   if (background) inBackground(definition.name);
-  for (const name of [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED)]) {
+  for (const name of [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED), ...Object.keys(INTERNAL)]) {
     if (name in definition.handlers)
-      throw new Error(`${definition.name}: every object has a \`${name}\` handler already`);
+      throw new Error(`${definition.name}: \`${name}\` is a handler of restate-agents' own: name yours otherwise`);
   }
   const yours = Object.entries(definition.handlers as Record<string, Handler>).map(([name, handler]) => [
     name,
@@ -289,7 +291,7 @@ export const object = <P extends string, H extends Record<string, Handler>>(
   ]);
   const handlers: object = {
     ...BUILT_IN,
-    ...('messages' in definition.handlers ? FOLLOWED : {}),
+    ...('messages' in definition.handlers ? { ...FOLLOWED, ...INTERNAL } : {}),
     ...Object.fromEntries(yours),
   };
   return withCompanion(

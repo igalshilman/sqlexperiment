@@ -205,11 +205,20 @@ describe('tool', () => {
 const named = (handlers: Record<string, () => Promise<void>>) => () => object({ name: 'assistant', handlers });
 
 describe('object', () => {
-  it('refuses handlers of its own named as the ones every object has', () => {
-    expect(named({ signal: async () => {} })).toThrow('every object has a `signal` handler already');
-    expect(named({ pending: async () => {} })).toThrow('every object has a `pending` handler already');
-    expect(named({ clear: async () => {} })).toThrow('every object has a `clear` handler already');
+  it("refuses handlers of its own named as restate-agents' own", () => {
+    expect(named({ signal: async () => {} })).toThrow("`signal` is a handler of restate-agents' own");
+    expect(named({ pending: async () => {} })).toThrow("`pending` is a handler of restate-agents' own");
+    expect(named({ clear: async () => {} })).toThrow("`clear` is a handler of restate-agents' own");
     // @ts-expect-error: a handler every object has
     expect(() => object({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
+  });
+
+  it('has `clear` and `sync` only as an agent: one with `messages`', () => {
+    const handlers = (o: object) => Object.keys((o as { object: object }).object);
+    const desk = object({ name: 'desk', handlers: { chat: async () => '' } });
+    const agent = object({ name: 'agent', handlers: { chat: async () => '', messages: async () => ({}) } });
+    expect(handlers(desk)).not.toContain('clear');
+    expect(handlers(desk)).not.toContain('sync');
+    expect(handlers(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));
   });
 });

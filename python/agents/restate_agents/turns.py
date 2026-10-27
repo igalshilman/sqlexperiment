@@ -22,10 +22,11 @@ import restate_fns as restate
 
 from restate_agents import log
 from restate_agents.common import Messages, MessagesRequest, Synced, SyncRequest, Transcript
-from restate_agents.object import TURN, Object, Turn, context, refusal, service
+from restate_agents.object import TURN, Object, Stopped, Turn, context, refusal, service
 from restate_agents.signals import Agent, CloseRequest, Steer, signals_of
 from restate_agents.signals import close as close_turn
 from restate_agents.signals import publish as publish_change
+from restate_agents.signals import reset as reset_signals
 from restate_agents.signals import steering as steering_of
 
 # A cancelled turn's answer, as its conversation records it.
@@ -107,13 +108,18 @@ def agent(
 ) -> Object:
     """
     An agent's object: ``chat``, which ``answer`` answers, a turn at a time;
-    and ``messages`` and ``sync``, its conversation as ``transcript`` gives
-    it, from the log that each change takes (``publish``).
-    ``options``: those of ``Object``.
+    ``messages`` and ``sync``, its conversation as ``transcript`` gives it,
+    from the log that each change takes (``publish``); and ``clear``, which
+    forgets it. ``options``: those of ``Object``.
     """
     obj = Object(name, **options)
     _chat(obj, answer)
     _transcripts[name] = transcript
+
+    async def own(ctx: Any, handler: str, arg: Any = None) -> Any:
+        """A call of the agent's handler ``handler``, the same key."""
+        answer = await ctx.generic_call(name, handler, arg=json.dumps(arg).encode(), key=ctx.key())
+        return json.loads(answer) if answer else None
 
     async def messages(ctx: restate.ObjectContext, request: MessagesRequest | None = None) -> Messages:
         """The conversation so far, with the tool calls: a page of it, or what is new or changed since a cursor."""
@@ -128,22 +134,42 @@ def agent(
         ``revision`` and ``cursor`` back, at once while it has ``more``.
         """
         request = request or {}
-
-        async def own(handler: str, arg: Any = None) -> Any:
-            answer = await ctx.generic_call(name, handler, arg=json.dumps(arg).encode(), key=ctx.key())
-            return json.loads(answer)
-
         if (revision := request.get("revision")) is not None:
-            await own("watch", {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
+            await own(ctx, "watch", {"revision": revision, "timeoutSeconds": request.get("timeoutSeconds", 50)})
         # The revision first: a change after it shows in the next sync. Then
         # the object's own handlers, which read its state as it is now.
-        notifications = await own("notifications")
-        status = await own("status")
-        page = await own("messages", {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
+        notifications = await own(ctx, "notifications")
+        status = await own(ctx, "status")
+        page = await own(ctx, "messages", {"cursor": request.get("cursor", 0), "limit": request.get("limit", 100)})
         return Synced(revision=notifications["revision"], status=status, **page)
+
+    async def clear(ctx: restate.JournaledObjectSharedContext, _: None = None) -> Stopped:
+        """
+        Forget the conversation: stop the message being answered (as
+        ``stop``), then clear the key's conversation, database and state, and
+        what its signals hold (waits, kept signals, steered messages). The
+        log's ids and cursors go on (see log.py): a follower reads on, and
+        drops the messages before ``first``. A message sent before it is
+        answered first, then forgotten too; one sent after starts anew.
+        """
+        turn = await ctx.get(TURN)
+        if turn:
+            ctx.cancel_invocation(turn["invocationId"])
+        await own(ctx, "erase")
+        return Stopped(stopped=turn["invocationId"] if turn else None)
+
+    async def erase(ctx: restate.JournaledObjectContext, _: None = None) -> None:
+        """``clear``'s work, once the handlers before it are done: the state (the database too), and the signals'."""
+        page = await own(ctx, "messages", {"limit": 1})
+        latest = page["messages"][-1]["id"] + 1 if page["messages"] else page.get("first", 0)
+        ctx.clear_all()
+        ctx.set(log.START, {"seq": page["cursor"], "id": latest})
+        await ctx.object_call(reset_signals, key=signals_of(name, ctx.key()), arg=None)
 
     obj.handler("messages", kind="shared")(messages)
     obj.handler("sync", kind="shared")(sync)
+    restate.VirtualObject.handler(obj, kind="shared", journal_replay=True)(clear)
+    restate.VirtualObject.handler(obj, journal_replay=True, ingress_private=True)(erase)
     return obj
 
 
