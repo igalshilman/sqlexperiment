@@ -109,7 +109,9 @@ is a duplicate or nothing to build to **Canceled**.
 ## Run it, on the stand-in
 
 From [`examples-typescript/`](../..), after `make js` at the repository
-root, each in a terminal of its own:
+root, each in a terminal of its own, with a key for each agent's model:
+OpenAI's for triage, Anthropic's for the planner, and DeepSeek's for the
+coders:
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
@@ -117,7 +119,9 @@ OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/fact
 npx @restatedev/restate-server
 ```
 
-Then register the factory with Restate, file an issue, and follow it:
+Then register the factory with Restate, file an issue, and follow it. The
+new issue is what starts the factory: the stand-in posts Linear's webhook
+for it to Restate, at `localhost:8080/linear/webhook`.
 
 ```sh
 npx @restatedev/restate deployments register http://localhost:9080
