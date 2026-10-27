@@ -16,11 +16,12 @@ The agent waits for approval; in another terminal, see what it waits for
 
 or the oldest wait for an approval: ``{"name": "approval", "value": "approved"}``.
 While it works, add to the message it answers (it reads it after its next
-tool call), see what it does, or stop it:
+tool call), see what it does, stop it, or forget it all and start anew:
 
     curl localhost:8080/support/alice/steer -d 'Actually, make it $20'
     curl localhost:8080/support/alice/status
     curl localhost:8080/support/alice/stop
+    curl localhost:8080/support/alice/clear
 """
 
 from restate_agents import call, langgraph, serve, signal, workflow

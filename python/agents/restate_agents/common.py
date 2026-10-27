@@ -152,6 +152,8 @@ class Messages(TypedDict):
     messages: list[ChatMessage]
     more: bool
     cursor: int
+    first: NotRequired[int]
+    """The id of the conversation's first message, once it was cleared (``clear``): a client drops those before."""
 
 
 @dataclass

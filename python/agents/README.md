@@ -29,7 +29,7 @@ curl localhost:8080/assistant/alice/messages   # the conversation so far
 
 The same agent runs on each: `<framework>.agent(name, model=, system=,
 tools=)`, with the same handlers (`chat`, `messages`, `status`, `stop`,
-`steer`, `pending`, `signal`, `sync`, `notifications`, `watch`) and Restate's tools.
+`steer`, `clear`, `pending`, `signal`, `sync`, `notifications`, `watch`) and Restate's tools.
 Where the framework has agents of its own (LangGraph, Pydantic AI, the
 OpenAI Agents SDK, ADK), yours can go in its place, with
 `<framework>.tools([...])` for Restate's tools. `<framework>.prompt(ctx, ...)`
@@ -572,6 +572,7 @@ with what its tools wait for); `stop` stops it, and `steer` adds to it:
 curl localhost:8080/assistant/alice/status
 curl localhost:8080/assistant/alice/stop                              # {"stopped": "inv_1f…"}
 curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invocationId": "inv_1f…", "steered": true}
+curl localhost:8080/assistant/alice/clear                             # {"stopped": null}: a new conversation
 ```
 
 - **`stop`** cancels the turn's invocation (Restate's cancellation, as its
@@ -580,6 +581,13 @@ curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invoca
   message starts afresh. It reaches the turn at its next Restate operation
   (a tool's call or wait, a storage request); during a model request, once
   the request is answered.
+- **`clear`** starts the key over (a UI's New chat): it stops the turn (as
+  `stop`), then forgets the conversation, the key's database and state, and
+  its waits, kept signals and steered messages. The next conversation's ids
+  and cursors go on from where the forgotten one got to, so a follower reads
+  on, and drops the messages before `first` (on each page and each change
+  of `follow`). A message sent before `clear` is answered first, then
+  forgotten too.
 - **`steer`** adds a message to the turn: the model reads it with the
   results of its next tool call (in Pydantic AI and ADK, before its next
   request; in Codex, as Codex steers a turn).

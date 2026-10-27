@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import threading
 import weakref
@@ -23,6 +24,7 @@ from restate.handler import RESTATE_UNIQUE_HANDLER_SYMBOL
 from restate.serde import Serde
 from restate_fns import InvocationRetryPolicy
 
+from restate_agents import log
 from restate_agents.common import CHECK_MODEL, MessageSerde, ModelError, refused
 from restate_agents.signals import (
     Agent,
@@ -40,6 +42,7 @@ from restate_agents.signals import (
 )
 from restate_agents.signals import notifications as notifications_of
 from restate_agents.signals import pending as pending_signals
+from restate_agents.signals import reset as reset_signals
 from restate_agents.signals import resolve as resolve_signal
 from restate_agents.signals import steer as steer_signal
 
@@ -107,7 +110,7 @@ class Object(restate.VirtualObject):
     tools (``signal`` in tools.py), and ``signal``, which resolves one; and
     ``notifications``, the revision of its conversation, which each change
     increases, and ``watch``, which waits for a newer one, for a client that
-    follows it. They are shared, so they run while the object's handler
+    follows it; and ``clear``, which forgets it all. They are shared, so they run while the object's handler
     works, and journaled: they use no ``ctx.db``.
     """
 
@@ -140,6 +143,42 @@ class Object(restate.VirtualObject):
             if turn:
                 ctx.cancel_invocation(turn["invocationId"])
             return Stopped(stopped=turn["invocationId"] if turn else None)
+
+        async def own(ctx: Any, handler: str, arg: Any = None) -> Any:
+            """A call of this object's handler ``handler``, the same key."""
+            answer = await ctx.generic_call(name, handler, arg=json.dumps(arg).encode(), key=ctx.key())
+            return json.loads(answer) if answer else None
+
+        async def clear(ctx: restate.JournaledObjectSharedContext, _: None = None) -> Stopped:
+            """
+            Forget everything of this key: stop the message being answered (as
+            ``stop``), then clear its conversation, database and state, and
+            what its signals hold (waits, kept signals, steered messages). Its
+            revision goes on, so followers see the change. A message sent
+            before it is answered first, then forgotten too; one sent after
+            starts anew.
+            """
+            turn = await ctx.get(TURN)
+            if turn:
+                ctx.cancel_invocation(turn["invocationId"])
+            await own(ctx, "erase")
+            return Stopped(stopped=turn["invocationId"] if turn else None)
+
+        async def erase(ctx: restate.JournaledObjectContext, _: None = None) -> None:
+            """
+            ``clear``'s work, once the handlers before it are done: clear the
+            state (the database too), and the signals'. An agent's log goes on
+            where it got to (see log.py).
+            """
+            start = None
+            if "messages" in self.handlers:
+                page = await own(ctx, "messages", {"limit": 1})
+                latest = page["messages"][-1]["id"] + 1 if page["messages"] else page.get("first", 0)
+                start = {"seq": page["cursor"], "id": latest}
+            ctx.clear_all()
+            if start:
+                ctx.set(log.START, start)
+            await ctx.object_call(reset_signals, key=signals_of(name, ctx.key()), arg=None)
 
         async def steer(ctx: restate.JournaledObjectSharedContext, text: str) -> Steered:
             """
@@ -175,8 +214,9 @@ class Object(restate.VirtualObject):
             ctx.object_send(unsubscribe, key=key, arg=awakeable)
             return await ctx.object_call(notifications_of, key=key, arg=None)
 
-        for handler in (signal, pending, status, stop, notifications, watch):
+        for handler in (signal, pending, status, stop, clear, notifications, watch):
             restate.VirtualObject.handler(self, kind="shared", journal_replay=True)(handler)
+        restate.VirtualObject.handler(self, journal_replay=True, ingress_private=True)(erase)
         restate.VirtualObject.handler(
             self, kind="shared", journal_replay=True, accept="*/*", input_serde=MessageSerde()
         )(steer)

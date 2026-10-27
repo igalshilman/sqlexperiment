@@ -57,6 +57,8 @@ class Followed:
     """
     cursor: int
     """Where this leaves off: ``follow(cursor=...)`` carries on from here, later or elsewhere."""
+    first: int = 0
+    """The id of the conversation's first message: one kept from before is gone (``clear``), and a UI drops it."""
 
     @property
     def waiting(self) -> list[dict[str, Any]]:
@@ -151,6 +153,13 @@ class AgentClient:
         """Stop the message the agent answers: the invocation stopped, or None if it answered none."""
         return (await self.call("stop"))["stopped"]
 
+    async def clear(self) -> str | None:
+        """
+        Forget the conversation (its database and state too), stopping the
+        message the agent answers: the invocation stopped, or None.
+        """
+        return (await self.call("clear"))["stopped"]
+
     async def steer(self, message: str) -> dict[str, Any]:
         """Add ``message`` to the message the agent answers, at its next tool call (or send it as one of its own)."""
         return await self.call("steer", message)
@@ -192,7 +201,12 @@ class AgentClient:
             synced = await self._sync_retried(cursor, revision, timeout_seconds)
             # Nothing changed (the wait timed out): wait again.
             if synced["revision"] != revision or synced["messages"]:
-                yield Followed(status=synced["status"], messages=synced["messages"], cursor=synced["cursor"])
+                yield Followed(
+                    status=synced["status"],
+                    messages=synced["messages"],
+                    cursor=synced["cursor"],
+                    first=synced.get("first", 0),
+                )
             cursor = synced["cursor"]
             # With more to read, at once; else once something changes.
             revision = None if synced["more"] else synced["revision"]

@@ -257,6 +257,14 @@ async def close(ctx: ObjectContext, request: CloseRequest) -> None:
 
 
 @signals.handler(ingress_private=True)
+async def reset(ctx: ObjectContext) -> None:
+    """The agent forgot its conversation (``clear``): forget its waits, kept signals and steered messages."""
+    for key in ("waiting", "kept", "steering"):
+        ctx.clear(key)
+    await _changed(ctx)
+
+
+@signals.handler(ingress_private=True)
 async def forget(ctx: ObjectContext, id: str) -> None:
     """Forget the wait ``id``, whose agent no longer waits."""
     ctx.set("waiting", [w for w in await ctx.get("waiting") or [] if w["id"] != id])

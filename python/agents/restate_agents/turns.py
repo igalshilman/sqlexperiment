@@ -82,7 +82,7 @@ async def publish() -> None:
     if (transcript := _transcripts.get(name)) is not None:
         # One write at a time: a framework's tasks (tool calls in parallel, an SDK's own) publish at once.
         async with _writing.setdefault(ctx, asyncio.Lock()):
-            await log.sync(ctx.db, (await transcript(ctx)).messages())
+            await log.sync(ctx.db, (await transcript(ctx)).messages(), lambda: ctx.get(log.START))
     await ctx.object_call(publish_change, key=signals_of(name, ctx.key()), arg=None)
 
 
@@ -117,7 +117,7 @@ def agent(
 
     async def messages(ctx: restate.ObjectContext, request: MessagesRequest | None = None) -> Messages:
         """The conversation so far, with the tool calls: a page of it, or what is new or changed since a cursor."""
-        return await log.page(ctx.db, request)
+        return await log.page(ctx.db, request, await ctx.get(log.START))
 
     async def sync(ctx: restate.ObjectContext, request: SyncRequest | None = None) -> Synced:
         """
