@@ -32,17 +32,16 @@ import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import * as deepseek from 'restate-agents/deepseek';
 import * as pi from 'restate-agents/pi';
-import { linearSignature, linearTools, workspace } from './env.ts';
+import * as env from './env.ts';
 import { Plan } from './plan.ts';
-import { workspaceTools } from './workspace.ts';
 
 /** Linear's tools: issues, sub-issues, states, comments. */
-const linear = await linearTools();
+const linear = await env.linearTools();
 
 const coder = deepseek.agent({
   name: 'coder',
   description: "Builds a part of the plan, in the issue's directory",
-  tools: [...linear, ...workspaceTools(workspace)], // the issue's directory, shared by its coders
+  tools: [...linear, ...env.workspaceTools()], // the issue's directory, shared by its coders
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
 - If your task names a sub-issue, first move it to "In Progress".
@@ -91,7 +90,7 @@ Answer with what happened to the issue, briefly.`,
 const issues = webhook({
   name: 'linear',
   description: "Linear's new issues, to triage",
-  auth: linearSignature,
+  auth: env.webhookAuth,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
   // The part of Linear's webhook (https://linear.app/developers/webhooks) read here.

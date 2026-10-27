@@ -49,7 +49,7 @@ const oneAtATime = <T>(dir: string, work: () => Promise<T>): Promise<T> => {
  * The tools, in a directory of `root` per issue: a coder's key is its
  * issue's, then its task (`ENG-1.parser`), as subagents are keyed.
  */
-export function workspaceTools(root: string) {
+export function codingTools(root: string) {
   /** The issue's directory, made if it is not there yet. */
   const directory = async (key: string) => {
     const dir = resolve(root, key.split('.')[0]!);
