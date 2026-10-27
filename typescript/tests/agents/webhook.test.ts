@@ -1,6 +1,7 @@
-// webhook(): a delivery's signature is checked, and it goes to its agents'
-// `chat`, once per delivery, as a message that says where it comes from.
-// The handler runs on a fake context, which records its sends.
+// webhook(): a delivery's signature is checked, and it goes to its agents,
+// through their `signals` (`deliver`), once per delivery, as a message that
+// says where it comes from. The handler runs on a fake context, which
+// records its sends; restate-tools.ts delivers to a running turn, on Restate.
 import { createHmac } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
 import { object, webhook, webhookMessage } from 'restate-agents';
@@ -32,8 +33,14 @@ async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1' } = {}
     ['linear-signature', createHmac('sha256', secret).update(body).digest('hex')],
     ['linear-delivery', delivery],
   ]);
-  const sent: restate.GenericSend<string>[] = [];
-  const ctx = { request: () => ({ id: 'inv_1', headers }), genericSend: (send: never) => sent.push(send) };
+  const sent: { object: string; key: string; agent: unknown; text: string; idempotencyKey?: string }[] = [];
+  const ctx = {
+    request: () => ({ id: 'inv_1', headers }),
+    objectSendClient: (target: { name: string }, key: string) => ({
+      deliver: (input: { agent: unknown; text: string }, opts: restate.Opts<unknown, unknown>) =>
+        sent.push({ object: target.name, key, ...input, idempotencyKey: opts.getOpts().idempotencyKey }),
+    }),
+  };
   await handler(ctx, body);
   return sent;
 }
@@ -41,14 +48,14 @@ async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1' } = {}
 const created = { action: 'create', data: { identifier: 'ENG-1' } };
 
 describe('a webhook', () => {
-  it('sends a delivery to the chat of each agent of its route, keyed by its body', async () => {
+  it("delivers to each agent of its route, keyed by its body, through the agent's signals", async () => {
     const sent = await deliver(created);
-    expect(sent.map((s) => [s.service, s.method, s.key])).toEqual([
-      ['triage', 'chat', 'ENG-1'],
-      ['audit', 'chat', 'ENG-1'],
+    expect(sent.map((s) => [s.object, s.key, s.agent])).toEqual([
+      ['signals', 'triage:ENG-1', { service: 'triage', key: 'ENG-1' }],
+      ['signals', 'audit:ENG-1', { service: 'audit', key: 'ENG-1' }],
     ]);
-    expect(sent[0]!.parameter).toBe(webhookMessage('linear', 'd-1', created));
-    expect(sent[0]!.parameter).toMatch(/^<webhook name="linear" delivery="d-1">\n\{/);
+    expect(sent[0]!.text).toBe(webhookMessage('linear', 'd-1', created));
+    expect(sent[0]!.text).toMatch(/^<webhook name="linear" delivery="d-1">\n\{/);
   });
 
   it('makes a delivery sent again reach the same message: its id is the idempotency key', async () => {
@@ -74,7 +81,7 @@ describe('a webhook', () => {
     const wrapper = (handler as unknown as Record<symbol, { options: { metadata: Record<string, string> } }>)[symbol!]!;
     expect(wrapper.options.metadata).toEqual({
       'restate-agents.kind': 'webhook',
-      'restate-agents.routes': 'triage/chat,audit/chat',
+      'restate-agents.routes': 'triage,audit',
       'restate-agents.auth': 'hmac-sha256:linear-signature',
       'restate-agents.idempotency-header': 'linear-delivery',
     });

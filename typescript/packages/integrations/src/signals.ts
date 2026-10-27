@@ -7,6 +7,7 @@
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
 import * as restate from '@restatedev/restate-sdk';
+import type { Status } from './object.ts';
 
 /** An agent's context, as far as its signals need it: any handler's of its object. */
 type AgentContext = Pick<restate.ObjectSharedContext, 'key' | 'request'>;
@@ -50,6 +51,8 @@ export interface Resolved {
 export interface Steer {
   id: string;
   text: string;
+  /** A delivery (`deliver`): a cancelled turn answers it as a message of its own, rather than drop it. */
+  keep?: boolean;
 }
 
 /**
@@ -109,6 +112,28 @@ async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications
 /** Send `text` to `agent`'s `chat`, as a message of its own: its invocation's id. */
 const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: string) =>
   ctx.genericSend({ service, method: 'chat', key, parameter: text, inputSerde: restate.serde.json }).invocationId;
+
+/**
+ * Steer `turn` (the message `agent` answers, if any) with `text`: queued for
+ * it to take at its next step, or, if it is over, sent as a message of its own.
+ */
+async function steered(
+  ctx: restate.ObjectContext<State>,
+  agent: Agent,
+  turn: string | null,
+  text: string,
+  keep = false,
+): Promise<Steered> {
+  if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
+    return { invocationId: await send(ctx, agent, text), steered: false };
+  }
+  const steering = await ctx.get('steering');
+  const messages = steering?.turn === turn ? steering.messages : [];
+  const id = `${turn}:steer:${messages.length + 1}`;
+  ctx.set('steering', { turn, messages: [...messages, { id, text, ...(keep ? { keep } : {}) }] });
+  await publish(ctx);
+  return { invocationId: turn, steered: true };
+}
 
 /** A handler that the agents' own handlers call, which clients cannot (through Restate's ingress). */
 const internal = <I, O>(fn: (ctx: restate.ObjectContext<State>, input: I) => Promise<O>) =>
@@ -184,17 +209,26 @@ export const signals = restate.object({
       async (
         ctx: restate.ObjectContext<State>,
         { agent, turn, text }: { agent: Agent; turn: string | null; text: string },
-      ) => {
-        if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
-          return { invocationId: await send(ctx, agent, text), steered: false } satisfies Steered;
-        }
-        const steering = await ctx.get('steering');
-        const messages = steering?.turn === turn ? steering.messages : [];
-        ctx.set('steering', { turn, messages: [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }] });
-        await publish(ctx);
-        return { invocationId: turn, steered: true } satisfies Steered;
-      },
+      ) => steered(ctx, agent, turn, text),
     ),
+
+    /**
+     * @internal Deliver `text` to `agent` (a webhook's delivery, say): steered
+     * to the message it answers, if any, which takes it at its next step;
+     * else, or once that turn is over, as a message of its own. Unlike a
+     * steer, a cancelled turn does not drop it: it is answered after.
+     */
+    deliver: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) => {
+      const { answering } = await ctx.genericCall<null, Status>({
+        service: agent.service,
+        method: 'status',
+        key: agent.key,
+        parameter: null,
+        inputSerde: restate.serde.json,
+        outputSerde: restate.serde.json,
+      });
+      return steered(ctx, agent, answering?.invocationId ?? null, text, true);
+    }),
 
     /** @internal The messages steered to `turn`, in order. */
     steering: restate.handlers.object.shared(
@@ -208,7 +242,7 @@ export const signals = restate.object({
     /**
      * @internal `turn` is over: each message steered to it that it did not
      * take (not in `taken`) is sent as a message of its own, unless the turn
-     * was cancelled; later ones are, too.
+     * was cancelled (but for a delivery); later ones are, too.
      */
     close: internal(
       async (
@@ -221,8 +255,9 @@ export const signals = restate.object({
         const steering = await ctx.get('steering');
         if (steering?.turn !== turn) return;
         ctx.clear('steering');
-        if (cancelled) return;
-        for (const { id, text } of steering.messages) if (!taken.includes(id)) await send(ctx, agent, text);
+        for (const { id, text, keep } of steering.messages) {
+          if (!taken.includes(id) && (keep || !cancelled)) await send(ctx, agent, text);
+        }
       },
     ),
 

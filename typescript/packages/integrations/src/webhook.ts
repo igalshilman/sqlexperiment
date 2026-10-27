@@ -1,6 +1,8 @@
 // Webhooks into agents: a Restate service whose one handler, `webhook`,
 // takes another system's webhook (Linear's, GitHub's...), checks its
-// signature, and hands it to agents, as a message saying where it comes from.
+// signature, and delivers it to agents, as a message saying where it comes
+// from: to the message an agent answers, if it answers one, or else as a
+// message of its own.
 //
 //   const issues = webhook<LinearWebhook>({
 //     name: 'linear',
@@ -14,7 +16,7 @@
 // The other system posts to Restate's ingress, at `/<name>/webhook`.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { messageSerde } from './common.ts';
+import { signals } from './signals.ts';
 
 /** How a webhook is signed: the HMAC-SHA256 of its body with `secret`, in hex, in the request's `header`. */
 export interface WebhookAuth {
@@ -24,8 +26,8 @@ export interface WebhookAuth {
   secret: string;
 }
 
-/** An agent (or any object with a `chat` handler) that webhooks go to. */
-type Route = restate.VirtualObjectDefinition<string, { chat: unknown }>;
+/** An agent (an `object()` with a `chat` handler) that webhooks go to. */
+type Route = restate.VirtualObjectDefinition<string, { chat: unknown; status: unknown }>;
 
 /** A webhook service's options. */
 export interface WebhookOptions<T, P extends string> {
@@ -41,7 +43,7 @@ export interface WebhookOptions<T, P extends string> {
    * one. Without it, each request is a delivery of its own.
    */
   idempotencyHeader?: string;
-  /** The agents each delivery goes to, as a message to their `chat`. */
+  /** The agents each delivery goes to. */
   route: Route[];
   /**
    * The key of the agents' object that a delivery goes to, from its body
@@ -80,11 +82,14 @@ const parsed = (body: Uint8Array): unknown => {
 
 /**
  * A webhook into agents: a service `name`, whose `webhook` handler checks a
- * delivery's signature, and sends it to the `chat` of each agent of `route`,
- * keyed by `key`, as a {@link webhookMessage}. It answers once the messages
- * are sent, not answered: a system that waits seconds for an answer (Linear,
- * GitHub) gets one at once. What it is (its routes, auth and idempotency) is
- * in the handler's metadata, which the admin API shows.
+ * delivery's signature, and delivers it to each agent of `route`, keyed by
+ * `key`, as a {@link webhookMessage}, through the agent's `signals`: to the
+ * message the agent answers, if any, which takes it at its next step (as
+ * `steer`), or else as a message of its own (as `chat`). A turn that ends,
+ * or is stopped, before it takes it answers it after. It answers once the
+ * deliveries are sent, not answered: a system that waits seconds for an
+ * answer (Linear, GitHub) gets one at once. What it is (its routes, auth and
+ * idempotency) is in the handler's metadata, which the admin API shows.
  */
 export const webhook = <T = unknown, P extends string = string>({
   name,
@@ -108,7 +113,7 @@ export const webhook = <T = unknown, P extends string = string>({
           description: what,
           metadata: {
             'restate-agents.kind': 'webhook',
-            'restate-agents.routes': route.map((r) => `${r.name}/chat`).join(','),
+            'restate-agents.routes': route.map((r) => r.name).join(','),
             'restate-agents.auth': auth ? `hmac-sha256:${auth.header}` : 'none',
             ...(idempotencyHeader ? { 'restate-agents.idempotency-header': idempotencyHeader } : {}),
           },
@@ -123,14 +128,12 @@ export const webhook = <T = unknown, P extends string = string>({
           const to = key ? key(event) : delivery;
           if (to === undefined) return;
           for (const agent of route) {
-            ctx.genericSend({
-              service: agent.name,
-              method: 'chat',
-              key: to,
-              parameter: webhookMessage(name, delivery, event),
-              inputSerde: messageSerde,
-              idempotencyKey: `webhook:${name}:${delivery}`,
-            });
+            ctx
+              .objectSendClient(signals, `${agent.name}:${to}`)
+              .deliver(
+                { agent: { service: agent.name, key: to }, text: webhookMessage(name, delivery, event) },
+                restate.rpc.sendOpts({ idempotencyKey: `webhook:${name}:${delivery}` }),
+              );
           }
         },
       ),
