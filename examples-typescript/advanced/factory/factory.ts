@@ -16,9 +16,9 @@ const WRITING = `What you write in Linear is read by people following the work: 
 in plain, friendly sentences, short paragraphs, and lists where they help. No task names, tool names or JSON.`;
 
 /**
- * Each agent on a model for its work: triage, which coordinates, on a fast
- * one (OpenAI's); the coders on Claude Sonnet; the planner on Claude Opus, at
- * medium effort. A step's tool calls run at once: the prompts ask for steps that
+ * Each agent on a model for its work: triage, which coordinates, on OpenAI's,
+ * in its fast mode; the coders on Claude Sonnet; the planner on Claude Opus,
+ * at medium effort. A step's tool calls run at once: the prompts ask for steps that
  * do all they can together.
  */
 const coder = opencode.agent({
@@ -55,7 +55,8 @@ const planner = claude.agent({
 
 const triage = pi.agent({
   name: 'triage',
-  model: 'openai/gpt-6-luna',
+  model: 'openai/gpt-6-sol',
+  serviceTier: 'fast', // OpenAI's fast mode
   tools: [...env.linearTools('🧭 Triage'), subagent(planner), subagent(coder)],
   system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
 (a <webhook> element: the issue is its data.identifier, with its title and description).
@@ -72,7 +73,8 @@ Your tool calls in one step run at once: make all those that do not wait on each
 - When they are all done, end, in one step: a summary comment on the issue (a heading, "✅ Summary"; what
   was built, in a sentence or two; each part in a bullet, with its sub-issue and pull request, open for
   review; how to run it and its tests; and what is left open, if anything), and move it to "In Review".
-A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
+A comment comes as Linear's webhook too (type "Comment": its data.body, on the issue data.issue.identifier):
+answer it with a comment on that issue, such as with where the work is.
 If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 ${WRITING}
 Answer with what happened to the issue, briefly.`,
@@ -81,7 +83,7 @@ Answer with what happened to the issue, briefly.`,
 /**
  * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
  * agent, keyed by the issue, and so does each comment on it, but for the
- * factory's own; a sub-issue (triage's own) does not. A comment reaches the
+ * agents' own (signed, see env.ts); a sub-issue (triage's own) does not. A comment reaches the
  * turn triage is in, if it is in one, or else is a message of its own. Linear
  * sends a webhook again until it is answered, with the same
  * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
@@ -94,10 +96,10 @@ const linearEvents = webhook({
   idempotencyHeader: 'linear-delivery',
   route: [triage],
   // Linear's webhook: https://linear.app/developers/webhooks
-  key: ({ type, action, actor, data }) => {
+  key: ({ type, action, data }) => {
     if (action !== 'create') return undefined;
     if (type === 'Issue' && !data.parentId) return data.identifier;
-    if (type === 'Comment' && actor?.id !== env.linearUser) return data.issue.identifier;
+    if (type === 'Comment' && !env.byAnAgent(data.body)) return data.issue.identifier;
     return undefined;
   },
 });

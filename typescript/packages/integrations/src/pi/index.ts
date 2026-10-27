@@ -45,6 +45,7 @@ import {
   Harness,
   section,
   type Conversation,
+  type ConversationStreamOptions,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
@@ -99,12 +100,17 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   tools?: (ToolRegistration | AnyTool)[];
   /** A directory for the coding tools, made if missing; without one, the agent has no file system. */
   workspace?: string;
+  /** OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on. */
+  serviceTier?: ServiceTier;
   /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
   output?: O;
 }
+
+/** OpenAI's service tiers (its Responses API's `service_tier`). */
+export type ServiceTier = 'auto' | 'default' | 'fast' | 'flex' | 'priority';
 
 /** A registry of `provider`'s models, such as anthropicProvider() from @earendil-works/pi-ai/providers/anthropic. */
 async function modelsOf(provider: string): Promise<MutableModels> {
@@ -181,7 +187,7 @@ function unanswered(id: string, why: string | null | undefined, model: string) {
  */
 export const withPi = async <T>(
   ctx: restate.ObjectContext,
-  { model: named, models, system, tools = [], workspace }: Options,
+  { model: named, models, system, tools = [], workspace, serviceTier }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
@@ -244,7 +250,9 @@ export const withPi = async <T>(
     system,
     workspace,
   );
-  const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env }, context);
+  // pi-durable hands its stream settings to pi-ai's requests as they are: serviceTier is pi-ai's.
+  const settings = serviceTier ? { stream: { serviceTier } as ConversationStreamOptions } : undefined;
+  const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env, settings }, context);
 
   const prompt = async (text: string, id = nextPromptId(ctx)) => {
     const root = await conversation();
