@@ -1,14 +1,13 @@
 /**
- * The coders' workspace, in git: a clone of the project per issue
- * (WORKSPACE/ENG-1), and a worktree of it per coder (WORKSPACE/ENG-1.parser),
- * on a branch of its own (eng-1-parser), off the issue's branch (eng-1), which
- * its pull request goes into. The `integrate` coder's worktree is on the
- * issue's branch itself: it merges the parts there. Coders run real commands,
- * on this machine: use a sandbox.
+ * The coders' workspace, in git: a clone of the project per coder
+ * (WORKSPACE/ENG-1.parser), on a branch of its own (eng-1-parser), off the
+ * issue's branch (eng-1), which its pull request goes into. The `integrate`
+ * coder's clone is on the issue's branch itself: it merges the parts there.
+ * Coders run real commands, on this machine: use a sandbox.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,6 +16,19 @@ import * as restate from '@restatedev/restate-sdk';
 const exec = promisify(execFile);
 
 const git = async (cwd: string, ...args: string[]) => (await exec('git', args, { cwd })).stdout.trim();
+
+const has = (cwd: string, ref: string) =>
+  git(cwd, 'rev-parse', '--verify', '--quiet', ref).then(
+    () => true,
+    () => false,
+  );
+
+/**
+ * GitHub's credentials, GITHUB_TOKEN, as git asks for them: read when it
+ * pushes, so the token is in no URL, config or error message.
+ */
+const helper = '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f';
+const credentials = `credential.helper=${helper}`;
 
 /** The issue's branch: its identifier, in lower case (ENG-1: eng-1). */
 export const issueBranch = (issue: string) => issue.toLowerCase();
@@ -29,56 +41,51 @@ function taskOf(key: string) {
   return { issue, task };
 }
 
-/** Each issue's git work, one step after another: its coders start at once. */
-const steps = new Map<string, Promise<unknown>>();
-
-const oneAtATime = <T>(issue: string, work: () => Promise<T>): Promise<T> => {
-  const done = (steps.get(issue) ?? Promise.resolve()).then(work);
-  steps.set(
-    issue,
-    done.catch(() => undefined),
-  );
-  return done;
-};
-
 /**
- * The worktree of the coder `key`, in `root`, made the first time (and the
- * issue's clone of `remote` with it, and its branch, on the remote too).
+ * The clone of the coder `key`, in `root`: made the first time, on its branch.
+ * Each step is done once, so an attempt that failed half way is finished by the next.
  */
-export async function worktree(root: string, remote: string, key: string) {
+export async function clone(root: string, remote: string, key: string) {
   const { issue, task } = taskOf(key);
   const dir = resolve(root, key);
-  return oneAtATime(issue, async () => {
-    if (existsSync(dir)) return dir;
-    const clone = resolve(root, issue);
-    const base = issueBranch(issue);
-    if (!existsSync(join(clone, '.git'))) {
-      await mkdir(root, { recursive: true });
-      await git(root, 'clone', '--quiet', remote, clone);
-      await git(clone, 'config', 'user.name', 'Restate factory');
-      await git(clone, 'config', 'user.email', 'factory@restate.localhost');
-      await git(clone, 'config', 'extensions.worktreeConfig', 'true');
-      // The issue's branch: the remote's, if a run before made it, or else a new one off its default branch.
-      if (await git(clone, 'ls-remote', '--heads', 'origin', base)) await git(clone, 'branch', base, `origin/${base}`);
-      else {
-        await git(clone, 'branch', '--no-track', base, 'origin/HEAD');
-        await git(clone, 'push', '--quiet', '-u', 'origin', base);
-      }
-    }
-    if (task === 'integrate') await git(clone, 'worktree', 'add', '--quiet', dir, base);
-    else await git(clone, 'worktree', 'add', '--quiet', '-b', `${base}-${task}`, dir, base);
-    // Each coder's commits are its own.
-    await git(dir, 'config', '--worktree', 'user.name', `Coder · ${task}`);
-    return dir;
-  });
+  const base = issueBranch(issue);
+  const branch = task === 'integrate' ? base : `${base}-${task}`;
+  if (await has(dir, `refs/heads/${branch}`)) return dir;
+
+  if (!existsSync(join(dir, '.git'))) {
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(root, { recursive: true });
+    await git(root, '-c', credentials, 'clone', '--quiet', remote, dir);
+  }
+  await git(dir, 'config', 'credential.helper', helper);
+  await git(dir, 'config', 'user.name', `Coder · ${task}`); // each coder's commits are its own
+  await git(dir, 'config', 'user.email', 'factory@restate.localhost');
+  await git(dir, 'config', 'push.autoSetupRemote', 'true'); // a plain `git push` pushes the coder's branch
+
+  // The issue's branch, on the remote: the first of its coders makes it, off the default branch
+  // (they start at once: the others' push fails, as it is there already).
+  await git(dir, 'fetch', '--quiet', 'origin');
+  if (!(await has(dir, `origin/${base}`))) {
+    const failed = await git(dir, 'push', '--quiet', 'origin', `origin/HEAD:refs/heads/${base}`).then(
+      () => undefined,
+      (error: Error) => error,
+    );
+    await git(dir, 'fetch', '--quiet', 'origin');
+    if (failed && !(await has(dir, `origin/${base}`))) throw failed;
+  }
+  // The coder's branch: the remote's, if a run before pushed it, or else a new one off the issue's.
+  const from = (await has(dir, `origin/${branch}`)) ? `origin/${branch}` : `origin/${base}`;
+  await git(dir, 'checkout', '--quiet', '--no-track', '-b', branch, from);
+  return dir;
 }
 
-/** A git repository in `root`, standing in for GitHub's (`origin.git`): made the first time, with a README. */
-export async function standInRemote(root: string) {
-  const remote = resolve(root, 'origin.git');
-  if (existsSync(remote)) return remote;
-  await mkdir(remote, { recursive: true });
-  await git(remote, 'init', '--quiet', '--bare', '--initial-branch', 'main');
+/**
+ * The project's repository, `remote`, with a first commit, a README, if it has
+ * none: a new repository on GitHub is empty, and its coders' branches start
+ * off its default branch.
+ */
+export async function project(remote: string) {
+  if (await git(tmpdir(), '-c', credentials, 'ls-remote', '--heads', remote)) return remote;
   const first = await mkdtemp(join(tmpdir(), 'factory-'));
   await git(first, 'init', '--quiet', '--initial-branch', 'main');
   await writeFile(join(first, 'README.md'), '# A demo project\n\nBuilt by the factory.\n');
@@ -93,6 +100,16 @@ export async function standInRemote(root: string) {
     '-qm',
     'A README',
   );
-  await git(first, 'push', '--quiet', remote, 'main');
+  await git(first, '-c', credentials, 'push', '--quiet', remote, 'main');
+  await rm(first, { recursive: true, force: true });
+  return remote;
+}
+
+/** A git repository in `root`, standing in for GitHub's (`origin.git`): made the first time. */
+export async function standInRemote(root: string) {
+  const remote = resolve(root, 'origin.git');
+  if (existsSync(remote)) return remote;
+  await mkdir(remote, { recursive: true });
+  await git(remote, 'init', '--quiet', '--bare', '--initial-branch', 'main');
   return remote;
 }

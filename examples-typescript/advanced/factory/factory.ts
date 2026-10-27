@@ -34,7 +34,7 @@
  *
  * Each agent has a conversation per task, keyed as subagents are:
  * `triage/ENG-1`, `planner/ENG-1.plan`, `coder/ENG-1.<part>`. Each coder
- * works in a git worktree of the project of its own, WORKSPACE/ENG-1.<part>
+ * works in a clone of the project of its own, WORKSPACE/ENG-1.<part>
  * (/tmp/restate-factory by default), on its own branch (eng-1-<part>), and
  * opens a pull request into the issue's branch (eng-1); the `integrate`
  * coder merges them there, and opens the issue's pull request into main.
@@ -56,13 +56,13 @@ import { Plan } from './plan.ts';
 const coder = opencode.agent({
   name: 'coder',
   description: 'Builds a part of the plan, on a branch of its own, and opens its pull request',
-  workspace: env.coderWorkspace, // a git worktree of the project, on its own branch
+  workspace: env.coderWorkspace, // a clone of the project, on its own branch
   tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
-  system: `You build one part of a plan for a Linear issue. Your directory is a git worktree of the project,
+  system: `You build one part of a plan for a Linear issue. Your directory is a clone of the project,
 on a branch of your own (git branch --show-current); other coders build the other parts on theirs, at once.
 - If your task names a sub-issue, first move it to "In Progress".
 - Write tests for your part, and run them after each change.
-- Once your tests pass, commit, push your branch (git push -u origin HEAD), and open a pull request
+- Once your tests pass, commit, push your branch (git push), and open a pull request
   with create_pull_request, into the branch your task names.
 - Then comment on your sub-issue with what you did, its tests' result, and the pull request. Move it to "Done".
 Answer with what you did and the pull request, briefly.`,
