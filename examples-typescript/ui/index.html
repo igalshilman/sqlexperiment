@@ -30,6 +30,9 @@
       header small {
         color: var(--muted);
       }
+      #clear {
+        float: right;
+      }
       #messages {
         flex: 1;
         overflow-y: auto;
@@ -90,6 +93,7 @@
   <body>
     <header>
       <strong>Support</strong> <small>as <span id="user"></span> (<code>?user=</code>)</small>
+      <button id="clear">New chat</button>
     </header>
     <div id="messages"></div>
     <div id="status">

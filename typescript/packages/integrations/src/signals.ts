@@ -324,6 +324,17 @@ export const signals = restate.object({
       },
     ),
 
+    /**
+     * @internal The agent forgot its conversation (`clear`): forget its
+     * waits, kept signals and steered messages, and publish the change.
+     */
+    reset: restate.handlers.object.exclusive({ ingressPrivate: true }, async (ctx: restate.ObjectContext<State>) => {
+      ctx.clear('waiting');
+      ctx.clear('kept');
+      ctx.clear('steering');
+      await publish(ctx);
+    }),
+
     /** @internal Forget wait `id`, whose agent no longer waits. */
     forget: internal(async (ctx: restate.ObjectContext<State>, id: string) => {
       const waiting = (await ctx.get('waiting')) ?? [];

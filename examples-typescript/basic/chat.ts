@@ -11,6 +11,7 @@
  *   curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/assistant/alice/chat -d 'What is my name?'
  *   curl localhost:8080/assistant/alice/messages   # the conversation so far
+ *   curl localhost:8080/assistant/alice/clear      # forget it: the next message starts anew
  */
 import { serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';

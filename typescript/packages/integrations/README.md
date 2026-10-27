@@ -61,7 +61,7 @@ your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
 conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), `sync`, `notifications` and `watch` (to follow it), and `signal`
+message it answers), `clear` (forget it all), `sync`, `notifications` and `watch` (to follow it), and `signal`
 and `pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
@@ -146,6 +146,21 @@ A steered message waits in the agent's `signals` object (`steer`), and the
 turn reads it there after each tool call (`steering`), and gives it to the
 framework by its id, which the framework keeps: a retried attempt neither
 loses nor repeats one.
+
+**Forget a conversation.** `clear` starts a key over, such as for a UI's
+New chat button: it stops the message being answered (as `stop`), then
+forgets the conversation, the key's database and state, and what its
+`signals` hold (waits, kept signals, steered messages). It answers as `stop`
+does. The next message starts anew; its ids and cursors go on from where
+the forgotten conversation got to, so a follower (`follow`, `sync`) reads on,
+and drops the messages it kept from before `first` (which a page and each
+change of `follow` give).
+
+```sh
+curl localhost:8080/assistant/alice/clear                            # {"stopped": null}
+```
+
+A message sent before `clear` is answered first, then forgotten too.
 
 **Send again safely.** A caller that may send a message again (after a
 timeout, say) gives it an idempotency key: the same key is the same
@@ -553,7 +568,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop`, `steer`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
+`pending`, `status`, `stop`, `steer`, `clear`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

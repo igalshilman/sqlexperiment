@@ -345,6 +345,11 @@ export interface Messages {
   more: boolean;
   /** The cursor to read on from: what changes after this page. */
   cursor: number;
+  /**
+   * The id of the conversation's first message, once it was cleared
+   * (`clear`): a client drops the messages it kept from before.
+   */
+  first?: number;
 }
 
 /**
@@ -397,7 +402,7 @@ function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
   const write = async () => {
     const transcript = new Transcript();
     await read(transcript);
-    await log.sync(ctx.db, transcript.messages());
+    await log.sync(ctx.db, transcript.messages(), () => ctx.get<log.Start>(log.START));
   };
   const done = (writing.get(ctx) ?? Promise.resolve()).then(write, write);
   writing.set(ctx, done);
@@ -440,5 +445,5 @@ export async function transcribing<T>(ctx: restate.ObjectContext, read: Read, wo
 export const messagesHandler = () =>
   restate.handlers.object.shared(
     async (ctx: restate.ObjectSharedContext, request?: MessagesRequest): Promise<Messages> =>
-      log.page(ctx.db, request ?? {}),
+      log.page(ctx.db, request ?? {}, await ctx.get<log.Start>(log.START)),
   );
