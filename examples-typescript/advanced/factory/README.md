@@ -299,7 +299,9 @@ it, on GitHub: its coder answers there, and pushes what you asked for.
   that it is making a plan, each coder what it picks up and how, triage
   each review on its sub-issue (approved, or the changes asked for).
   They all write as one Linear user, so each comment, and each sub-issue's
-  description, opens with who wrote it ("🧭 Triage", "🛠️ Coder · parser"):
+  description, opens with who wrote it ("🧭 Triage", "🛠️ Coder · parser"),
+  and so does each coder's commit (its author) and each comment on a pull
+  request, whose reviews open with their verdict ("✅ Approved"):
   `env.linearTools(who)` adds it, in code. They write for the people
   following the issue, in plain sentences; triage ends with a "✅ Summary"
   comment: what was built, how to run it, whether each pull request is
