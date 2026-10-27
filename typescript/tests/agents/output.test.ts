@@ -15,14 +15,16 @@ import { conversation, type PromptHandler } from '../testing.ts';
 
 const PLAN = { summary: 'A calculator', parts: ['parser', 'history'] };
 
-// Asked to plan, it answers with the plan, as JSON; asked lazily, in prose,
-// then in a code fence once told; asked to refuse, in prose always.
+// Asked to plan, it answers with the plan, as JSON; chattily, with a sentence
+// around it; asked lazily, in prose, then in a code fence once told; asked to
+// refuse, in prose always.
 vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
   openaiProvider: () =>
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const asked = textOf(messages.at(-1)!.content);
       const first = textOf(messages.find((m) => m.role === 'user')!.content);
       if (first === 'Plan it') return say(JSON.stringify(PLAN));
+      if (first === 'Plan chattily') return say(`Done! Here is the plan:\n${JSON.stringify(PLAN)}\nAll set.`);
       if (first === 'Plan lazily' && asked.startsWith('Your reply is not')) {
         return say('```json\n' + JSON.stringify(PLAN) + '\n```');
       }
@@ -41,6 +43,10 @@ describe("an agent's output", () => {
     expect(await conversation(chat, 'a').attempt('inv1', 'Plan it')).toEqual(PLAN);
   });
 
+  it('is taken from a reply with a sentence around it', async () => {
+    expect(await conversation(chat, 'chatty').attempt('inv1', 'Plan chattily')).toEqual(PLAN);
+  });
+
   it('is asked for once more, with what is wrong, if the reply is not it (a code fence is taken)', async () => {
     expect(await conversation(chat, 'b').attempt('inv1', 'Plan lazily')).toEqual(PLAN);
   });
@@ -48,7 +54,7 @@ describe("an agent's output", () => {
   it('fails the invocation if the reply is never it', async () => {
     const refused = conversation(chat, 'c').attempt('inv1', 'Refuse');
     await expect(refused).rejects.toBeInstanceOf(restate.TerminalError);
-    await expect(refused).rejects.toThrow(/not the answer asked for: it is not JSON/);
+    await expect(refused).rejects.toThrow(/not the answer asked for: it is not JSON: "A plan, in prose"/);
     await expect(conversation(chat, 'd').attempt('inv1', 'Plan wrongly')).rejects.toThrow(/summary/);
   });
 
