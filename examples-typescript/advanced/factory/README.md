@@ -176,8 +176,8 @@ and its sub-issues appear, each moving on its own.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.
-- **Status in Linear**: every agent moves its own issue with Linear's tools,
-  so the board shows the work as it goes, down to each part.
+- **Status in Linear**: triage and each coder move their own issue with
+  Linear's tools, so the board shows the work as it goes, down to each part.
 - **MCP tools in any agent**: `mcpTools(url)` turns an MCP server's tools
   into `tool()`s, which pi, Claude and DeepSeek take alike. A tool call is
   stored once it is done; a crash makes again only one that had not
