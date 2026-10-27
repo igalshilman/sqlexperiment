@@ -32,6 +32,7 @@ await serve(assistant);
 | `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
 | `client`    | The Anthropic client (a base URL or a proxy of your own, say); by default one with `ANTHROPIC_API_KEY`                                                         |
 | `maxTokens` | The most tokens of each of the model's replies (default 4096)                                                                                                  |
+| `effort`    | How much effort the model puts into each reply: `low`, `medium`, `high`, `xhigh` or `max` (default: the model's)                                               |
 
 For an object of your own, `claude.chat(options)` and `claude.messages()`
 are the handlers; `options` may be a function of the

@@ -184,6 +184,22 @@ describe('the Claude agent', () => {
     expect(c.ledger.calls).toHaveLength(1);
   });
 
+  it('asks the model for the effort it is given', async () => {
+    const requests: unknown[] = [];
+    const reply = teller.reply;
+    teller.reply = (messages, request) => {
+      requests.push(request?.output_config);
+      return reply(messages);
+    };
+    try {
+      await conversation(claude.chat({ tools: bank('ClaudeAgent'), effort: 'medium' }), 'e').attempt('inv1', 'Hello');
+      await conversation(prompt, 'f').attempt('inv2', 'Hello');
+    } finally {
+      teller.reply = reply;
+    }
+    expect(requests).toEqual([{ effort: 'medium' }, undefined]);
+  });
+
   it('resumes a crashed attempt from its last step, with the same tool call', async () => {
     const c = conversation(prompt, 'b');
     const calls = { model: 0 };
