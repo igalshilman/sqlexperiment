@@ -34,6 +34,7 @@ const workspace = process.env.WORKSPACE ?? '/tmp/restate-pairing';
 
 const reviewer = pi.agent({
   name: 'reviewer',
+  description: 'Reads a diff, and says what to fix',
   model: process.env.REVIEWER ?? 'openai/gpt-6-astra',
   system:
     'You review code changes. Read the diff you are given, and answer with what to fix, ' +
@@ -67,7 +68,7 @@ const pair = object({
       tools: [
         plan,
         done,
-        subagent(reviewer, { description: 'a reviewer, who reads a diff and says what to fix' }),
+        subagent(reviewer),
         approval,
         workflow(shipping, {
           description: 'Ship an approved change: its checks run, then its pull request opens.',

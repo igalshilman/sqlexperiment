@@ -9,7 +9,7 @@
 //     auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
 //     idempotencyHeader: 'linear-delivery',
 //     route: [triage],
-//     key: (event) => event.data.identifier,
+//     key: (event: { data: { identifier: string } }) => event.data.identifier,
 //   });
 //   await serve(issues, triage);
 //
@@ -56,8 +56,10 @@ export interface WebhookOptions<P extends string = string> {
    * The key of the agents' object that a delivery goes to, from its body
    * (the issue, say: one conversation per issue), or undefined to drop the
    * delivery. By default, the delivery's id: a conversation per delivery.
+   * Type its event as the other system documents it, as you read it:
+   * `key: (event: { data: { identifier: string } }) => event.data.identifier`.
    */
-  key?: (event: WebhookEvent) => string | undefined;
+  key?(this: void, event: WebhookEvent): string | undefined;
 }
 
 /**

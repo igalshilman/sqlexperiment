@@ -20,21 +20,20 @@ import * as pi from 'restate-agents/pi';
 
 const researcher = langgraph.agent({
   name: 'researcher',
+  description: 'Researches a topic, and answers with the facts',
   system: 'You research a topic and answer with the facts that matter, as a short list.',
 });
 
 const writer = opencode.agent({
   name: 'writer',
+  description: 'Drafts prose from notes',
   system: 'You write clear, warm prose from the notes you are given. Keep it short.',
 });
 
 const editor = pi.agent({
   name: 'editor',
   system: 'You edit a small team: research with the researcher, draft with the writer, then answer with the piece.',
-  tools: [
-    subagent(researcher, { description: 'a researcher, who answers with facts' }),
-    subagent(writer, { description: 'a writer, who drafts prose from notes' }),
-  ],
+  tools: [subagent(researcher), subagent(writer)],
 });
 
 await serve(editor, researcher, writer);

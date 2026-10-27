@@ -300,9 +300,11 @@ type WithChat<M> = M extends { chat: unknown }
  * A tool, named after `agent` (an agent, or any virtual object) unless `name` names it, that hands
  * a task to it: to the object keyed `<this key>.<task name>`, through its
  * `handler` (`chat`), and answers with its answer. Tasks of different names
- * run at once; the same name continues the same task.
+ * run at once; the same name continues the same task. The model reads what
+ * the agent is from its `description` (or `description` here).
  *
- *   const lead = pi.agent({ name: 'lead', tools: [subagent(coder, { description: 'a coding agent' })] });
+ *   const coder = pi.agent({ name: 'coder', description: 'Builds and tests code in Python' });
+ *   const lead = pi.agent({ name: 'lead', tools: [subagent(coder)] });
  */
 export function subagent<M>(
   agent: restate.VirtualObjectDefinition<string, M> & WithChat<M>,
@@ -316,7 +318,7 @@ export function subagent<M>(
 export function subagent<M>(
   agent: restate.VirtualObjectDefinition<string, M>,
   {
-    description = `the ${agent.name} agent`,
+    description = (agent as { description?: string }).description,
     name: toolName = agent.name,
     handler,
   }: { description?: string; name?: string; handler?: keyof M & string } = {},
@@ -324,7 +326,7 @@ export function subagent<M>(
   return tool({
     name: toolName,
     description:
-      `Hand a task to ${description}, and get its answer. ` +
+      `Hand a task to the ${agent.name} agent${description ? ` (${description})` : ''}, and get its answer. ` +
       'Tasks of different names run at once; the same name continues the same task.',
     input: z.object({
       name: z

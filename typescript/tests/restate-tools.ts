@@ -97,7 +97,7 @@ const hooks = webhook({
   name: 'hooks',
   idempotencyHeader: 'x-delivery',
   route: [support],
-  key: ({ customer }) => customer,
+  key: ({ customer }: { customer: string }) => customer,
 });
 
 /** `messages` as lines: each message's role, then its parts. */
