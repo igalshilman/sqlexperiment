@@ -15,8 +15,71 @@ type AgentContext = Pick<restate.ObjectSharedContext, 'key' | 'request'>;
 /** The agent of `ctx`: its object's name, and key. */
 export const agentOf = (ctx: AgentContext): Agent => ({ service: ctx.request().target.service, key: ctx.key });
 
-/** The key of the signals of the agent of `ctx`: `<agent>:<key>`. */
-export const signalsOf = (ctx: AgentContext) => `${ctx.request().target.service}:${ctx.key}`;
+/** The key of the signals of agent `service`'s key `key`: `<agent>:<key>`. */
+const keyOf = (service: string, key: string) => `${service}:${key}`;
+
+/** The key of the signals of the agent of `ctx`. */
+export const signalsOf = (ctx: AgentContext) => keyOf(ctx.request().target.service, ctx.key);
+
+/** Where an object of restate-agents (`object()`, every `agent()`) points to its companion. */
+const COMPANION = Symbol('restate-agents.companion');
+
+/**
+ * An agent's companion, for one of its keys: its `signals` object, which
+ * knows what the agent is doing (the message it answers, what its tools wait
+ * for), and how to reach it.
+ */
+export interface Companion {
+  /** The `signals` object, as a client takes it. */
+  object: typeof signals;
+  /** The key of the agent's key there: `<agent>:<key>`. */
+  key: string;
+  /** The agent, and its key. */
+  agent: Agent;
+}
+
+/** `definition`, pointing to its companion: what `object()` returns. */
+export const withCompanion = <D extends { name: string }>(definition: D): D =>
+  Object.defineProperty(definition, COMPANION, {
+    value: (key: string): Companion => ({
+      object: signals,
+      key: keyOf(definition.name, key),
+      agent: { service: definition.name, key },
+    }),
+  });
+
+/**
+ * The companion of `agent`'s key `key`: for anyone holding an agent (an
+ * `object()` or `agent()` of restate-agents) to reach what it is doing.
+ */
+export function companionOf(agent: { name: string }, key: string): Companion {
+  const companion = (agent as { [COMPANION]?: (key: string) => Companion })[COMPANION];
+  if (!companion) throw new Error(`${agent.name} is not an agent of restate-agents (an object() or an agent())`);
+  return companion(key);
+}
+
+/** Whether `agent` is an object of restate-agents, with a companion. */
+export const hasCompanion = (agent: object) => COMPANION in agent;
+
+/**
+ * Deliver `text` to `agent`'s key `key`, from any handler: to the message it
+ * answers, if it answers one, which takes it at its next step (as `steer`);
+ * else as a message of its own (as `chat`). A turn that ends, or is stopped,
+ * before it takes it answers it after. It is sent, not awaited: `opts` may
+ * give it an idempotency key, so that it is delivered once.
+ *
+ *   deliver(ctx, triage, 'ENG-1', 'The issue was closed', { idempotencyKey: delivery });
+ */
+export function deliver(
+  ctx: Pick<restate.Context, 'objectSendClient'>,
+  agent: { name: string },
+  key: string,
+  text: string,
+  opts: { idempotencyKey?: string } = {},
+) {
+  const { object, key: companion, agent: target } = companionOf(agent, key);
+  ctx.objectSendClient(object, companion).deliver({ agent: target, text }, restate.rpc.sendOpts(opts));
+}
 
 /** A wait for a signal, as `pending` lists it. */
 export interface Waiting {

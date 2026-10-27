@@ -9,6 +9,7 @@ import {
   type Steered,
   signals,
   signalsOf,
+  withCompanion,
   type Waiting,
   type Watch,
 } from './signals.ts';
@@ -240,11 +241,13 @@ export const object = <P extends string, H extends Record<string, Handler>>(
     ...('messages' in definition.handlers ? FOLLOWED : {}),
     ...Object.fromEntries(yours),
   };
-  return restate.object({
-    ...definition,
-    handlers: handlers as With<H>,
-    options: { ...OPTIONS, ...definition.options },
-  });
+  return withCompanion(
+    restate.object({
+      ...definition,
+      handlers: handlers as With<H>,
+      options: { ...OPTIONS, ...definition.options },
+    }),
+  );
 };
 
 /** `handler`, but a model provider's refusal it fails with ends its invocation, as `chat`'s does. */
