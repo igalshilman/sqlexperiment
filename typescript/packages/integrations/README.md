@@ -448,7 +448,7 @@ const issues = webhook({
   auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
   idempotencyHeader: 'linear-delivery', // a delivery sent again reaches the same message
   route: [triage],
-  key: (event: { data: { identifier: string } }) => event.data.identifier, // its conversation; undefined drops it
+  key: ({ data }) => data.identifier, // its conversation; undefined drops it
 });
 await serve(issues, triage);
 ```

@@ -100,8 +100,8 @@ const issues = webhook({
   auth: env.webhookAuth,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
-  // The part of Linear's webhook (https://linear.app/developers/webhooks) read here.
-  key: ({ type, action, data }: { type: string; action: string; data: { identifier: string; parentId?: string } }) =>
+  // Linear's webhook: https://linear.app/developers/webhooks
+  key: ({ type, action, data }) =>
     type === 'Issue' && action === 'create' && !data.parentId ? data.identifier : undefined,
 });
 

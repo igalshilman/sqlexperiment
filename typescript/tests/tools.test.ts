@@ -204,6 +204,9 @@ describe('tool', () => {
 /** An object with `handlers`, as a function that defines it. */
 const named = (handlers: Record<string, () => Promise<void>>) => () => object({ name: 'assistant', handlers });
 
+/** The names of the handlers of `o`, an object(). */
+const handlersOf = (o: object) => Object.keys((o as { object: object }).object);
+
 describe('object', () => {
   it("refuses handlers of its own named as restate-agents' own", () => {
     expect(named({ signal: async () => {} })).toThrow("`signal` is a handler of restate-agents' own");
@@ -214,11 +217,10 @@ describe('object', () => {
   });
 
   it('has `clear` and `sync` only as an agent: one with `messages`', () => {
-    const handlers = (o: object) => Object.keys((o as { object: object }).object);
     const desk = object({ name: 'desk', handlers: { chat: async () => '' } });
     const agent = object({ name: 'agent', handlers: { chat: async () => '', messages: async () => ({}) } });
-    expect(handlers(desk)).not.toContain('clear');
-    expect(handlers(desk)).not.toContain('sync');
-    expect(handlers(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));
+    expect(handlersOf(desk)).not.toContain('clear');
+    expect(handlersOf(desk)).not.toContain('sync');
+    expect(handlersOf(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));
   });
 });
