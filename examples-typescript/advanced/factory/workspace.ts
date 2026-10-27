@@ -25,10 +25,12 @@ const has = (cwd: string, ref: string) =>
 
 /**
  * GitHub's credentials, GITHUB_TOKEN, as git asks for them: read when it
- * pushes, so the token is in no URL, config or error message.
+ * pushes, so the token is in no URL, config or error message. The helpers
+ * before it (your machine's, such as its keychain) are dropped: they would
+ * answer, or ask you, first.
  */
 const helper = '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f';
-const credentials = `credential.helper=${helper}`;
+const credentials = ['-c', 'credential.helper=', '-c', `credential.helper=${helper}`];
 
 /** The issue's branch: its identifier, in lower case (ENG-1: eng-1). */
 export const issueBranch = (issue: string) => issue.toLowerCase();
@@ -55,9 +57,10 @@ export async function clone(root: string, remote: string, key: string) {
   if (!existsSync(join(dir, '.git'))) {
     await rm(dir, { recursive: true, force: true });
     await mkdir(root, { recursive: true });
-    await git(root, '-c', credentials, 'clone', '--quiet', remote, dir);
+    await git(root, ...credentials, 'clone', '--quiet', remote, dir);
   }
-  await git(dir, 'config', 'credential.helper', helper);
+  await git(dir, 'config', '--replace-all', 'credential.helper', '');
+  await git(dir, 'config', '--add', 'credential.helper', helper);
   await git(dir, 'config', 'user.name', `Coder · ${task}`); // each coder's commits are its own
   await git(dir, 'config', 'user.email', 'factory@restate.localhost');
   await git(dir, 'config', 'push.autoSetupRemote', 'true'); // a plain `git push` pushes the coder's branch
@@ -85,7 +88,7 @@ export async function clone(root: string, remote: string, key: string) {
  * off its default branch.
  */
 export async function project(remote: string) {
-  if (await git(tmpdir(), '-c', credentials, 'ls-remote', '--heads', remote)) return remote;
+  if (await git(tmpdir(), ...credentials, 'ls-remote', '--heads', remote)) return remote;
   const first = await mkdtemp(join(tmpdir(), 'factory-'));
   await git(first, 'init', '--quiet', '--initial-branch', 'main');
   await writeFile(join(first, 'README.md'), '# A demo project\n\nBuilt by the factory.\n');
@@ -100,7 +103,7 @@ export async function project(remote: string) {
     '-qm',
     'A README',
   );
-  await git(first, '-c', credentials, 'push', '--quiet', remote, 'main');
+  await git(first, ...credentials, 'push', '--quiet', remote, 'main');
   await rm(first, { recursive: true, force: true });
   return remote;
 }
