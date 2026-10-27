@@ -1,13 +1,13 @@
 # A software factory
 
-A new issue in Linear starts it, through a webhook. Agents on three
+A new issue in Linear starts it, through a webhook. Agents on two
 frameworks take it from there. A triage agent (pi) decides whether the issue
-is ready to build, and leads the work: it asks a planner (Claude) for a
+is ready to build, and leads the work: it asks a planner (pi) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
 a coder (OpenCode) of its own, all at once: each on a git branch of its
 own, which it opens a pull request of, on GitHub. As each answers with its
-pull request, triage has a reviewer (Claude) review it, which posts its
+pull request, triage has a reviewer (pi) review it, which posts its
 review on the pull request; triage hands the changes it asks for back to the
 coder, and has it reviewed again, until it approves. With every pull request
 approved, triage marks the issue Done, and leaves the merging to people.
@@ -43,11 +43,11 @@ stand-in, [`linear.ts`](linear.ts), with the same tools.
   │     ▼               │       ▼                  ▼  its changes back to the coder    │
   │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │
   │  │ planner/ENG-1.plan   │ │ coder/     │ │ reviewer/  │  coders push and           │
-  │  │               Claude │ │ ENG-1.     │ │ ENG-1.     │  open the PRs;             │
+  │  │                   pi │ │ ENG-1.     │ │ ENG-1.     │  open the PRs;             │
   │  │                      │ │ parser,    │ │ parser,    │  reviewers read            │
   │  │ replies with the     │ │ ENG-1.     │ │ ENG-1.     │  them, and post            │
   │  │ plan, as JSON        │ │ history    │ │ history    │  their reviews             │
-  │  │ (its output,         │ │   OpenCode │ │     Claude │  on them                   │
+  │  │ (its output,         │ │   OpenCode │ │         pi │  on them                   │
   │  │  checked)            │ │            │ │            │                            │
   │  └──────────────────────┘ └─────┬──────┘ └─────┬──────┘                            │
   └─────────────────────────────────┼──────────────┼───────────────────────────────────┘
@@ -59,9 +59,9 @@ stand-in, [`linear.ts`](linear.ts), with the same tools.
                                └───────────────────────────┘
 ```
 
-The planner only plans: a Claude agent whose `output` is the plan's schema
+The planner only plans: a pi agent whose `output` is the plan's schema
 ([`answers.ts`](answers.ts)), and no tools: triage hands it the issue's title
-and description. Claude replies with the plan as JSON of that schema, which
+and description. The model replies with the plan as JSON of that schema, which
 is checked, and the planner's `chat` answers with it, as a call answers.
 The parent acts on it: a sub-issue and a coder per part.
 
@@ -81,7 +81,7 @@ people to merge.
   time ──▶
 
   Linear                     triage (pi), the parent   planner, reviewer   coders (OpenCode)
-    │                               │                  (Claude)         parser     history
+    │                               │                    (pi)           parser     history
   ENG-1  Backlog ──── webhook ─────▶│ reads it              │             │           │
     │◀── In Progress ───────────────┤                       │             │           │
     │                               ├── subagent: plan ────▶│ the issue   │           │
@@ -132,8 +132,8 @@ to **Canceled**.
 
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
-OpenAI's for triage (in its fast mode: it coordinates), Anthropic's for the
-planner and the reviewers (Claude Opus) and the coders (Claude Sonnet):
+OpenAI's for triage and the planner (GPT Sol) and the reviewer (GPT Astra),
+all in OpenAI's fast mode, and Anthropic's for the coders (Claude Sonnet):
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
@@ -234,7 +234,7 @@ it takes the comment once they answer.
   (`output`), the subagent call's return value, not text to parse.
 - **A conversation between agents, led by their parent**: triage takes a
   coder's pull request to the reviewer, and its changes back to the coder
-  (OpenCode and Claude), round by round, each in the same task every time,
+  (OpenCode and pi), round by round, each in the same task every time,
   so the coder knows its work, and the reviewer its last review.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
@@ -248,6 +248,6 @@ it takes the comment once they answer.
   comment: what was built, how to run it, whether each pull request is
   approved, and what is left open.
 - **MCP tools in any agent**: `mcpTools(url)` turns an MCP server's tools
-  into `tool()`s, which pi, Claude and OpenCode take alike. A tool call is
+  into `tool()`s, which pi and OpenCode take alike. A tool call is
   stored once it is done; a crash makes again only one that had not
   finished (moving an issue twice is harmless; a comment may show twice).
