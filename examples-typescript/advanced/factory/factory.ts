@@ -1,50 +1,8 @@
 /**
- * A software factory, in miniature: a new issue in Linear starts it, through
- * a webhook. A triage agent (pi) decides whether the issue is ready to build,
- * and leads the work: it asks a planner (Claude) for a plan, which comes back
- * structured, part by part; then it makes a sub-issue for each part, and
- * hands every part to a coder (OpenCode) of its own, all at once. Triage and
- * the coders move their issues along Linear's workflow as they go, and
- * comment on them, with Linear's MCP server; the planner only plans.
- *
- * From examples-typescript/, each in a terminal of its own, with a key for
- * each agent's model: OpenAI's for triage and the coders, Anthropic's for the
- * planner:
- *
- *   node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
- *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… node advanced/factory/factory.ts
- *   npx @restatedev/restate-server
- *
- * Then register the factory with Restate, file an issue, and follow it. The
- * new issue is what starts the factory: the stand-in posts Linear's webhook
- * for it to Restate, at localhost:8080/linear/webhook.
- *
- *   npx @restatedev/restate deployments register http://localhost:9080
- *   curl localhost:3333/issues --json '{"title": "A calculator CLI", "description": "calc.py: +, -, *, / on two numbers, and a history of the last 10 results in a file; with tests"}'
- *   curl localhost:3333/issues/ENG-1                   # the issue: its state, sub-issues and comments
- *   curl localhost:8080/triage/ENG-1/status            # what triage is doing now
- *   curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
- *   curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
- *   curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
- *   curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
- *
- * With the real Linear, LINEAR_API_KEY instead of the stand-in, and Linear's
- * webhook pointed at Restate's ingress; with a project on GitHub,
- * GITHUB_REPO and GITHUB_TOKEN (see the README).
- *
- * Each agent has a conversation per task, keyed as subagents are:
- * `triage/ENG-1`, `planner/ENG-1.plan`, `coder/ENG-1.<part>`. Each coder
- * works in a clone of the project of its own, WORKSPACE/ENG-1.<part>
- * (/tmp/restate-factory by default), on its own branch (eng-1-<part>), and
- * opens a pull request into the issue's branch (eng-1); the `integrate`
- * coder merges them there, and opens the issue's pull request into main.
- * The coders run real commands, on this machine: run it in a sandbox (a
- * container, a VM).
- *
- * Environment (env.ts): LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET (the real
- * Linear), GITHUB_REPO and GITHUB_TOKEN (the project on GitHub; else a git
- * repository in WORKSPACE stands in for it), WORKSPACE. Not MODEL: each
- * agent is on its own provider, with its default model.
+ * A software factory, in miniature: a new Linear issue starts it, through a
+ * webhook. Triage (pi) leads the work: a planner (Claude) plans it in parts,
+ * and a coder (OpenCode) builds each part on a branch of its own, with a pull
+ * request. How to run it, and follow it: README.md.
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
