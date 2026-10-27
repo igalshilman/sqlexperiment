@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p . && tsc -p ../examples-typescript && tsc -p ../examples-typescript/ui",
+    "typecheck": "tsc -p . && tsc -p ../examples-typescript && tsc -p ../examples-typescript/ui && tsc -p ../examples-typescript/advanced/factory/board",
     "test": "pnpm --filter tests test"
   },
   "devDependencies": {

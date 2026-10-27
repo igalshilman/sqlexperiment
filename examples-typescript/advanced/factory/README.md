@@ -135,6 +135,7 @@ to **Canceled**.
 | [`signatures.ts`](signatures.ts) | The agents' signatures, on what they write, and how the factory tells their comments from people's                                         |
 | [`workspace.ts`](workspace.ts)   | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
 | [`linear.ts`](linear.ts)         | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
+| [`board/`](board/board.ts)       | The board: a page that shows each issue as the agents work on it, live, and their conversations                                            |
 
 ## Talk to a coder, on its pull request
 
@@ -285,6 +286,27 @@ and the rest beside them.
 docker run -e RESTATE_SERVE_ONLY=coder ...                                   # the coders
 docker run -e RESTATE_SERVE_ONLY=linear,github,triage,planner,reviewer ...   # the rest
 ```
+
+## Watch it, on the board
+
+A page for a demo, [`board/`](board/board.ts): each issue as the factory
+works on it, live. Triage and the planner, then a lane for each part of the
+plan, with its coder and its reviewer: an agent glows while it works and
+shows what it is doing (`bash: pytest -q`), a coder links its pull request,
+a reviewer shows its verdict, and an event from GitHub's webhook flashes on
+the coder it reaches. Click an agent for its conversation, tool calls and
+all.
+
+```sh
+npx vite advanced/factory/board   # http://localhost:5173, from examples-typescript/
+```
+
+It reads what the agents already keep, through Restate: the issues, by
+Restate's SQL over triage's state (its admin API, at port 9070), and each
+agent's conversation, with `follow()` of restate-agents' client (the
+ingress, at port 8080). Triage's calls to the planner, the coders and the
+reviewer name the agents to follow, and their answers carry the plan, the
+pull requests and the reviews. It changes nothing.
 
 ## What it shows
 
