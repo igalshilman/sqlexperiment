@@ -83,7 +83,8 @@ people to merge.
   Linear                     triage (pi), the parent   planner, reviewer   coders (OpenCode)
     │                               │                    (pi)           parser     history
   ENG-1  Backlog ──── webhook ─────▶│ reads it              │             │           │
-    │◀── In Progress ───────────────┤                       │             │           │
+    │◀── In Progress, comment: ─────┤                       │             │           │
+    │    "let me make a plan"       │                       │             │           │
     │                               ├── subagent: plan ────▶│ the issue   │           │
     │                               │                       │ in the task │           │
     │                               │◀── Plan, as JSON ─────┤             │           │
@@ -92,16 +93,18 @@ people to merge.
   ENG-3  sub-issue: history ◀───────┤                       │             │           │
     │                               ├── subagent: coder, parser ─────────▶│           │
     │                               ├── subagent: coder, history ────────────────────▶│
-  ENG-2  In Progress ◀────────────────────────────────────────────────────┤           │
-  ENG-3  In Progress ◀────────────────────────────────────────────────────────────────┤
+  ENG-2  In Progress, comment: "picking it up" ◀──────────────────────────┤           │
+  ENG-3  In Progress, comment: "picking it up" ◀──────────────────────────────────────┤
     │                               │                       │   code, tests, a PR     │
   ENG-2  In Review, a comment ◀───────────────────────────────────────────┤           │
   ENG-3  In Review, a comment ◀───────────────────────────────────────────────────────┤
     │                               │◀── the PRs ─────────────────────────┴───────────┘
+    │◀── comment: PRs to review ────┤                       │
     │                               ├── subagent: reviewer ▶│ a review each,
     │                               │                       │ posted on its PR
     │                               │◀── approved, or ──────┤
     │                               │    changes            │
+  ENG-2/3  comment: the review ◀────┤                       │
     │                               ├── changes, to their coders, then reviews again
     │                               │   (three reviews of a PR at most)
   ENG-2  Done ◀─────────────────────┤                       │
@@ -240,7 +243,10 @@ it takes the comment once they answer.
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.
 - **Status in Linear**: triage and each coder move their own issue with
-  Linear's tools, so the board shows the work as it goes, down to each part.
+  Linear's tools, so the board shows the work as it goes, down to each part;
+  and say what they are about to do as they start it, in a comment: triage
+  that it is making a plan, each coder what it picks up and how, triage
+  each review on its sub-issue (approved, or the changes asked for).
   They all write as one Linear user, so each comment, and each sub-issue's
   description, opens with who wrote it ("🧭 Triage", "🛠️ Coder · parser"):
   `env.linearTools(who)` adds it, in code. They write for the people
