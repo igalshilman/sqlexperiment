@@ -42,11 +42,11 @@ stand-in, [`linear.ts`](linear.ts), with the same tools.
   │     │ plan          │ JSON  │      └───────────┐  then a reviewer per PR;          │
   │     ▼               │       ▼                  ▼  its changes back to the coder    │
   │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │
-  │  │ planner/ENG-1.plan   │ │ coder/     │ │ reviewer/  │  coders push and           │
-  │  │                   pi │ │ ENG-1.     │ │ ENG-1.     │  open the PRs;             │
-  │  │                      │ │ parser,    │ │ parser,    │  reviewers read            │
-  │  │ replies with the     │ │ ENG-1.     │ │ ENG-1.     │  them, and post            │
-  │  │ plan, as JSON        │ │ history    │ │ history    │  their reviews             │
+  │  │ planner/ENG-1.plan   │ │ coder/     │ │ reviewer/  │  coders push, open         │
+  │  │                   pi │ │ ENG-1.     │ │ ENG-1.     │  the PRs, and answer       │
+  │  │                      │ │ parser,    │ │ parser,    │  each review on them;      │
+  │  │ replies with the     │ │ ENG-1.     │ │ ENG-1.     │  reviewers read them,      │
+  │  │ plan, as JSON        │ │ history    │ │ history    │  and post their reviews    │
   │  │ (its output,         │ │   OpenCode │ │         pi │  on them                   │
   │  │  checked)            │ │            │ │            │                            │
   │  └──────────────────────┘ └─────┬──────┘ └─────┬──────┘                            │
@@ -105,7 +105,8 @@ people to merge.
     │                               │◀── approved, or ──────┤
     │                               │    changes            │
   ENG-2/3  comment: the review ◀────┤                       │
-    │                               ├── changes, to their coders, then reviews again
+    │                               ├── the reviews, to their coders (who answer them
+    │                               │   on the PRs, and push), then reviews again
     │                               │   (three reviews of a PR at most)
   ENG-2  Done ◀─────────────────────┤                       │
   ENG-3  Done ◀─────────────────────┤                       │
@@ -198,7 +199,7 @@ requests. Use a team and a repository of their own, for the factory.
    access to its contents and pull requests: `GITHUB_TOKEN`. The coders push
    their branches with it, and open pull requests through GitHub's MCP
    server (`https://api.githubcopilot.com/mcp/`), where the reviewers post
-   their reviews, as comments (an author cannot approve their own pull
+   their reviews, and the coders their answers, as comments (an author cannot approve their own pull
    request on GitHub: the factory's approval shows in Linear). With Linear's GitHub
    integration, a pull request shows on its issue too: its branch names it
    (`eng-1-parser`).
@@ -236,9 +237,11 @@ it takes the comment once they answer.
   model's reply checked against its schema
   (`output`), the subagent call's return value, not text to parse.
 - **A conversation between agents, led by their parent**: triage takes a
-  coder's pull request to the reviewer, and its changes back to the coder
-  (OpenCode and pi), round by round, each in the same task every time,
-  so the coder knows its work, and the reviewer its last review.
+  coder's pull request to the reviewer, and its review back to the coder,
+  word for word (OpenCode and pi), round by round, each in the same task
+  every time, so the coder knows its work, and the reviewer its last review.
+  On GitHub, the pull request shows the conversation: each review, and the
+  coder's answer to it, point by point.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.

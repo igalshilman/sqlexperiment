@@ -30,11 +30,10 @@ const reviewer = pi.agent({
 
 const coder = opencode.agent({
   name: 'coder',
-  description:
-    "Builds a part of the plan, on a branch of its own, and opens its pull request; makes a review's changes",
+  description: 'Builds a part of the plan, on a branch of its own, and opens its pull request; answers its reviews',
   model: 'anthropic/claude-sonnet-5-5',
   workspace: env.coderWorkspace, // a clone of the project, on its own branch
-  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
+  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder'), env.pullRequestCommentTool('🛠️ Coder')],
   system: prompts.CODER,
   output: Built,
 });
