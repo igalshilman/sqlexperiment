@@ -168,8 +168,8 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or LangChain's. */
   tools?: (AnyTool | StructuredToolInterface)[];
   /**
-   * The answer as data: a zod object, which the agent hands in with a tool
-   * (`submit_answer`), and `chat` and `prompt` answer with (see output.ts).
+   * The answer as data: a zod object, whose JSON the agent replies with
+   * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
   output?: O;
 }
@@ -252,7 +252,7 @@ async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, conf
 /**
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own. The thread is the object's key.
- * With `output`, it answers with the value the agent hands in (see
+ * With `output`, it answers with the value the agent replies with (see
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(

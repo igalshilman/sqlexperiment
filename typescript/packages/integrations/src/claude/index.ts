@@ -164,8 +164,8 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** The most tokens of each of the model's replies (default 4096). */
   maxTokens?: number;
   /**
-   * The answer as data: a zod object, which the agent hands in with a tool
-   * (`submit_answer`), and `chat` and `prompt` answer with (see output.ts).
+   * The answer as data: a zod object, whose JSON the agent replies with
+   * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
   output?: O;
 }
@@ -224,7 +224,7 @@ const answerOnce = async (
 /**
  * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
  * of an invocation is a prompt of its own.
- * With `output`, it answers with the value the agent hands in (see
+ * With `output`, it answers with the value the agent replies with (see
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(

@@ -1,65 +1,69 @@
 // An agent's answer as data, with `output` (every framework's option): a zod
-// object schema. The agent hands its answer in with a tool, `submit_answer`,
-// whose input is the schema, so the model's call is checked against it; the
-// prompt then answers with that value, not the model's text.
+// object schema. The agent's reply is its answer, as JSON: the system prompt
+// asks for it, with the schema, and the reply is checked against it. The
+// prompt (and so `chat`) then answers with the value, as an RPC answers.
 //
 //   const planner = claude.agent({ name: 'planner', output: Plan });   // chat answers with a Plan
 //
-// The value is what the tool was called with, kept in memory, and the prompt
-// answers with it directly. A model that ends its turn without handing an
-// answer in is asked once more, then the prompt fails (a terminal error); so
-// is one whose turn a crash cut after it handed its answer in, as the retry
-// resumes the conversation past the tool's call: it hands it in again.
+// A reply that is not such JSON is answered with what is wrong with it, once,
+// for the agent to answer again; then the prompt fails (a terminal error). A
+// retried attempt resumes the conversation, so it reads the same reply.
 import * as restate from 'restate-fns';
-import type { z } from 'zod';
-import { tool, type Tool } from './tools.ts';
+import { z } from 'zod';
 
-/** What a prompt answers: its text, or with `output`, the value the agent handed in. */
+/** What a prompt answers: its text, or with `output`, the value of the agent's reply. */
 export type Answer<O> = O extends z.ZodObject ? z.infer<O> : string;
 
-/** The tool's name, which the reminder names too. */
-const SUBMIT = 'submit_answer';
+/** What the system prompt asks for, with `output`: JSON of its schema, and nothing else. */
+const format = (output: z.ZodObject) =>
+  'Your final reply is your answer, as JSON only (no other text): an object of this JSON schema.\n' +
+  JSON.stringify(z.toJSONSchema(output));
 
-/** What the agent is asked when its turn ended without an answer (in this attempt). */
-const REMIND = `Hand in your answer now: call \`${SUBMIT}\` with it.`;
+/** The JSON of `reply`: all of it, or what a code fence (```json) holds. */
+const jsonOf = (reply: string) => /```(?:json)?\s*\n([^]*?)\n?```/.exec(reply)?.[1] ?? reply;
+
+/** `reply` as a value of `output`, or what is wrong with it. */
+function parsed<O extends z.ZodObject>(output: O, reply: string): { value: z.infer<O> } | { wrong: string } {
+  let json: unknown;
+  try {
+    json = JSON.parse(jsonOf(reply).trim());
+  } catch {
+    return { wrong: 'it is not JSON' };
+  }
+  const result = output.safeParse(json);
+  return result.success ? { value: result.data } : { wrong: z.prettifyError(result.error) };
+}
 
 /**
- * Answer `text` with a value of `output`: `prompt` (the framework's) asks
- * the agent with the tool that hands it in beside its own, and again, once,
- * if it did not.
+ * Answer `text` with a value of `output`: the agent's reply to it, parsed;
+ * one that is not is answered with what is wrong, once, for another reply.
  */
 export async function answerWith<O extends z.ZodObject>(
   text: string,
   output: O,
-  prompt: (text: string, tools: Tool[]) => Promise<string>,
+  prompt: (text: string) => Promise<string>,
 ): Promise<z.infer<O>> {
-  let answer: unknown;
-  const submit = tool({
-    name: SUBMIT,
-    description: 'Hand in your answer: what the one who asked gets. Hand it in again to change it.',
-    input: output,
-    run: async (value) => {
-      answer = value;
-      return 'Handed in.';
-    },
-  });
-  await prompt(text, [submit]);
-  if (answer === undefined) await prompt(REMIND, [submit]);
-  if (answer === undefined) throw new restate.TerminalError(`The agent handed in no answer (with ${SUBMIT})`);
-  return output.parse(answer);
+  let answer = parsed(output, await prompt(text));
+  if ('wrong' in answer) {
+    const again = `Your reply is not the answer asked for: ${answer.wrong}\nReply again, with the JSON only.`;
+    answer = parsed(output, await prompt(again));
+  }
+  if ('wrong' in answer)
+    throw new restate.TerminalError(`The agent's reply is not the answer asked for: ${answer.wrong}`);
+  return answer.value;
 }
 
 /**
  * `prompt` (a framework's, of `options`), answering with a value of
  * `options.output` if it has one, or else with the agent's text.
  */
-export const withOutput = <T extends { tools?: unknown[]; output?: z.ZodObject }>(
+export const withOutput = <T extends { system?: string; output?: z.ZodObject }>(
   text: string,
   options: T,
   prompt: (text: string, options: T) => Promise<string>,
-): Promise<Answer<T['output']>> =>
-  (options.output
-    ? answerWith(text, options.output, (t, tools) =>
-        prompt(t, { ...options, tools: [...(options.tools ?? []), ...tools] }),
-      )
-    : prompt(text, options)) as Promise<Answer<T['output']>>;
+): Promise<Answer<T['output']>> => {
+  const { output } = options;
+  if (!output) return prompt(text, options) as Promise<Answer<T['output']>>;
+  const asked = { ...options, system: [options.system, format(output)].filter(Boolean).join('\n\n') };
+  return answerWith(text, output, (t) => prompt(t, asked)) as Promise<Answer<T['output']>>;
+};

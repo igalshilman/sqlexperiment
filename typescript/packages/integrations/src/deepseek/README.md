@@ -21,12 +21,12 @@ const assistant = deepseek.agent({ name: 'assistant', system: 'Answer briefly.',
 await serve(assistant);
 ```
 
-| Option   | What                                                                                                                                               |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`  | `provider/model-id`; or else `MODEL`, or else `deepseek/deepseek-flash` (see below)                                                                |
-| `system` | The system prompt                                                                                                                                  |
-| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the harness's `defineTool`s                                                                  |
-| `output` | A zod object: the answer as data, which the agent hands in, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
+| Option   | What                                                                                                                                                           |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | `provider/model-id`; or else `MODEL`, or else `deepseek/deepseek-flash` (see below)                                                                            |
+| `system` | The system prompt                                                                                                                                              |
+| `tools`  | `tool()`s and Restate's tools of `restate-agents`, or the harness's `defineTool`s                                                                              |
+| `output` | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
 
 ## Models
 
