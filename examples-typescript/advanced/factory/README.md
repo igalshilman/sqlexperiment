@@ -47,7 +47,7 @@ Linear's MCP server: on the real Linear, or on a stand-in,
   │  └──────────────────────┘       │              │              │                    │
   └─────────────────────────────────┼──────────────┼──────────────┼────────────────────┘
    OpenCode's read, edit, bash;     ▼              ▼              ▼
-   each in a git worktree,     ┌────────────┐ ┌────────────┐ ┌────────────┐
+   each in a clone of its own, ┌────────────┐ ┌────────────┐ ┌────────────┐
    on its own branch, with     │ eng-1-     │ │ eng-1-     │ │ eng-1      │
    a pull request on GitHub    │ parser     │ │ history    │ │ (merged)   │
                                │ PR → eng-1 │ │ PR → eng-1 │ │ PR → main  │
@@ -106,7 +106,7 @@ is a duplicate or nothing to build to **Canceled**.
 | [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests     |
 | [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                            |
 | [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                          |
-| [`workspace.ts`](workspace.ts) | The coders' git worktrees: a clone per issue, a worktree and a branch per coder; the stand-in's repository           |
+| [`workspace.ts`](workspace.ts) | The coders' clones of the project, each on its own branch; a first commit for an empty project; the stand-in's       |
 | [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment |
 
 ## Run it, on the stand-in
@@ -169,9 +169,9 @@ requests. Use a team and a repository of their own, for the factory.
 4. **The team's states**: the agents move issues to Todo, In Progress,
    In Review, Done and Canceled. Add any the team has not (In Review, say),
    under the team's workflow settings.
-5. **A repository, and a token for it**: a repository with a first commit
-   on `main` (a README, say; a test runner helps the coders), and a
-   fine-grained personal access token for it alone, with read and write
+5. **A repository, and a token for it**: a repository (if it is empty,
+   the factory pushes a README to `main` first; a test runner helps the
+   coders), and a fine-grained personal access token for it alone, with read and write
    access to its contents and pull requests: `GITHUB_TOKEN`. The coders push
    their branches with it, and open pull requests through GitHub's MCP
    server (`https://api.githubcopilot.com/mcp/`). With Linear's GitHub

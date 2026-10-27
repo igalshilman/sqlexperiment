@@ -9,7 +9,7 @@
 import { type Tool, tool, type WebhookAuth } from 'restate-agents';
 import { z } from 'zod';
 import { mcpTools } from './mcp.ts';
-import { standInRemote, worktree } from './workspace.ts';
+import { clone, project, standInRemote } from './workspace.ts';
 
 const apiKey = process.env.LINEAR_API_KEY;
 const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
@@ -74,10 +74,10 @@ export const webhookAuth: WebhookAuth | undefined = webhookSecret
   : undefined;
 
 /** The project's git repository: GitHub's (pushed to with GITHUB_TOKEN), or the stand-in's, in the workspace. */
-const remote = repo ? `https://x-access-token:${token}@github.com/${repo}.git` : await standInRemote(workspace);
+const remote = await project(repo ? `https://github.com/${repo}.git` : await standInRemote(workspace));
 
-/** A coder's directory: a git worktree of the project, on a branch of its own (see workspace.ts). */
-export const coderWorkspace = ({ key }: { key: string }) => worktree(workspace, remote, key);
+/** A coder's directory: a clone of the project, on a branch of its own (see workspace.ts). */
+export const coderWorkspace = ({ key }: { key: string }) => clone(workspace, remote, key);
 
 /** GitHub's `create_pull_request`, from its MCP server. */
 const createPullRequest = repo ? await githubTool('create_pull_request') : undefined;
