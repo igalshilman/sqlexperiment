@@ -47,20 +47,17 @@ import * as pi from 'restate-agents/pi';
 import * as env from './env.ts';
 import { Plan } from './plan.ts';
 
-/** Linear's tools: issues, sub-issues, states, comments. */
-const linear = await env.linearTools();
-
 const coder = opencode.agent({
   name: 'coder',
   description: "Builds a part of the plan, in the issue's directory",
   workspace: env.issueWorkspace, // the issue's directory, shared by its coders
-  tools: [...linear, env.commit],
+  tools: [...env.linearTools('🛠️ Coder'), env.commit],
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
 - If your task names a sub-issue, first move it to "In Progress".
 - Write tests for your part, and run them after each change.
 - Once your tests pass, commit your files with \`commit\` (never git in bash).
-- Then comment on your sub-issue with what you did, and move it to "Done".
+- Then comment on your sub-issue with what you did: its files, and its tests' result. Move it to "Done".
 Answer with what you did, briefly.`,
 });
 
@@ -78,18 +75,19 @@ const planner = claude.agent({
 
 const triage = pi.agent({
   name: 'triage',
-  tools: [...linear, subagent(planner), subagent(coder)],
+  tools: [...env.linearTools('🧭 Triage'), subagent(planner), subagent(coder)],
   system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
 (a <webhook> element: the issue is its data.identifier). Read the issue first.
 - If it is not clear enough to build, comment with what you need to know, leave it in "Backlog", and stop.
 - If it is a duplicate or not something to build, comment why, and move it to "Canceled".
 - Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan",
   with the issue's title and description.
-- Comment on the issue with the plan, and create a sub-issue of it for each part, titled as the part.
+- Comment on the issue with the plan (headed "📐 The plan"), and create a sub-issue of it for each part, titled as the part.
 - Then hand every part to a coder at once, in one step: a task each, named after its part,
   with its sub-issue, its task and files, and the plan's summary.
 - When they are all done, hand one more task, "integrate", to a coder: run all the tests, and fix what fails.
-- Comment on the issue with what was built and how to run it, and move it to "In Review".
+- End with a summary comment on the issue, headed "✅ Summary": what was built, part by part (with each
+  sub-issue); how to run it and its tests, and whether they pass; and what is left open. Then move it to "In Review".
 A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
 If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 Answer with what happened to the issue, briefly.`,

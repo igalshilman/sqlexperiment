@@ -4,7 +4,7 @@
  * or else the stand-in (linear.ts) on localhost:3333; and WORKSPACE, where
  * the coders work (/tmp/restate-factory by default).
  */
-import type { WebhookAuth } from 'restate-agents';
+import { type Tool, tool, type WebhookAuth } from 'restate-agents';
 import { mcpTools } from './mcp.ts';
 import { commitTool, issueDirectory } from './workspace.ts';
 
@@ -13,10 +13,31 @@ const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
 
 /** Linear's tools (issues, sub-issues, states, comments), from its MCP server. */
-export const linearTools = () =>
-  apiKey
-    ? mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
-    : mcpTools('http://localhost:3333/mcp');
+const linear = apiKey
+  ? await mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
+  : await mcpTools('http://localhost:3333/mcp');
+
+/**
+ * Linear's tools for the agent `who` (such as "🧭 Triage"): each comment it
+ * makes opens with its name, and its task, if it has one (`ENG-1.parser`:
+ * "🛠️ Coder · parser"). The agents all comment as one Linear user: this
+ * tells them apart.
+ */
+export const linearTools = (who: string): Tool[] =>
+  linear.map((t) =>
+    t.name !== 'create_comment'
+      ? t
+      : tool({
+          name: t.name,
+          description: t.description,
+          input: t.input,
+          run: ({ body, ...input }, call) => {
+            const task = call.ctx.key.split('.').slice(1).join('.');
+            const signature = `**${who}${task ? ` · ${task}` : ''}**`;
+            return t.run({ ...input, body: `${signature}\n\n${String(body)}` }, call);
+          },
+        }),
+  );
 
 /**
  * The factory's own Linear user (`viewer`, the user of LINEAR_API_KEY), or the

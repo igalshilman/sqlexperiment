@@ -107,7 +107,7 @@ async function createIssue(
 async function createComment(id: string, body: string, by: User) {
   const issue = issueOf(id);
   issue.comments.push({ body, by, at: new Date().toISOString() });
-  console.log(`${id}: ${by} commented, "${body.split('\n')[0]}"`);
+  console.log(`${id}: ${by} commented, "${body.split('\n').filter(Boolean).slice(0, 2).join(' ')}"`);
   const about = { id: issue.id, identifier: issue.identifier, title: issue.title };
   await sendWebhook('Comment', { id: randomUUID(), body, userId: by, issueId: issue.id, issue: about }, by);
   return issue.comments.length;
