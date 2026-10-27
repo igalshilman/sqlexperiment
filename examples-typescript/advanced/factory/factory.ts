@@ -7,14 +7,21 @@
  * the coders move their issues along Linear's workflow as they go, and
  * comment on them, with Linear's MCP server; the planner only plans.
  *
- *   node advanced/factory/linear.ts             # Linear (a stand-in), on port 3333
- *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… \
- *     node advanced/factory/factory.ts          # in another terminal
- *   npx @restatedev/restate-server              # Restate, in another terminal
+ * From examples-typescript/, each in a terminal of its own:
+ *
+ *   node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
+ *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/factory/factory.ts
+ *   npx @restatedev/restate-server
+ *
+ * Then register the factory with Restate, file an issue, and follow it:
+ *
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:3333/issues --json '{"title": "A calculator CLI", "description": "calc.py: +, -, *, / on two numbers, and a history of the last 10 results in a file; with tests"}'
- *   curl localhost:3333/issues/ENG-1            # its state, sub-issues and comments, as the agents work
- *   curl localhost:8080/triage/ENG-1/messages   # what triage did
+ *   curl localhost:3333/issues/ENG-1                   # the issue: its state, sub-issues and comments
+ *   curl localhost:8080/triage/ENG-1/status            # what triage is doing now
+ *   curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
+ *   curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
+ *   curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
  *
  * With the real Linear, LINEAR_API_KEY instead of the stand-in, and Linear's
  * webhook pointed at Restate's ingress (see the README).
