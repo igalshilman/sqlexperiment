@@ -113,7 +113,7 @@ is a duplicate or nothing to build to **Canceled**.
 
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
-OpenAI's for triage (a fast model: it coordinates), Anthropic's for the
+OpenAI's for triage (in its fast mode: it coordinates), Anthropic's for the
 planner (Claude Opus) and the coders (Claude Sonnet):
 
 ```sh
@@ -152,16 +152,14 @@ The same agents, on your Linear workspace and a GitHub repository: they
 move and comment on real issues, make real sub-issues, and open real pull
 requests. Use a team and a repository of their own, for the factory.
 
-1. **A key the factory acts with**: an OAuth app's token, of an app
-   installed with `actor=app` (which takes a workspace admin), so that the
-   factory acts in Linear as itself
-   ([Linear's docs](https://linear.app/developers/oauth-actor-authorization)).
-   A personal API key (Settings, Security & access) works too, but the
-   factory then acts as you: it cannot tell your comments from its own, so
-   it drops them all, and you cannot talk to it in comments. Either needs
-   to write issues and comments. The factory sends it to Linear's MCP server
-   (`https://mcp.linear.app/mcp`) as a bearer token, and asks Linear's API
-   who it is (`viewer`) when it starts.
+1. **A key the factory acts with**: a personal API key (Settings, Security
+   & access), or an OAuth app's token, of an app installed with `actor=app`
+   (which takes a workspace admin), so that the factory acts in Linear as
+   itself ([Linear's docs](https://linear.app/developers/oauth-actor-authorization)).
+   It needs to write issues and comments. The factory sends it to Linear's
+   MCP server (`https://mcp.linear.app/mcp`) as a bearer token. The agents
+   sign what they write, so the factory tells its comments from yours
+   either way.
 2. **Restate, reachable by Linear**: a tunnel to Restate's ingress, such as
    `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`).
 3. **A webhook**: in Linear's settings, under API, a webhook to
@@ -199,9 +197,9 @@ it takes the comment once they answer.
   delivers each new issue, and each comment on it, to the triage agent,
   keyed by the issue, as a message that says where it comes from
   (`<webhook name="linear" delivery="…">`): to the turn it is in, if it is
-  in one, or else as a message of its own. The factory's own comments come
-  back too, and are dropped: their author (the webhook's `actor`) is the
-  factory's Linear user.
+  in one, or else as a message of its own. The agents' own comments come
+  back too, and are dropped: they open with an agent's signature
+  ("🧭 Triage"), whichever Linear user posted them.
   A delivery Linear sends again has the same `linear-delivery`, the
   message's idempotency key: it reaches the same message, not a second
   one. With a secret, a webhook that Linear did not sign is refused (401).

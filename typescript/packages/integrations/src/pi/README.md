@@ -17,14 +17,15 @@ const assistant = pi.agent({ name: 'assistant', system: 'Answer briefly.', tools
 await serve(assistant);
 ```
 
-| Option      | What                                                                                                                                                           |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`     | `provider/model-id`, of any provider pi-ai knows; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                               |
-| `models`    | A pi-ai model registry, for a provider of your own                                                                                                             |
-| `system`    | The system prompt                                                                                                                                              |
-| `tools`     | `tool()`s and Restate's tools of `restate-agents`, or pi-durable's `defineTool`s                                                                               |
-| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
-| `workspace` | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox                                           |
+| Option        | What                                                                                                                                                           |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`       | `provider/model-id`, of any provider pi-ai knows; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`)                                               |
+| `models`      | A pi-ai model registry, for a provider of your own                                                                                                             |
+| `system`      | The system prompt                                                                                                                                              |
+| `tools`       | `tool()`s and Restate's tools of `restate-agents`, or pi-durable's `defineTool`s                                                                               |
+| `output`      | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
+| `workspace`   | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox                                           |
+| `serviceTier` | OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on                                                            |
 
 For an object of your own, `pi.chat(options)` and `pi.messages()` are the
 handlers; `options` may be a function of the invocation's context, such as

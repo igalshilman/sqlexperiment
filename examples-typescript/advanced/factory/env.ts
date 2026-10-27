@@ -29,14 +29,18 @@ const linear = apiKey
   : await mcpTools('http://localhost:3333/mcp');
 console.log(`Linear's tools: ${linear.map((t) => t.name).join(', ')}`);
 
+/** The agents that write in Linear, by the name they sign with ("🧭 Triage"). */
+const writers = new Set<string>();
+
 /**
  * Linear's tools for the agent `who` (such as "🧭 Triage"): what it writes,
  * each comment and each issue it creates, opens with its name, and its task,
  * if it has one (`ENG-1.parser`: "🛠️ Coder · parser"). The agents all write
  * as one Linear user: this tells them apart.
  */
-export const linearTools = (who: string): Tool[] =>
-  linear.map((t) =>
+export const linearTools = (who: string): Tool[] => {
+  writers.add(who);
+  return linear.map((t) =>
     tool({
       name: t.name,
       description: t.description,
@@ -48,6 +52,7 @@ export const linearTools = (who: string): Tool[] =>
       },
     }),
   );
+};
 
 /**
  * The field of a Linear tool's input that an agent writes, to sign: a
@@ -64,25 +69,14 @@ function writing(t: Tool, input: Record<string, unknown>) {
 }
 
 /**
- * The factory's own Linear user (`viewer`, the user of LINEAR_API_KEY), or the
- * stand-in's `factory`: the comments it makes come back as webhooks, and are
- * not for triage. With a personal API key, it is you: then only an app's
- * token (an OAuth app installed with `actor=app`) tells your comments apart.
+ * Whether `text`, a comment's body, is an agent's: it opens with its
+ * signature. The agents' comments come back as webhooks, and are not for
+ * triage; yours are, whichever Linear user the factory acts as.
  */
-export const linearUser: string = apiKey ? await viewerOf(apiKey) : 'factory';
-
-async function viewerOf(key: string) {
-  const response = await fetch('https://api.linear.app/graphql', {
-    method: 'POST',
-    // A personal API key as it is; an OAuth token (an app's) as a bearer token.
-    headers: { 'content-type': 'application/json', authorization: key.startsWith('lin_api_') ? key : `Bearer ${key}` },
-    body: JSON.stringify({ query: '{ viewer { id name } }' }),
-  });
-  const { data } = (await response.json()) as { data?: { viewer: { id: string; name: string } } };
-  if (!data) throw new Error(`LINEAR_API_KEY: Linear answers ${response.status}`);
-  console.log(`The factory acts in Linear as ${data.viewer.name}`);
-  return data.viewer.id;
-}
+export const byAnAgent = (text: string) => {
+  const opening = text.trimStart().replace(/^\*\*/, '');
+  return [...writers].some((who) => opening.startsWith(who));
+};
 
 /** How Linear signs its webhooks, if there is a secret to check them with. */
 export const webhookAuth: WebhookAuth | undefined = webhookSecret

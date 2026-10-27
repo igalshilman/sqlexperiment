@@ -15,6 +15,9 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from '@ear
 /** A model's reply to the conversation in `context`. */
 export type Respond = (context: TranscriptContext) => AssistantMessage;
 
+/** The options of each model call, in order (such as its `serviceTier`). */
+export const requests: Record<string, unknown>[] = [];
+
 /** A pi-ai provider `provider`, with one model `model`, answering with `respond`. */
 export function fakeProvider(provider: string, model: string, respond: Respond): Provider {
   const faux = fauxProvider({ provider, models: [{ id: model }] });
@@ -24,7 +27,17 @@ export function fakeProvider(provider: string, model: string, respond: Respond):
     return respond(context);
   };
   faux.setResponses([reply]);
-  return faux.provider;
+  // Each call's options, kept in `requests`.
+  return new Proxy(faux.provider, {
+    get(target, name, receiver) {
+      const value = Reflect.get(target, name, receiver) as unknown;
+      if ((name !== 'stream' && name !== 'streamSimple') || typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        requests.push({ ...(args[2] as object) });
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
 }
 
 /** The text of a message's content. */

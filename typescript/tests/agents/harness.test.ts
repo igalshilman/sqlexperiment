@@ -6,7 +6,7 @@ import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { callTools, fakeProvider, say, textOf, type Respond } from '../fakes/pi.ts';
+import { callTools, fakeProvider, requests, say, textOf, type Respond } from '../fakes/pi.ts';
 import { sqlAttempt } from '../testing.ts';
 
 // Each model says who it is and what it was told so far; asked the time, it
@@ -87,6 +87,14 @@ describe('a Harness configured as it runs', () => {
     // The same conversation, on another model.
     await alice(configure, 'a2', { model: 'anthropic/claude-sonnet-5-5' });
     expect(await alice(chat, 'a3', 'Again')).toBe('claude (You are a helpful assistant.): Hi / Again');
+  });
+
+  it('asks OpenAI for the service tier it is given (fast mode)', async () => {
+    const carol = store('carol');
+    requests.length = 0;
+    await carol(pi.chat({ serviceTier: 'fast' }), 'c1', 'Hi');
+    await store('dave')(pi.chat(), 'd1', 'Hi');
+    expect(requests.map((r) => r.serviceTier)).toEqual(['fast', undefined]);
   });
 
   it('compacts the conversation, and starts it over with a handoff', async () => {
