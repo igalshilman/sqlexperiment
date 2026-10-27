@@ -29,16 +29,22 @@
  *   curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
  *
  * With the real Linear, LINEAR_API_KEY instead of the stand-in, and Linear's
- * webhook pointed at Restate's ingress (see the README).
+ * webhook pointed at Restate's ingress; with a project on GitHub,
+ * GITHUB_REPO and GITHUB_TOKEN (see the README).
  *
  * Each agent has a conversation per task, keyed as subagents are:
- * `triage/ENG-1`, `planner/ENG-1.plan`, `coder/ENG-1.<part>`. The coders run
- * real commands, on this machine, in WORKSPACE/<issue>
- * (/tmp/restate-factory by default): run it in a sandbox (a container, a VM).
+ * `triage/ENG-1`, `planner/ENG-1.plan`, `coder/ENG-1.<part>`. Each coder
+ * works in a git worktree of the project of its own, WORKSPACE/ENG-1.<part>
+ * (/tmp/restate-factory by default), on its own branch (eng-1-<part>), and
+ * opens a pull request into the issue's branch (eng-1); the `integrate`
+ * coder merges them there, and opens the issue's pull request into main.
+ * The coders run real commands, on this machine: run it in a sandbox (a
+ * container, a VM).
  *
  * Environment (env.ts): LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET (the real
- * Linear), WORKSPACE. Not MODEL: each agent is on its own provider, with its
- * default model.
+ * Linear), GITHUB_REPO and GITHUB_TOKEN (the project on GitHub; else a git
+ * repository in WORKSPACE stands in for it), WORKSPACE. Not MODEL: each
+ * agent is on its own provider, with its default model.
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
@@ -49,16 +55,17 @@ import { Plan } from './plan.ts';
 
 const coder = opencode.agent({
   name: 'coder',
-  description: "Builds a part of the plan, in the issue's directory",
-  workspace: env.issueWorkspace, // the issue's directory, shared by its coders
-  tools: [...env.linearTools('🛠️ Coder'), env.commit],
-  system: `You build one part of a plan for a Linear issue, in the project's directory.
-Other coders build the other parts in the same directory at the same time: change only the files of your part.
+  description: 'Builds a part of the plan, on a branch of its own, and opens its pull request',
+  workspace: env.coderWorkspace, // a git worktree of the project, on its own branch
+  tools: [...env.linearTools('🛠️ Coder'), env.pullRequestTool('🛠️ Coder')],
+  system: `You build one part of a plan for a Linear issue. Your directory is a git worktree of the project,
+on a branch of your own (git branch --show-current); other coders build the other parts on theirs, at once.
 - If your task names a sub-issue, first move it to "In Progress".
 - Write tests for your part, and run them after each change.
-- Once your tests pass, commit your files with \`commit\` (never git in bash).
-- Then comment on your sub-issue with what you did: its files, and its tests' result. Move it to "Done".
-Answer with what you did, briefly.`,
+- Once your tests pass, commit, push your branch (git push -u origin HEAD), and open a pull request
+  with create_pull_request, into the branch your task names.
+- Then comment on your sub-issue with what you did, its tests' result, and the pull request. Move it to "Done".
+Answer with what you did and the pull request, briefly.`,
 });
 
 const PLANNER = `You plan the work on an issue, from its title and description.
@@ -83,11 +90,15 @@ const triage = pi.agent({
 - Otherwise move it to "In Progress", and ask the planner for a plan, in a task named "plan",
   with the issue's title and description.
 - Comment on the issue with the plan (headed "📐 The plan"), and create a sub-issue of it for each part, titled as the part.
-- Then hand every part to a coder at once, in one step: a task each, named after its part,
-  with its sub-issue, its task and files, and the plan's summary.
-- When they are all done, hand one more task, "integrate", to a coder: run all the tests, and fix what fails.
+- Then hand every part to a coder at once, in one step: a task each, named after its part (such as "parser"),
+  with its sub-issue, its task and files, the plan's summary, and the branch its pull request goes into:
+  the issue's branch, its identifier in lower case (eng-1 for ENG-1).
+- When they are all done, hand one more task, "integrate", to a coder. Its branch is the issue's: it merges
+  each part's branch into it (git merge eng-1-parser, and so on), runs all the tests and fixes what fails,
+  pushes it, and opens a pull request from it into main.
 - End with a summary comment on the issue, headed "✅ Summary": what was built, part by part (with each
-  sub-issue); how to run it and its tests, and whether they pass; and what is left open. Then move it to "In Review".
+  sub-issue and its pull request); the pull request into main; how to run it and its tests, and whether they
+  pass; and what is left open. Then move it to "In Review".
 A comment on the issue comes as Linear's webhook too: answer it with a comment, such as with where the work is.
 If its issue is a sub-issue, answer that you take comments on its parent issue, and stop.
 Answer with what happened to the issue, briefly.`,
