@@ -12,7 +12,7 @@
 # The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
-COPY core/state core/state
+COPY core core
 COPY typescript/packages/sql typescript/packages/sql
 RUN cd typescript/packages/sql && cargo build --locked --release \
   && cp target/release/libsql_node.so sql.node
