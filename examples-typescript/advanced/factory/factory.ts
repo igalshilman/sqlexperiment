@@ -7,13 +7,14 @@
  * moves its issue along Linear's workflow as it goes, and comments on it,
  * with Linear's MCP server.
  *
- *   node advanced/factory/linear.ts                   # Linear (a stand-in), on port 3333
- *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/factory/factory.ts   # in another terminal
- *   npx @restatedev/restate-server                    # Restate, in another terminal
+ *   node advanced/factory/linear.ts             # Linear (a stand-in), on port 3333
+ *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… \
+ *     node advanced/factory/factory.ts          # in another terminal
+ *   npx @restatedev/restate-server              # Restate, in another terminal
  *   npx @restatedev/restate deployments register http://localhost:9080
  *   curl localhost:3333/issues --json '{"title": "A calculator CLI", "description": "calc.py: +, -, *, / on two numbers, and a history of the last 10 results in a file; with tests"}'
- *   curl localhost:3333/issues/ENG-1                   # its state, sub-issues and comments, as the agents work
- *   curl localhost:8080/triage/ENG-1/messages          # what triage did
+ *   curl localhost:3333/issues/ENG-1            # its state, sub-issues and comments, as the agents work
+ *   curl localhost:8080/triage/ENG-1/messages   # what triage did
  *
  * With the real Linear, LINEAR_API_KEY instead of the stand-in, and Linear's
  * webhook pointed at Restate's ingress (see the README).
@@ -27,12 +28,12 @@
  * WORKSPACE. Not MODEL: each agent is on its own provider, with its default
  * model.
  */
-import { chatHandler, object, serve, subagent, webhook } from 'restate-agents';
+import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import * as deepseek from 'restate-agents/deepseek';
 import * as pi from 'restate-agents/pi';
 import { mcpTools } from './mcp.ts';
-import { planOf, PLANS, submitPlan } from './plan.ts';
+import { Plan } from './plan.ts';
 import { workspaceTools } from './workspace.ts';
 
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
@@ -60,36 +61,19 @@ Other coders build the other parts in the same directory at the same time: chang
 Answer with what you did, briefly.`,
 });
 
-const PLANNER = `You plan the work on a Linear issue: read it, then submit a plan with \`submit_plan\`.
+const PLANNER = `You plan the work on a Linear issue: read it, then hand in a plan.
 Divide the work into parts that can be built at the same time, each owning files of its own,
 and each with a task its coder can build from alone (one part, if the issue is small).
 Do not move or comment on the issue: the one who asked does.`;
 
-/**
- * The planner: its answer is the plan it submits, as JSON (`Plan`), not
- * text. It answers through `plan`, a handler of its own: a prompt, then the
- * plan the prompt submitted.
- */
-const planner = object({
-  name: 'planner',
-  schema: PLANS,
-  handlers: {
-    plan: chatHandler(async (ctx, issue) => {
-      await claude.prompt(ctx, issue, { system: PLANNER, tools: [...linear, submitPlan] });
-      return JSON.stringify(await planOf(ctx));
-    }),
-    messages: claude.messages(),
-  },
-});
+/** The planner: its answer is a `Plan`, as JSON, which the model hands in, not text. */
+const planner = claude.agent({ name: 'planner', system: PLANNER, tools: linear, output: Plan });
 
 const triage = pi.agent({
   name: 'triage',
   tools: [
     ...linear,
-    subagent(planner, {
-      handler: 'plan',
-      description: 'a planner, who answers with a plan as JSON: a summary, and parts that can be built at once',
-    }),
+    subagent(planner, { description: 'a planner, who answers with a plan as JSON: a summary, and parts at once' }),
     subagent(coder, { description: 'a coder, who builds a part of the plan in the issue’s directory' }),
   ],
   system: `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook

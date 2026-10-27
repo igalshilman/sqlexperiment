@@ -1,13 +1,9 @@
 /**
  * The planner's answer, structured: a plan the parent can act on, part by
- * part. The planner submits it with a tool, `submit_plan`, whose input is the
- * plan's schema: the model's tool call is checked against it, and the plan
- * is kept in the planner's database, one per invocation, for the `plan`
- * handler to answer with.
+ * part. It is the planner's `output`: the model hands it in with a tool whose
+ * input is this schema, so its call is checked against it, and the planner's
+ * `chat` answers with it.
  */
-import * as restate from '@restatedev/restate-sdk';
-import { tool } from 'restate-agents';
-import type { SqlDatabase } from 'restate-fns';
 import { z } from 'zod';
 
 export const Plan = z.object({
@@ -29,23 +25,3 @@ export const Plan = z.object({
 });
 
 export type Plan = z.infer<typeof Plan>;
-
-/** The plans, the planner's table beside its conversation: the plan of each invocation. */
-export const PLANS = ['CREATE TABLE plans (invocation TEXT PRIMARY KEY, plan TEXT NOT NULL)'];
-
-export const submitPlan = tool({
-  name: 'submit_plan',
-  description: 'Submit your plan: the answer to the one who asked for it. Submit again to change it.',
-  input: Plan,
-  run: async (plan, { ctx }) => {
-    await ctx.db.execute('INSERT OR REPLACE INTO plans VALUES (?, ?)', [ctx.request().id, JSON.stringify(plan)]);
-    return 'submitted';
-  },
-});
-
-/** The plan this invocation submitted. */
-export async function planOf(ctx: { db: SqlDatabase; request(): { id: string } }): Promise<Plan> {
-  const [row] = await ctx.db.query('SELECT plan FROM plans WHERE invocation = ?', [ctx.request().id]);
-  if (!row) throw new restate.TerminalError('The planner submitted no plan');
-  return Plan.parse(JSON.parse(String(row[0])));
-}
