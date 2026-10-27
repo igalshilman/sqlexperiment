@@ -39,14 +39,20 @@ function taskOf(key: string) {
   return { issue, task };
 }
 
+/** The coder `key`'s branch: ENG-1.parser is on eng-1-parser. */
+function branchOf(key: string) {
+  const { issue, task } = taskOf(key);
+  return `${issue.toLowerCase()}-${task}`;
+}
+
 /**
  * The clone of the coder `key`, in `root`: made the first time, on its branch.
  * Each step is done once, so an attempt that failed half way is finished by the next.
  */
 export async function clone(root: string, remote: string, key: string) {
-  const { issue, task } = taskOf(key);
+  const { task } = taskOf(key);
   const dir = resolve(root, key);
-  const branch = `${issue.toLowerCase()}-${task}`; // ENG-1.parser: eng-1-parser
+  const branch = branchOf(key);
   if (await has(dir, `refs/heads/${branch}`)) return dir;
 
   if (!existsSync(join(dir, '.git'))) {
@@ -65,6 +71,19 @@ export async function clone(root: string, remote: string, key: string) {
   const from = (await has(dir, `origin/${branch}`)) ? `origin/${branch}` : 'origin/HEAD';
   await git(dir, 'checkout', '--quiet', '--no-track', '-b', branch, from);
   return dir;
+}
+
+/**
+ * What the coder `key` pushed, as its pull request has it, read in its clone
+ * in `root`: its changes against the default branch, and its files.
+ */
+export function pushed(root: string, key: string) {
+  const dir = resolve(root, key);
+  const branch = `origin/${branchOf(key)}`;
+  return {
+    changes: () => git(dir, 'diff', '--stat', '--patch', `origin/HEAD...${branch}`),
+    file: (path: string) => git(dir, 'show', `${branch}:${path}`),
+  };
 }
 
 /**
