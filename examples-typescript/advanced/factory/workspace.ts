@@ -45,6 +45,12 @@ function branchOf(key: string) {
   return `${issue.toLowerCase()}-${task}`;
 }
 
+/** The coder whose branch `branch` is (eng-1-parser is ENG-1.parser's), or undefined if none's. */
+export function coderOfBranch(branch: string) {
+  const [, issue, task] = /^([a-z][a-z0-9]*-\d+)-([a-z0-9-]+)$/.exec(branch) ?? [];
+  return issue && task ? `${issue.toUpperCase()}.${task}` : undefined;
+}
+
 /**
  * The clone of the coder `key`, in `root`: made the first time, on its branch.
  * Each step is done once, so an attempt that failed half way is finished by the next.

@@ -59,6 +59,12 @@ export interface WebhookOptions<P extends string = string> {
    * The event is the body's JSON, untyped: `key: ({ data }) => data.identifier`.
    */
   key?(this: void, event: WebhookEvent): string | undefined;
+  /**
+   * What of a delivery the agents read, from its body: by default, all of
+   * it. Some systems send much more than an agent needs (GitHub sends the
+   * whole repository with each event): `message: ({ comment }) => ({ body: comment.body })`.
+   */
+  message?(this: void, event: WebhookEvent): unknown;
 }
 
 /**
@@ -111,6 +117,7 @@ export const webhook = <P extends string>({
   idempotencyHeader,
   route,
   key,
+  message,
 }: WebhookOptions<P>) => {
   if (route.length === 0) throw new Error(`webhook ${name}: route it to at least one agent`);
   for (const agent of route) {
@@ -143,7 +150,7 @@ export const webhook = <P extends string>({
           const delivery = (idempotencyHeader && headers.get(idempotencyHeader)) || ctx.request().id;
           const to = key ? key(event) : delivery;
           if (to === undefined) return;
-          const text = webhookMessage(name, delivery, event);
+          const text = webhookMessage(name, delivery, message ? message(event) : event);
           for (const agent of route) deliver(ctx, agent, to, text, { idempotencyKey: `webhook:${name}:${delivery}` });
         },
       ),

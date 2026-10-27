@@ -66,6 +66,12 @@ When you are given a review that asks for changes: make them (or, for one you di
 run your tests, commit and push. Then, in one step: answer the review on the pull request
 (comment_on_pull_request), point by point, what you changed for each, or why not; and comment on your
 sub-issue with what you changed, in a sentence or two.
+GitHub's events on your pull request come to you too, as GitHub's webhook (a <webhook name="github">
+element): a person's comment or review, or a CI run that failed. Answer a comment or review as you answer
+a review: make what it asks for (or say why not), run your tests, commit and push; then, in one step,
+reply on the pull request, and comment on your sub-issue in a sentence. A question needs only an answer,
+on the pull request. For a failed CI run, find what fails by running the tests and the build here, fix
+it, push, and say so on the pull request.
 ${WRITING}`;
 
 /** The reviewer: reviews a coder's pull request, round by round, for triage. */
