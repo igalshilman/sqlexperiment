@@ -9,8 +9,10 @@ import { serve, subagent, webhook } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 import * as env from './env.ts';
+import * as github from './github.ts';
 import { Built, Plan, Review } from './answers.ts';
 import * as prompts from './prompts.ts';
+import { byAnAgent } from './signatures.ts';
 
 /**
  * Each agent on a model for its work: triage, which coordinates, and the
@@ -65,16 +67,31 @@ const triage = pi.agent({
 const linearEvents = webhook({
   name: 'linear',
   description: "Linear's new issues, and comments on them, to triage",
-  auth: env.webhookAuth,
+  auth: env.linearWebhookAuth,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
   // The event's shape: https://linear.app/developers/webhooks
   key: ({ type, action, data }) => {
     if (action !== 'create') return undefined;
     if (type === 'Issue' && !data.parentId) return data.identifier;
-    if (type === 'Comment' && !env.byAnAgent(data.body)) return data.issue.identifier;
+    if (type === 'Comment' && !byAnAgent(data.body)) return data.issue.identifier;
     return undefined;
   },
 });
 
-await serve(linearEvents, triage, planner, coder, reviewer);
+/**
+ * GitHub's events, to the coder of each pull request: a person's comment on
+ * it or review of it, and a CI run on its branch that failed. Anything else
+ * is dropped. See github.ts.
+ */
+const githubEvents = webhook({
+  name: 'github',
+  description: "GitHub's comments, reviews and failed CI runs on the coders' pull requests, to their coders",
+  auth: github.webhookAuth,
+  idempotencyHeader: 'x-github-delivery',
+  route: [coder],
+  key: github.coderOf,
+  message: github.whatHappened,
+});
+
+await serve(linearEvents, githubEvents, triage, planner, coder, reviewer);

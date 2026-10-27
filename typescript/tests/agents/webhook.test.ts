@@ -72,6 +72,23 @@ describe('a webhook', () => {
     await expect(deliver(['ENG-1'])).rejects.toMatchObject({ code: 400 });
   });
 
+  it('delivers what `message` takes of the body, if it has one', async () => {
+    const trimmed = webhook({
+      name: 'linear',
+      route: [triage],
+      key: ({ data }) => data.identifier,
+      message: ({ action }) => ({ action }),
+    });
+    const run = (trimmed as unknown as { service: { webhook: Handler } }).service.webhook;
+    const sent: { text: string }[] = [];
+    const ctx = {
+      request: () => ({ id: 'inv_1', headers: new Map() }),
+      objectSendClient: () => ({ deliver: (input: { text: string }) => sent.push(input) }),
+    };
+    await run(ctx, new TextEncoder().encode(JSON.stringify(created)));
+    expect(sent.map((s) => s.text)).toEqual([webhookMessage('linear', 'inv_1', { action: 'create' })]);
+  });
+
   it('drops a delivery its key gives no key for', async () => {
     expect(await deliver({ action: 'update', data: { identifier: 'ENG-1' } })).toEqual([]);
   });

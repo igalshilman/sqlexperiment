@@ -8,7 +8,9 @@
  */
 import { type Tool, tool, type WebhookAuth } from 'restate-agents';
 import { z } from 'zod';
+import { pullRequestMark } from './github.ts';
 import { mcpTools } from './mcp.ts';
+import { signer } from './signatures.ts';
 import { clone, project, pushed, standInRemote } from './workspace.ts';
 
 const apiKey = process.env.LINEAR_API_KEY;
@@ -17,20 +19,11 @@ const { GITHUB_REPO: repo, GITHUB_TOKEN: token } = process.env;
 if (repo && !token) throw new Error(`GITHUB_REPO is ${repo}: set GITHUB_TOKEN too, a token that can push to it`);
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
 
-/** Who wrote a comment or a pull request: the agent `who`, and its part, if it works on one (`ENG-1.parser`). */
-const signature = (who: string, key: string) => {
-  const part = key.split('.')[1];
-  return `**${who}${part ? ` · ${part}` : ''}**`;
-};
-
 /** Linear's tools (issues, sub-issues, states, comments), from its MCP server. */
 const linear = apiKey
   ? await mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
   : await mcpTools('http://localhost:3333/mcp');
 console.log(`Linear's tools: ${linear.map((t) => t.name).join(', ')}`);
-
-/** The agents that write in Linear, by the name they sign with ("🧭 Triage"). */
-const writers = new Set<string>();
 
 /**
  * Linear's tools for the agent `who` (such as "🧭 Triage"): what it writes,
@@ -39,7 +32,7 @@ const writers = new Set<string>();
  * as one Linear user: this tells them apart.
  */
 export const linearTools = (who: string): Tool[] => {
-  writers.add(who);
+  const sign = signer(who);
   return linear.map((t) =>
     tool({
       name: t.name,
@@ -48,7 +41,7 @@ export const linearTools = (who: string): Tool[] => {
       run: (input, call) => {
         const field = writing(t, input);
         if (!field) return t.run(input, call);
-        return t.run({ ...input, [field]: `${signature(who, call.ctx.key)}\n\n${String(input[field])}` }, call);
+        return t.run({ ...input, [field]: sign(call.ctx.key, String(input[field])) }, call);
       },
     }),
   );
@@ -68,18 +61,8 @@ function writing(t: Tool, input: Record<string, unknown>) {
   return undefined;
 }
 
-/**
- * Whether `text`, a comment's body, is an agent's: it opens with its
- * signature. The agents' comments come back as webhooks, and are not for
- * triage; yours are, whichever Linear user the factory acts as.
- */
-export const byAnAgent = (text: string) => {
-  const opening = text.trimStart().replace(/^\*\*/, '');
-  return [...writers].some((who) => opening.startsWith(who));
-};
-
 /** How Linear signs its webhooks, if there is a secret to check them with. */
-export const webhookAuth: WebhookAuth | undefined = webhookSecret
+export const linearWebhookAuth: WebhookAuth | undefined = webhookSecret
   ? { header: 'linear-signature', secret: webhookSecret }
   : undefined;
 
@@ -103,11 +86,13 @@ let standInPulls = 0;
 
 /**
  * `create_pull_request` for the agent `who`: a pull request of the project,
- * whose description opens with who opened it. On the stand-in, a pull request
+ * whose description opens with who opened it, and ends with a mark of its
+ * coder (hidden, for GitHub's webhook: see github.ts). On the stand-in, a pull request
  * is only logged: the branches are in the stand-in's repository.
  */
-export const pullRequestTool = (who: string) =>
-  tool({
+export const pullRequestTool = (who: string) => {
+  const sign = signer(who);
+  return tool({
     name: 'create_pull_request',
     description: 'Open a pull request of the project: from the branch `head` into `base`. Answers with its link.',
     input: z.object({
@@ -117,7 +102,7 @@ export const pullRequestTool = (who: string) =>
       base: z.string().describe('The branch it goes into'),
     }),
     run: async ({ title, body, head, base }, call) => {
-      const described = `${signature(who, call.ctx.key)}\n\n${body}`;
+      const described = `${sign(call.ctx.key, body)}\n\n${pullRequestMark(call.ctx.key)}`;
       if (!createPullRequest) {
         console.log(`pull request #${++standInPulls}: ${head} → ${base}, "${title}"`);
         return `Pull request #${standInPulls}, ${head} → ${base} (on the stand-in: ${remote})`;
@@ -126,6 +111,7 @@ export const pullRequestTool = (who: string) =>
       return createPullRequest.run({ owner, repo: name, title, body: described, head, base }, call);
     },
   });
+};
 
 /** What a read of a pull request answers: what it read, or why it could not. */
 const reading = (read: () => Promise<string>) =>
@@ -160,8 +146,9 @@ export const reviewTools = (who: string): Tool[] => [
  * signed, such as a review, or a coder's answer to one. On the stand-in, a
  * comment is only logged.
  */
-export const pullRequestCommentTool = (who: string) =>
-  tool({
+export const pullRequestCommentTool = (who: string) => {
+  const sign = signer(who);
+  return tool({
     name: 'comment_on_pull_request',
     description: 'Comment on a pull request: a review, or an answer to one',
     input: z.object({
@@ -169,7 +156,7 @@ export const pullRequestCommentTool = (who: string) =>
       body: z.string().describe('The comment, in Markdown'),
     }),
     run: async ({ number, body }, call) => {
-      const signed = `${signature(who, call.ctx.key)}\n\n${body}`;
+      const signed = sign(call.ctx.key, body);
       if (!addComment) {
         console.log(`comment on pull request #${number}:\n${signed}`);
         return 'Posted (on the stand-in: logged)';
@@ -178,3 +165,4 @@ export const pullRequestCommentTool = (who: string) =>
       return addComment.run({ owner, repo: name, issue_number: number, body: signed }, call);
     },
   });
+};

@@ -11,7 +11,9 @@ pull request, triage has a reviewer (pi) review it, which posts its
 review on the pull request; triage hands the changes it asks for back to the
 coder, and has it reviewed again, until it approves. With every pull request
 approved, triage marks the issue Done, and leaves the merging to people.
-Triage and the coders move their issues along the team's workflow, and
+And people can talk to a coder on its pull request: GitHub's webhook takes
+their comments and reviews, and a failed CI run, to the coder of the pull
+request, which answers there, and pushes. Triage and the coders move their issues along the team's workflow, and
 comment on them, through Linear's MCP server: on the real Linear, or on a
 stand-in, [`linear.ts`](linear.ts), with the same tools.
 
@@ -122,15 +124,39 @@ to **Canceled**.
 
 ## The files
 
-| File                           | What                                                                                                                                       |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner, coders and a reviewer as subagents                               |
-| [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests, and the reviewer's tools |
-| [`answers.ts`](answers.ts)     | The agents' structured answers (`output`): the planner's plan, the reviewer's review, a coder's pull request                               |
-| [`prompts.ts`](prompts.ts)     | The agents' system prompts: triage's, the planner's, a coder's, the reviewer's                                                             |
-| [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                                                |
-| [`workspace.ts`](workspace.ts) | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
-| [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
+| File                             | What                                                                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`factory.ts`](factory.ts)       | The webhook receiver, and the agents: triage, the parent, with a planner, coders and a reviewer as subagents                               |
+| [`env.ts`](env.ts)               | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests, and the reviewer's tools |
+| [`answers.ts`](answers.ts)       | The agents' structured answers (`output`): the planner's plan, the reviewer's review, a coder's pull request                               |
+| [`prompts.ts`](prompts.ts)       | The agents' system prompts: triage's, the planner's, a coder's, the reviewer's                                                             |
+| [`mcp.ts`](mcp.ts)               | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts                                                |
+| [`github.ts`](github.ts)         | GitHub's webhook: the coder an event on a pull request is for, and what of the event it reads                                              |
+| [`signatures.ts`](signatures.ts) | The agents' signatures, on what they write, and how the factory tells their comments from people's                                         |
+| [`workspace.ts`](workspace.ts)   | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
+| [`linear.ts`](linear.ts)         | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
+
+## Talk to a coder, on its pull request
+
+GitHub's webhook, at `/github/webhook` ([`github.ts`](github.ts)), takes an
+event on a coder's pull request to that coder (`coder/ENG-1.parser`): to the
+turn it is in, if it is in one, or else as a message of its own. Its
+conversation has its work, and its clone its branch, so it picks up where it
+left off.
+
+| GitHub's event                                          | What the coder does                               |
+| ------------------------------------------------------- | ------------------------------------------------- |
+| A comment on the pull request, or on a line of its code | Makes what it asks for, pushes, and answers there |
+| A review                                                | The same, point by point                          |
+| A CI run on its branch that failed                      | Finds what fails, here, fixes it, pushes, says so |
+
+The coder of a pull request is in a hidden mark at the end of its
+description (`<!-- coder: ENG-1.parser -->`), which each event on it has; a
+CI run's, by its branch (`eng-1-parser`). The agents' own comments come back
+too, and are dropped: they open with a signature
+([`signatures.ts`](signatures.ts)). What the coder reads is what happened, on
+which pull request, and who did it: GitHub sends the whole repository with
+each event, which `webhook()`'s `message` leaves out.
 
 ## Run it, on the stand-in
 
@@ -161,6 +187,15 @@ curl localhost:8080/reviewer/ENG-1.parser/messages # its reviewer's: the reviews
 curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
 ```
 
+Without GitHub, play it: post a comment's event on the parser's pull
+request, as GitHub would, and the coder answers it (in its messages; on the
+stand-in, its comment on the pull request is printed):
+
+```sh
+curl localhost:8080/github/webhook --json '{"action": "created", "comment": {"body": "Could you name it parse_expression?"},
+  "issue": {"number": 1, "pull_request": {}, "body": "<!-- coder: ENG-1.parser -->"}, "sender": {"login": "you"}}'
+```
+
 Restate's UI, at http://localhost:9070, shows the same work as calls:
 triage's, and the planner's, coders' and reviewer's under it.
 
@@ -185,8 +220,12 @@ requests. Use a team and a repository of their own, for the factory.
    MCP server (`https://mcp.linear.app/mcp`) as a bearer token. The agents
    sign what they write, so the factory tells its comments from yours
    either way.
-2. **Restate, reachable by Linear**: a tunnel to Restate's ingress, such as
-   `cloudflared tunnel --url http://localhost:8080` (or `ngrok http 8080`).
+2. **Restate, reachable by Linear and GitHub**: a tunnel to Restate's
+   ingress, such as `cloudflared tunnel --url http://localhost:8080` (or
+   `ngrok http 8080`). Its URL is public, and opens all of the ingress, the
+   agents too: for more than a demo, a tunnel that opens only
+   `/linear/webhook` and `/github/webhook` (a named cloudflared tunnel, with
+   an ingress rule of their path).
 3. **A webhook**: in Linear's settings, under API, a webhook to
    `https://<the tunnel>/linear/webhook`, for Issues and Comments, on the
    factory's team only. Its signing secret is `LINEAR_WEBHOOK_SECRET`.
@@ -203,10 +242,16 @@ requests. Use a team and a repository of their own, for the factory.
    request on GitHub: the factory's approval shows in Linear). With Linear's GitHub
    integration, a pull request shows on its issue too: its branch names it
    (`eng-1-parser`).
+6. **GitHub's webhook**: in the repository's settings, under Webhooks, a
+   webhook to `https://<the tunnel>/github/webhook`, its content type
+   `application/json`, and a secret of yours (`openssl rand -hex 32`):
+   `GITHUB_WEBHOOK_SECRET`. Its events: Issue comments, Pull request
+   reviews, Pull request review comments, and Workflow runs (for CI). Its
+   Recent Deliveries show each event, and what the factory answered.
 
 ```sh
 LINEAR_API_KEY=lin_api_… LINEAR_WEBHOOK_SECRET=lin_wh_… \
-GITHUB_REPO=igalshilman/demos GITHUB_TOKEN=github_pat_… \
+GITHUB_REPO=igalshilman/demos GITHUB_TOKEN=github_pat_… GITHUB_WEBHOOK_SECRET=… \
 OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   node advanced/factory/factory.ts
 npx @restatedev/restate-server              # and register the factory, as above
@@ -215,7 +260,8 @@ npx @restatedev/restate-server              # and register the factory, as above
 Then create an issue on the team, in Linear: it moves as the agents work,
 and its sub-issues appear, each moving on its own. Comment on the issue
 ("How is it going?"): triage answers there. While it waits for its coders,
-it takes the comment once they answer.
+it takes the comment once they answer. Comment on a pull request, or review
+it, on GitHub: its coder answers there, and pushes what you asked for.
 
 ## What it shows
 
@@ -231,7 +277,9 @@ it takes the comment once they answer.
   message's idempotency key: it reaches the same message, not a second
   one. With a secret, a webhook that Linear did not sign is refused (401).
   Its routes, auth and idempotency header are in the handler's metadata,
-  in the admin API and the UI.
+  in the admin API and the UI. A second, `github`, takes GitHub's events to
+  the coders, each to the coder of its pull request, with only what it needs
+  of the event (`message`).
 - **Structured answers from agents**: the planner's answer is a `Plan`, the
   reviewer's a `Review`, a coder's what it `Built` (its pull request): the
   model's reply checked against its schema
