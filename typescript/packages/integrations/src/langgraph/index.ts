@@ -259,7 +259,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   ctx: restate.ObjectContext,
   text: string,
   options: Options<O> = {},
-): Promise<Answer<O>> => withOutput(ctx, text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
+): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
 
 /**
  * A chat handler: each message an invocation, the thread (the object's key)

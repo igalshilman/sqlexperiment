@@ -10,7 +10,8 @@
 // answered, and `steer` adds to it; `follow` gives the conversation as it
 // changes; a message may be plain text; a webhook's delivery goes to the
 // message being answered, once, or else is a message of its own, and is
-// answered after a turn that is stopped;
+// answered after a turn that is stopped; `clear` forgets a conversation,
+// stopping its turn;
 // and a handler's terminal error is the tool's answer.
 //
 //   RESTATE_SERVER=/path/to/restate-server node restate-tools.ts   (or make tools-test)
@@ -92,7 +93,7 @@ const triage = restate.workflow({
 });
 
 // Deliveries to the support agent, keyed by the customer they are about.
-const hooks = webhook<{ customer: string; note: string }>({
+const hooks = webhook({
   name: 'hooks',
   idempotencyHeader: 'x-delivery',
   route: [support],
@@ -283,6 +284,33 @@ try {
     ['assistant', 'refund({"order":"103"}): refunded 103'],
     ['assistant', 'order 103: delivered / approved / refunded 103'],
   ]);
+
+  // `clear` forgets a conversation, and its followers see it empty; with a
+  // message being answered, it stops it, and the next message starts anew.
+  const before = (await henry.notifications()).revision;
+  assert.deepEqual(await henry.clear(), { stopped: null });
+  assert.deepEqual((await henry.messages()).messages, []);
+  assert.ok((await henry.notifications()).revision > before);
+  const pats = await ingress
+    .objectSendClient(agent('support'), 'pat')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-pat' }));
+  await waits('support/pat');
+  const pat = ingress.objectClient(agent('support'), 'pat');
+  const forgotten = await pat.messages();
+  assert.deepEqual(await pat.clear(), { stopped: pats.invocationId });
+  await assert.rejects(ingress.result(pats), /409/);
+  assert.deepEqual(await pat.status(), { answering: null, waiting: [] });
+  assert.deepEqual(await pat.pending(), []);
+  assert.deepEqual((await pat.messages()).messages, []);
+  await pat.signal({ name: 'approval', value: 'approved', keep: true });
+  assert.match(await pat.chat('Refund order 103'), /refunded 103$/);
+  assert.equal(lines((await pat.messages()).messages).length, 5);
+  // Its ids and cursors go on: a follower reads on, and drops what came before `first`.
+  const anew = await pat.messages({ cursor: forgotten.cursor });
+  assert.equal(anew.messages.length, 5);
+  assert.equal(anew.first, forgotten.messages.at(-1)!.id + 1);
+  assert.equal(anew.messages[0]!.id, anew.first);
+
   /** Post a delivery of `note` about `customer`, as delivery `id`, and wait until the agent's signals have it. */
   const hook = async (customer: string, note: string, id: string) => {
     const response = await fetch(`${INGRESS}/hooks/webhook`, {

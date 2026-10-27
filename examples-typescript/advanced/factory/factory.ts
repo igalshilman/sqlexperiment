@@ -24,26 +24,20 @@
  * real commands, on this machine, in WORKSPACE/<issue>
  * (/tmp/restate-factory by default): run it in a sandbox (a container, a VM).
  *
- * Environment: LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET (the real Linear),
- * WORKSPACE. Not MODEL: each agent is on its own provider, with its default
- * model.
+ * Environment (env.ts): LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET (the real
+ * Linear), WORKSPACE. Not MODEL: each agent is on its own provider, with its
+ * default model.
  */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
 import * as deepseek from 'restate-agents/deepseek';
 import * as pi from 'restate-agents/pi';
-import { mcpTools } from './mcp.ts';
+import { linearSignature, linearTools, workspace } from './env.ts';
 import { Plan } from './plan.ts';
 import { workspaceTools } from './workspace.ts';
 
-const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
-const apiKey = process.env.LINEAR_API_KEY;
-const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
-
-/** Linear's tools (issues, sub-issues, states, comments): the real Linear's with an API key, or the stand-in's. */
-const linear = apiKey
-  ? await mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
-  : await mcpTools('http://localhost:3333/mcp');
+/** Linear's tools: issues, sub-issues, states, comments. */
+const linear = await linearTools();
 
 /** The issue a key is about: `ENG-1`, of `ENG-1.parser`. */
 const issueOf = (key: string) => key.split('.')[0]!;
@@ -89,24 +83,19 @@ const triage = pi.agent({
 Answer with what happened to the issue, briefly.`,
 });
 
-/** A Linear webhook (https://linear.app/developers/webhooks), the part the factory reads. */
-interface LinearWebhook {
-  action: 'create' | 'update' | 'remove';
-  type: string;
-  data: { identifier: string; parentId?: string | null };
-}
-
 /**
  * Linear's webhooks, at `/linear/webhook`: each new issue goes to the triage
- * agent, keyed by the issue; a sub-issue (the planner's own) does not.
+ * agent, keyed by the issue; a sub-issue (triage's own) does not. A webhook
+ * is Linear's JSON (https://linear.app/developers/webhooks): `type`,
+ * `action`, and the issue as `data`.
  * Linear sends a webhook again until it is answered, with the same
  * `linear-delivery`: it reaches the same message. With LINEAR_WEBHOOK_SECRET,
  * a webhook Linear did not sign is refused.
  */
-const issues = webhook<LinearWebhook>({
+const issues = webhook({
   name: 'linear',
   description: "Linear's new issues, to triage",
-  auth: webhookSecret ? { header: 'linear-signature', secret: webhookSecret } : undefined,
+  auth: linearSignature,
   idempotencyHeader: 'linear-delivery',
   route: [triage],
   key: ({ type, action, data }) =>

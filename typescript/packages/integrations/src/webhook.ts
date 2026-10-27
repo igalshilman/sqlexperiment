@@ -4,7 +4,7 @@
 // from: to the message an agent answers, if it answers one, or else as a
 // message of its own.
 //
-//   const issues = webhook<LinearWebhook>({
+//   const issues = webhook({
 //     name: 'linear',
 //     auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
 //     idempotencyHeader: 'linear-delivery',
@@ -29,8 +29,15 @@ export interface WebhookAuth {
 /** An agent (an `object()` or `agent()` of restate-agents, with a `chat` handler) that webhooks go to. */
 type Route = restate.VirtualObjectDefinition<string, { chat: unknown }>;
 
+/**
+ * A delivery's body: JSON, as the other system sends it, read as it is (it is
+ * theirs to shape, not checked here).
+ */
+// oxlint-disable-next-line typescript/no-explicit-any
+export type WebhookEvent = Record<string, any>;
+
 /** A webhook service's options. */
-export interface WebhookOptions<T, P extends string> {
+export interface WebhookOptions<P extends string = string> {
   /** The service's name, which its URL starts with: `/<name>/webhook`. */
   name: P;
   /** What the webhook is, for the UI and the admin API. */
@@ -50,7 +57,7 @@ export interface WebhookOptions<T, P extends string> {
    * (the issue, say: one conversation per issue), or undefined to drop the
    * delivery. By default, the delivery's id: a conversation per delivery.
    */
-  key?: (event: T) => string | undefined;
+  key?: (event: WebhookEvent) => string | undefined;
 }
 
 /**
@@ -71,13 +78,18 @@ const signed = (body: Uint8Array, signature: string | undefined, secret: string)
   return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
-/** `body` as JSON, or a terminal error (400) if it is not. */
-const parsed = (body: Uint8Array): unknown => {
+/** `body` as a JSON object, or a terminal error (400) if it is not. */
+const parsed = (body: Uint8Array): WebhookEvent => {
+  let event: unknown;
   try {
-    return JSON.parse(new TextDecoder().decode(body));
+    event = JSON.parse(new TextDecoder().decode(body));
   } catch {
     throw new restate.TerminalError('The webhook is not JSON', { errorCode: 400 });
   }
+  if (typeof event !== 'object' || event === null || Array.isArray(event)) {
+    throw new restate.TerminalError('The webhook is not a JSON object', { errorCode: 400 });
+  }
+  return event;
 };
 
 /**
@@ -91,14 +103,14 @@ const parsed = (body: Uint8Array): unknown => {
  * answer (Linear, GitHub) gets one at once. What it is (its routes, auth and
  * idempotency) is in the handler's metadata, which the admin API shows.
  */
-export const webhook = <T = unknown, P extends string = string>({
+export const webhook = <P extends string>({
   name,
   description,
   auth,
   idempotencyHeader,
   route,
   key,
-}: WebhookOptions<T, P>) => {
+}: WebhookOptions<P>) => {
   if (route.length === 0) throw new Error(`webhook ${name}: route it to at least one agent`);
   for (const agent of route) {
     if (!hasCompanion(agent)) throw new Error(`webhook ${name}: ${agent.name} is not an object() or agent()`);
@@ -126,7 +138,7 @@ export const webhook = <T = unknown, P extends string = string>({
           if (auth && !signed(body, headers.get(auth.header), auth.secret)) {
             throw new restate.TerminalError(`Not signed: no valid ${auth.header}`, { errorCode: 401 });
           }
-          const event = parsed(body) as T;
+          const event = parsed(body);
           const delivery = (idempotencyHeader && headers.get(idempotencyHeader)) || ctx.request().id;
           const to = key ? key(event) : delivery;
           if (to === undefined) return;

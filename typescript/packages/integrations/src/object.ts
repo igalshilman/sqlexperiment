@@ -1,6 +1,7 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-fns';
 import { type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
+import * as log from './log.ts';
 import {
   agentOf,
   type Notifications,
@@ -43,7 +44,8 @@ export interface Stopped {
  * `pending`, the waits, `status`, what the object is doing, `stop`, which
  * stops the message it answers, `steer`, which adds to it, and
  * `notifications` and `watch`, the revision of its conversation, and a wait
- * for a newer one (an agent's has `sync` too: `FOLLOWED`). They are shared, so they run while the object's handler
+ * for a newer one, and `clear`, which forgets it all (an agent's has `sync`
+ * too: `FOLLOWED`). They are shared, so they run while the object's handler
  * works, and replay their journal: they use no `ctx.db`.
  */
 const BUILT_IN = {
@@ -70,6 +72,20 @@ const BUILT_IN = {
     if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
     return { stopped: turn?.invocationId ?? null } satisfies Stopped;
   }),
+  /**
+   * Forget everything of this key: stop the message being answered (as
+   * `stop`), then clear its conversation, database and state, and what its
+   * `signals` hold (waits, kept signals, steered messages). Its revision
+   * goes on, so followers see the conversation empty. A message sent before
+   * it is answered first, then forgotten too; one sent after starts anew.
+   */
+  clear: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
+    const turn = await ctx.get<Turn>(TURN);
+    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
+    await own(ctx, 'erase');
+    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
+  }),
+  erase: eraser(false),
   /**
    * Add `text` to the message being answered (`status`'s), such as "Only
    * Monday, please": the agent takes it at its next tool call, as its
@@ -112,6 +128,7 @@ const BUILT_IN = {
  * once while it has `more`.
  */
 const FOLLOWED = {
+  erase: eraser(true),
   sync: restate.handlers.object.shared(
     { journalReplay: true },
     async (
@@ -128,6 +145,29 @@ const FOLLOWED = {
     },
   ),
 };
+
+/**
+ * @internal `clear`'s work, once the object's handlers before it are done:
+ * clear its state (its database too), and its signals'. An agent's log
+ * (`followed`) goes on where it got to: see log.ts.
+ */
+function eraser(followed: boolean) {
+  return restate.handlers.object.exclusive(
+    { journalReplay: true, ingressPrivate: true },
+    async (ctx: restate.JournaledObjectContext) => {
+      const start = followed ? startAfter(await own<Messages>(ctx, 'messages', { limit: 1 })) : null;
+      ctx.clearAll();
+      if (start) ctx.set(log.START, start);
+      await ctx.objectClient(signals, signalsOf(ctx)).reset();
+    },
+  );
+}
+
+/** Where the log starts after `latest`, its latest message: past its ids and cursor. */
+const startAfter = ({ messages: [latest], cursor, first = 0 }: Messages): log.Start => ({
+  seq: cursor,
+  id: latest ? latest.id + 1 : first,
+});
 
 /** A call of a handler of the object of `ctx`, the same key. */
 const own = <O>(ctx: restate.JournaledObjectSharedContext, method: string, parameter?: unknown) =>
@@ -205,8 +245,9 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  * Besides its own handlers, it has `status`, what it is doing (the message
  * it answers, and what its tools wait for), `stop`, which stops that
  * message, `steer`, which adds to it, `pending`, the waits of its tools
- * (`signal()`), `signal({ id, value })`, which resolves one, and
- * `notifications` and `watch({ revision })`, to follow its conversation.
+ * (`signal()`), `signal({ id, value })`, which resolves one,
+ * `notifications` and `watch({ revision })`, to follow its conversation,
+ * and `clear`, which forgets it (its database and state too).
  * An agent, an object with a `messages` handler (such as `claude.messages()`),
  * has `sync` too, which `follow()` of restate-agents/client reads.
  *

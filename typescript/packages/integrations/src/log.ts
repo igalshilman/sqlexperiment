@@ -9,11 +9,27 @@
 // transcript replaced (compacted, reset) leaves its messages in the log, and
 // the messages after them are new ones. So a client reads from a cursor, and
 // gets each message that is new or changed since, once.
+//
+// `clear` forgets the log with the rest of the conversation, but not where it
+// got to: the next conversation's ids and cursors go on from there
+// (`START`), so a client following it reads on, and drops the messages
+// before `first`.
 import type { SqlSession } from 'restate-fns';
 import { Schema } from 'restate-fns/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
 const TABLE = 'restate_agent_log';
+
+/** Where the log starts: past the ids and cursors of the conversations `clear` forgot. */
+export interface Start {
+  /** The cursor it starts at. */
+  seq: number;
+  /** Its first message's id. */
+  id: number;
+}
+
+/** The agent's state key of its log's {@link Start}, which `clear` sets: none before. */
+export const START = 'restate-agents.log.start';
 
 /** A message as the transcript gives it: its role and parts, without an id. */
 export type Said = Omit<ChatMessage, 'id'>;
@@ -31,7 +47,7 @@ const SCHEMA = new Schema('restate-agents.log', [
  * Store the transcript's `messages`, in order, in the log: those that
  * changed since the last time, in one transaction.
  */
-export async function sync(db: SqlSession, messages: Said[]) {
+export async function sync(db: SqlSession, messages: Said[], start: () => Promise<Start | null>) {
   await SCHEMA.ensure(db);
   const head = (await db.query(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
     ([id, message]) => ({ id: Number(id), message: JSON.parse(String(message)) as Said }),
@@ -42,11 +58,12 @@ export async function sync(db: SqlSession, messages: Said[]) {
   let grown = same;
   while (grown < both && grownFrom(messages[grown]!, head[grown]!.message)) grown += 1;
   if (same === head.length && same === messages.length) return;
-  const [[last, next]] = (await db.query(`SELECT COALESCE(MAX(seq), 0), COALESCE(MAX(id), -1) + 1 FROM ${TABLE}`)) as [
-    [number, number],
+  const [[last, next]] = (await db.query(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
+    [number | null, number | null],
   ];
-  let seq = last;
-  let id = next;
+  const from = last === null ? ((await start()) ?? { seq: 0, id: 0 }) : { seq: last, id: next! };
+  let seq = from.seq;
+  let id = from.id;
   await db.transaction(async (tx) => {
     for (let position = same; position < grown; position += 1) {
       await tx.execute(`UPDATE ${TABLE} SET seq = ?, message = ? WHERE id = ?`, [
@@ -74,8 +91,13 @@ export async function sync(db: SqlSession, messages: Said[]) {
  * `limit` messages (or those before `before`, an id), oldest first, and the
  * cursor to follow the conversation from.
  */
-export async function page(db: SqlSession, { limit = 50, before, cursor }: MessagesRequest = {}): Promise<Messages> {
+export async function page(
+  db: SqlSession,
+  { limit = 50, before, cursor }: MessagesRequest,
+  start: Start | null,
+): Promise<Messages> {
   await SCHEMA.ensure(db);
+  const first = start ? { first: start.id } : {};
   if (cursor !== undefined) {
     const rows = await db.query(`SELECT id, message, seq FROM ${TABLE} WHERE seq > ? ORDER BY seq LIMIT ?`, [
       cursor,
@@ -86,14 +108,20 @@ export async function page(db: SqlSession, { limit = 50, before, cursor }: Messa
       messages: shown.map(message),
       more: rows.length > limit,
       cursor: shown.length > 0 ? Number(shown.at(-1)![2]) : cursor,
+      ...first,
     };
   }
-  const [[now]] = (await db.query(`SELECT COALESCE(MAX(seq), 0) FROM ${TABLE}`)) as [[number]];
+  const [[now]] = (await db.query(`SELECT COALESCE(MAX(seq), ?) FROM ${TABLE}`, [start?.seq ?? 0])) as [[number]];
   const rows = await db.query(`SELECT id, message FROM ${TABLE} WHERE id < ? ORDER BY id DESC LIMIT ?`, [
     before ?? Number.MAX_SAFE_INTEGER,
     limit + 1,
   ]);
-  return { messages: rows.slice(0, limit).toReversed().map(message), more: rows.length > limit, cursor: now };
+  return {
+    messages: rows.slice(0, limit).toReversed().map(message),
+    more: rows.length > limit,
+    cursor: now,
+    ...first,
+  };
 }
 
 /** A row of the log, as `messages` gives it. */

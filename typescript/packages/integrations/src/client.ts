@@ -48,6 +48,8 @@ export interface Agent {
   status(ctx: unknown): Promise<Status>;
   /** Stop the message it answers: cancel its invocation. */
   stop(ctx: unknown): Promise<Stopped>;
+  /** Forget the conversation (stopping the message it answers): its database and state too. */
+  clear(ctx: unknown): Promise<Stopped>;
   /** Add `message` to the message it answers, at its next tool call (or answer it as a message of its own). */
   steer(ctx: unknown, message: string): Promise<Steered>;
   /** What its tools wait for. */
@@ -76,6 +78,11 @@ export interface Followed {
    * its `id`, which a UI keeps them by, and orders them by.
    */
   messages: ChatMessage[];
+  /**
+   * The id of the conversation's first message: one kept from before is
+   * gone (`clear` forgot it), and a UI drops it.
+   */
+  first: number;
   /** Where this leaves off: `follow(..., { cursor })` carries on from here, later or elsewhere. */
   cursor: number;
   /** What the agent's tools wait for now (`status.waiting`). */
@@ -157,7 +164,13 @@ export async function* follow(
     if (!synced) return;
     // Nothing changed (the wait timed out): wait again.
     if (synced.revision !== revision || synced.messages.length > 0) {
-      yield { status: synced.status, messages: synced.messages, cursor: synced.cursor, waiting: synced.status.waiting };
+      yield {
+        status: synced.status,
+        messages: synced.messages,
+        first: synced.first ?? 0,
+        cursor: synced.cursor,
+        waiting: synced.status.waiting,
+      };
     }
     cursor = synced.cursor;
     // With more to read, at once; else once something changes.

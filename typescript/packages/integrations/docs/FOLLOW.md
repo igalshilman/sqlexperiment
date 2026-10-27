@@ -98,6 +98,10 @@ turn holds it open):
   with its output) keeps its `id` and takes a new `seq`; a transcript that
   is replaced (compacted, reset) leaves its messages in the log, and the ones
   after them are new.
+- `clear` forgets the log, not where it got to (`restate-agents.log.start`
+  in the agent's state): the next conversation's ids and cursors go on from
+  there, and a page gives `first`, its first id, so a follower drops what it
+  kept from before.
 - `messages({ cursor })` gives what is new or changed since a cursor, and the
   next one; `messages({ limit, before })` a page by `id`, and the cursor to
   follow on from.

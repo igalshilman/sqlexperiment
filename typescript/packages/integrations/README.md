@@ -61,7 +61,7 @@ your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handlers `chat` (a message in, the answer out) and `messages` (the
 conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), `sync`, `notifications` and `watch` (to follow it), and `signal`
+message it answers), `clear` (forget it all), `sync`, `notifications` and `watch` (to follow it), and `signal`
 and `pending` ([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
@@ -146,6 +146,21 @@ A steered message waits in the agent's `signals` object (`steer`), and the
 turn reads it there after each tool call (`steering`), and gives it to the
 framework by its id, which the framework keeps: a retried attempt neither
 loses nor repeats one.
+
+**Forget a conversation.** `clear` starts a key over, such as for a UI's
+New chat button: it stops the message being answered (as `stop`), then
+forgets the conversation, the key's database and state, and what its
+`signals` hold (waits, kept signals, steered messages). It answers as `stop`
+does. The next message starts anew; its ids and cursors go on from where
+the forgotten conversation got to, so a follower (`follow`, `sync`) reads on,
+and drops the messages it kept from before `first` (which a page and each
+change of `follow` give).
+
+```sh
+curl localhost:8080/assistant/alice/clear                            # {"stopped": null}
+```
+
+A message sent before `clear` is answered first, then forgotten too.
 
 **Send again safely.** A caller that may send a message again (after a
 timeout, say) gives it an idempotency key: the same key is the same
@@ -403,9 +418,10 @@ const plan = await ctx.objectClient(planner, 'ENG-1').chat('Plan the work on ENG
 ```
 
 A model that ends its turn without handing the answer in is asked once
-more; then the invocation fails, with a terminal error. The answer is kept
-in the agent's database with its conversation: a retried attempt answers
-with what was handed in. In a handler of your own, `prompt(ctx, text, {
+more; then the invocation fails, with a terminal error. The answer is the
+tool's input, returned as it is: nothing is stored beside the conversation.
+A crash that cuts the turn after the answer was handed in makes the retry
+ask for it again (one more model call, rarely). In a handler of your own, `prompt(ctx, text, {
 output })` answers with it too. As a subagent's, the parent's model gets it
 as JSON.
 
@@ -419,7 +435,7 @@ wait for the agent):
 ```ts
 import { serve, webhook } from 'restate-agents';
 
-const issues = webhook<LinearWebhook>({
+const issues = webhook({
   name: 'linear', // at /linear/webhook
   auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
   idempotencyHeader: 'linear-delivery', // a delivery sent again reaches the same message
@@ -429,14 +445,14 @@ const issues = webhook<LinearWebhook>({
 await serve(issues, triage);
 ```
 
-| Option              | What                                                                                    |
-| ------------------- | --------------------------------------------------------------------------------------- |
-| `name`              | The service: `/<name>/webhook`                                                          |
-| `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401     |
-| `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                    |
-| `route`             | The agents each delivery goes to                                                        |
-| `key`               | The agents' key, from the body (`T`), or undefined to drop it; by default, the delivery |
-| `description`       | What it is, for the UI                                                                  |
+| Option              | What                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| `name`              | The service: `/<name>/webhook`                                                               |
+| `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401          |
+| `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                         |
+| `route`             | The agents each delivery goes to                                                             |
+| `key`               | The agents' key, from the body (its JSON), or undefined to drop it; by default, the delivery |
+| `description`       | What it is, for the UI                                                                       |
 
 A delivery goes through the agent's `signals`, which knows what the agent is
 doing: to the message it answers, if it answers one, which takes it at its
@@ -552,7 +568,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop`, `steer`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
+`pending`, `status`, `stop`, `steer`, `clear`, `sync`, `notifications` or `watch`, which every object has. A shared handler of yours
 reads the database too: `ctx.db` is the database as stored, beside a
 message being answered.
 

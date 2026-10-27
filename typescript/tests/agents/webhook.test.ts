@@ -10,12 +10,7 @@ import { describe, expect, it } from 'vitest';
 const triage = object({ name: 'triage', handlers: { chat: async (_ctx, text: string) => text } });
 const audit = object({ name: 'audit', handlers: { chat: async (_ctx, text: string) => text } });
 
-interface Event {
-  action: string;
-  data: { identifier: string };
-}
-
-const issues = webhook<Event>({
+const issues = webhook({
   name: 'linear',
   auth: { header: 'linear-signature', secret: 'shh' },
   idempotencyHeader: 'linear-delivery',
@@ -70,6 +65,10 @@ describe('a webhook', () => {
     const forged = deliver(created, { secret: 'guess' });
     await expect(forged).rejects.toBeInstanceOf(restate.TerminalError);
     await expect(forged).rejects.toMatchObject({ code: 401 });
+  });
+
+  it('refuses a delivery that is not a JSON object', async () => {
+    await expect(deliver(['ENG-1'])).rejects.toMatchObject({ code: 400 });
   });
 
   it('drops a delivery its key gives no key for', async () => {

@@ -1,6 +1,6 @@
 // A chat page for the support agent of ../support.ts, on Restate's own
 // client: send a message, see what the agent is doing while it works,
-// approve or reject what it waits for, steer it, or stop it.
+// approve or reject what it waits for, steer it, stop it, or start anew.
 //
 //   OPENAI_API_KEY=… node intermediate/support.ts                                 # the agent, on port 9080
 //   npx @restatedev/restate-server                                       # Restate, in another terminal
@@ -75,6 +75,7 @@ function renderStatus({ answering, waiting }: Status) {
 
 $('user').textContent = user;
 $('stop').addEventListener('click', () => void support.stop());
+$('clear').addEventListener('click', () => void support.clear());
 $('composer').addEventListener('submit', (event) => {
   event.preventDefault();
   const input = $('text') as HTMLInputElement;
@@ -84,9 +85,10 @@ $('composer').addEventListener('submit', (event) => {
 // The conversation and the agent's status, as they change: the tool calls
 // show up as the agent makes them. A message that comes again (a tool call
 // with its output) replaces the one of its id; they show in the order of
-// their ids, the conversation's.
+// their ids, the conversation's; those before its first (New chat) are gone.
 const messages = new Map<number, ChatMessage>();
 for await (const change of follow(restate, agent('support'), user)) {
+  for (const id of messages.keys()) if (id < change.first) messages.delete(id);
   for (const m of change.messages) messages.set(m.id, m);
   renderStatus(change.status);
   renderMessages([...messages.values()].toSorted((a, b) => a.id - b.id));

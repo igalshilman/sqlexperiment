@@ -208,6 +208,7 @@ describe('object', () => {
   it('refuses handlers of its own named as the ones every object has', () => {
     expect(named({ signal: async () => {} })).toThrow('every object has a `signal` handler already');
     expect(named({ pending: async () => {} })).toThrow('every object has a `pending` handler already');
+    expect(named({ clear: async () => {} })).toThrow('every object has a `clear` handler already');
     // @ts-expect-error: a handler every object has
     expect(() => object({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
   });
