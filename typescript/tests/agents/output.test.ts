@@ -15,18 +15,27 @@ import { conversation, type PromptHandler } from '../testing.ts';
 
 const PLAN = { summary: 'A calculator', parts: ['parser', 'history'] };
 
-// Asked to plan, it answers with the plan, as JSON; chattily, with a sentence
+// Asked to plan, it answers with the plan, as JSON; if reminded at the end of
+// the prompt, only then; chattily, with a sentence
 // around it; asked lazily, in prose, then in a code fence once told; asked to
 // refuse, in prose always.
 vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
   openaiProvider: () =>
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const asked = textOf(messages.at(-1)!.content);
-      const first = textOf(messages.find((m) => m.role === 'user')!.content);
+      const prompted = textOf(messages.find((m) => m.role === 'user')!.content);
+      const [first] = prompted.split('\n'); // the task, before the reminder of the JSON asked for
       if (first === 'Plan it') return say(JSON.stringify(PLAN));
       if (first === 'Plan chattily') return say(`Done! Here is the plan:\n${JSON.stringify(PLAN)}\nAll set.`);
       if (first === 'Plan lazily' && asked.startsWith('Your reply is not')) {
         return say('```json\n' + JSON.stringify(PLAN) + '\n```');
+      }
+      if (first === 'Plan if reminded') {
+        return say(
+          prompted.endsWith('as JSON only, of the schema you were given: no other text.')
+            ? JSON.stringify(PLAN)
+            : 'Done!',
+        );
       }
       if (first === 'Plan wrongly') return say(JSON.stringify({ summary: 1 }));
       return say('A plan, in prose');
@@ -41,6 +50,10 @@ const chat = pi.chat({ output: Plan }) as unknown as PromptHandler;
 describe("an agent's output", () => {
   it('is what chat answers with: the value of the reply, not its text', async () => {
     expect(await conversation(chat, 'a').attempt('inv1', 'Plan it')).toEqual(PLAN);
+  });
+
+  it('is asked for at the end of each prompt, too, not only in the system prompt', async () => {
+    expect(await conversation(chat, 'reminded').attempt('inv1', 'Plan if reminded')).toEqual(PLAN);
   });
 
   it('is taken from a reply with a sentence around it', async () => {
