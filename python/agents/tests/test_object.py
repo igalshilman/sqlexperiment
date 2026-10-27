@@ -47,3 +47,10 @@ def test_a_chat_handler_takes_its_message_as_text_or_json():
     assert serde.deserialize(b"Hi") == serde.deserialize(b'"Hi"') == "Hi"
     with pytest.raises(ValueError, match="has a handler chat"):
         desk.chat(lambda ctx, message: message)
+
+
+def test_only_an_agent_has_clear_and_sync():
+    billing, desk = agents()
+    assert {"clear", "erase", "sync", "messages"} <= billing.handlers.keys()
+    assert not {"clear", "erase", "sync"} & desk.handlers.keys()
+    assert {"status", "stop", "steer"} <= desk.handlers.keys()

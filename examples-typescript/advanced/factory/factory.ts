@@ -3,9 +3,9 @@
  * a webhook. A triage agent (pi) decides whether the issue is ready to build,
  * and leads the work: it asks a planner (Claude) for a plan, which comes back
  * structured, part by part; then it makes a sub-issue for each part, and
- * hands every part to a coder (DeepSeek) of its own, all at once. Each agent
- * moves its issue along Linear's workflow as it goes, and comments on it,
- * with Linear's MCP server.
+ * hands every part to a coder (DeepSeek) of its own, all at once. Triage and
+ * the coders move their issues along Linear's workflow as they go, and
+ * comment on them, with Linear's MCP server; the planner only plans.
  *
  *   node advanced/factory/linear.ts             # Linear (a stand-in), on port 3333
  *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… \
@@ -43,8 +43,7 @@ const coder = deepseek.agent({
   name: 'coder',
   description: "Builds a part of the plan, in the issue's directory",
   background: true, // a subagent: triage waits for its answer, no one watches it work
-  // Every coder of an issue works in the issue's directory, at once.
-  tools: [...linear, ...workspaceTools(workspace)],
+  tools: [...linear, ...workspaceTools(workspace)], // the issue's directory, shared by its coders
   system: `You build one part of a plan for a Linear issue, in the project's directory.
 Other coders build the other parts in the same directory at the same time: change only the files of your part.
 - If your task names a sub-issue, first move it to "In Progress".
