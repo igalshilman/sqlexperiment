@@ -56,7 +56,9 @@ message at a time. `serve` serves it on PORT (default 9080), with the
 `signals` object every agent uses (its waits and steering); an endpoint of
 your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
 `RESTATE_SERVE_ONLY=triage,planner` serves only the services it names, so
-that one program (or image) deploys in parts.
+that one program (or image) deploys in parts; `signals` too, in one of them
+(`RESTATE_SERVE_ONLY=triage,planner,signals`): the agents reach it through
+Restate, wherever it is.
 
 ## Choose a framework
 
