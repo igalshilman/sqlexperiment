@@ -114,7 +114,7 @@ is a duplicate or nothing to build to **Canceled**.
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
 OpenAI's for triage (a fast model: it coordinates), Anthropic's for the
-planner (its strongest) and the coders (Claude Sonnet):
+planner (Claude Opus) and the coders (Claude Sonnet):
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333

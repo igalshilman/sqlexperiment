@@ -65,8 +65,8 @@ export class HttpError extends Error {
   }
 }
 
-/** The teller's replies. `teller.reply` can be replaced, to count or change replies. */
-export const teller = { reply };
+/** The teller's replies. `teller.reply` can be replaced, to count or change replies, or see each request. */
+export const teller: { reply: (messages: MessageParam[], request?: Record<string, unknown>) => Message } = { reply };
 
 /** An Anthropic client of the teller. */
 export default class TellerClient extends Anthropic {
@@ -79,7 +79,8 @@ export default class TellerClient extends Anthropic {
         if (typeof init?.body !== 'string') throw new Error('the teller reads JSON request bodies');
         const headers = { 'content-type': 'application/json' };
         try {
-          return new Response(JSON.stringify(teller.reply(JSON.parse(init.body).messages)), { headers });
+          const request = JSON.parse(init.body);
+          return new Response(JSON.stringify(teller.reply(request.messages, request)), { headers });
         } catch (error) {
           // A reply that throws an HttpError is that response of the API.
           if (!(error instanceof HttpError)) throw error;

@@ -90,6 +90,7 @@ interface Agent {
   client: Anthropic;
   model: string;
   maxTokens: number;
+  effort?: Effort;
   system?: string;
   tools: BetaRunnableTool[];
 }
@@ -101,7 +102,7 @@ interface Agent {
  */
 async function run(
   ctx: restate.ObjectContext,
-  { client, model, maxTokens, system, tools: all }: Agent,
+  { client, model, maxTokens, effort, system, tools: all }: Agent,
   conversation: Conversation,
   id: string,
   signal?: AbortSignal,
@@ -111,6 +112,7 @@ async function run(
     {
       model,
       max_tokens: maxTokens,
+      ...(effort === undefined ? {} : { output_config: { effort } }),
       ...(system === undefined ? {} : { system }),
       tools,
       messages: await conversation.messages(),
@@ -151,6 +153,9 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): BetaRunnableTool =>
     run: (input, context) => t.run(input, { ctx, callId: callId(context) }),
   });
 
+/** How much effort the model puts into a reply (Anthropic's `output_config.effort`). */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undefined> {
   /** The model, as `anthropic/model-id`: MODEL, or else anthropic/claude-sonnet-5-5. */
@@ -163,6 +168,8 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   client?: Anthropic;
   /** The most tokens of each of the model's replies (default 4096). */
   maxTokens?: number;
+  /** How much effort the model puts into each reply: more is more thorough, and slower (default: the model's). */
+  effort?: Effort;
   /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
@@ -184,12 +191,13 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
 const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
-  { model: named, system, tools = [], client, maxTokens = 4096 }: Options,
+  { model: named, system, tools = [], client, maxTokens = 4096, effort }: Options,
 ): Promise<string> => {
   const agent = {
     client: client ?? (shared ??= new Anthropic()),
     model: modelIdOf(modelOf(named, CLAUDE_MODEL), 'anthropic'),
     maxTokens,
+    effort,
     system,
     tools: tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
   };

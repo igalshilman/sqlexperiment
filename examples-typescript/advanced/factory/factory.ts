@@ -17,8 +17,8 @@ in plain, friendly sentences, short paragraphs, and lists where they help. No ta
 
 /**
  * Each agent on a model for its work: triage, which coordinates, on a fast
- * one (OpenAI's); the coders on Claude Sonnet; the planner on Anthropic's
- * strongest. A step's tool calls run at once: the prompts ask for steps that
+ * one (OpenAI's); the coders on Claude Sonnet; the planner on Claude Opus, at
+ * medium effort. A step's tool calls run at once: the prompts ask for steps that
  * do all they can together.
  */
 const coder = opencode.agent({
@@ -47,7 +47,8 @@ and each with a task its coder can build from alone (one part, if the issue is s
 const planner = claude.agent({
   name: 'planner',
   description: 'Plans the work on an issue, from its title and description: a summary, and parts to build at once',
-  model: 'anthropic/claude-fable-5-1',
+  model: 'anthropic/claude-opus-5-5',
+  effort: 'medium',
   system: PLANNER,
   output: Plan,
 });
