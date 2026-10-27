@@ -419,7 +419,7 @@ wait for the agent):
 ```ts
 import { serve, webhook } from 'restate-agents';
 
-const issues = webhook<LinearWebhook>({
+const issues = webhook({
   name: 'linear', // at /linear/webhook
   auth: { header: 'linear-signature', secret: process.env.LINEAR_WEBHOOK_SECRET! },
   idempotencyHeader: 'linear-delivery', // a delivery sent again reaches the same message
@@ -429,14 +429,14 @@ const issues = webhook<LinearWebhook>({
 await serve(issues, triage);
 ```
 
-| Option              | What                                                                                    |
-| ------------------- | --------------------------------------------------------------------------------------- |
-| `name`              | The service: `/<name>/webhook`                                                          |
-| `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401     |
-| `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                    |
-| `route`             | The agents each delivery goes to                                                        |
-| `key`               | The agents' key, from the body (`T`), or undefined to drop it; by default, the delivery |
-| `description`       | What it is, for the UI                                                                  |
+| Option              | What                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| `name`              | The service: `/<name>/webhook`                                                               |
+| `auth`              | `{ header, secret }`: the HMAC-SHA256 of the body, in hex (or `sha256=…`); else 401          |
+| `idempotencyHeader` | The header of the delivery's id, which a delivery sent again has too                         |
+| `route`             | The agents each delivery goes to                                                             |
+| `key`               | The agents' key, from the body (its JSON), or undefined to drop it; by default, the delivery |
+| `description`       | What it is, for the UI                                                                       |
 
 A delivery goes through the agent's `signals`, which knows what the agent is
 doing: to the message it answers, if it answers one, which takes it at its

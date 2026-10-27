@@ -99,6 +99,7 @@ is a duplicate or nothing to build to **Canceled**.
 | File                           | What                                                                                                     |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders as subagents         |
+| [`env.ts`](env.ts)             | The environment: the real Linear (LINEAR_API_KEY, LINEAR_WEBHOOK_SECRET) or the stand-in; WORKSPACE      |
 | [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                |
 | [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts              |
 | [`workspace.ts`](workspace.ts) | Coding tools for the coders (list, read and write files; bash; commit), in the issue's directory         |

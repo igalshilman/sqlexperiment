@@ -92,7 +92,7 @@ const triage = restate.workflow({
 });
 
 // Deliveries to the support agent, keyed by the customer they are about.
-const hooks = webhook<{ customer: string; note: string }>({
+const hooks = webhook({
   name: 'hooks',
   idempotencyHeader: 'x-delivery',
   route: [support],

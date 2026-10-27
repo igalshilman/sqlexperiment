@@ -29,7 +29,7 @@ export {
   type Waiting,
 } from './signals.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall, type ToolContext } from './tools.ts';
-export { webhook, webhookMessage, type WebhookAuth, type WebhookOptions } from './webhook.ts';
+export { webhook, webhookMessage, type WebhookAuth, type WebhookEvent, type WebhookOptions } from './webhook.ts';
 
 /**
  * Serve `services` on PORT (default 9080), with what the agents need beside
