@@ -5,9 +5,9 @@ frameworks take it from there. A triage agent (pi) decides whether the issue
 is ready to build, and leads the work: it asks a planner (Claude) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
-a coder (DeepSeek) of its own, all at once, in the issue's repository. Each
-agent moves its issue along the team's workflow, and comments on it,
-through Linear's MCP server: on the real Linear, or on a stand-in,
+a coder (OpenCode) of its own, all at once, in the issue's repository.
+Triage and the coders move their issues along the team's workflow, and
+comment on them, through Linear's MCP server: on the real Linear, or on a stand-in,
 [`linear.ts`](linear.ts), with the same tools.
 
 ## How it fits together
@@ -39,14 +39,14 @@ through Linear's MCP server: on the real Linear, or on a stand-in,
   │  │ planner/ENG-1.plan   │ │ coder/     │ │ coder/     │ │ coder/     │  each moves │       │
   │  │               Claude │ │ ENG-1.     │ │ ENG-1.     │ │ ENG-1.     │  its sub-   │       │
   │  │                      │ │ parser     │ │ history    │ │ integrate  │  issue      │       │
-  │  │ replies with the     │ │  DeepSeek  │ │  DeepSeek  │ │  DeepSeek  ├─────────────┼───────┘
+  │  │ replies with the     │ │  OpenCode  │ │  OpenCode  │ │  OpenCode  ├─────────────┼───────┘
   │  │ plan, as JSON        │ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘             │
   │  │ (its output,         │       │              │              │                    │
   │  │  checked)            │       │              │              │                    │
   │  └──────────────────────┘       │              │              │                    │
   └─────────────────────────────────┼──────────────┼──────────────┼────────────────────┘
-   list, read, write, bash;         ▼              ▼              ▼
-   commit (only its own        ┌─────────────────────────────────────┐
+   OpenCode's read, edit,           ▼              ▼              ▼
+   bash; commit (only its own  ┌─────────────────────────────────────┐
    files, one at a time)       │  WORKSPACE/ENG-1 (a git repository) │
                                └─────────────────────────────────────┘
 ```
@@ -68,7 +68,7 @@ side; an `integrate` task runs the whole test suite once they are done.
 ```
   time ──▶
 
-  Linear                     triage (pi), the parent    planner (Claude)   coders (DeepSeek)
+  Linear                     triage (pi), the parent    planner (Claude)   coders (OpenCode)
     │                                │                        │            parser     history
   ENG-1  Backlog ──── webhook ──────▶│ reads it               │              │           │
     │◀──────── In Progress ──────────┤                        │              │           │
@@ -103,19 +103,18 @@ is a duplicate or nothing to build to **Canceled**.
 | [`env.ts`](env.ts)             | The environment: Linear's tools and webhook auth (the real Linear or the stand-in); the coders' tools    |
 | [`plan.ts`](plan.ts)           | The plan's schema: the planner's `output`                                                                |
 | [`mcp.ts`](mcp.ts)             | An MCP server's tools as tools for any agent (`tool()`), asked for when the endpoint starts              |
-| [`workspace.ts`](workspace.ts) | Coding tools for the coders (list, read and write files; bash; commit), in the issue's directory         |
+| [`workspace.ts`](workspace.ts) | The coders' directory, one per issue, and `commit`, which commits one coder's files at a time            |
 | [`linear.ts`](linear.ts)       | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue |
 
 ## Run it, on the stand-in
 
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
-OpenAI's for triage, Anthropic's for the planner, and DeepSeek's for the
-coders:
+OpenAI's for triage and the coders, Anthropic's for the planner:
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
-OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… node advanced/factory/factory.ts
+OPENAI_API_KEY=… ANTHROPIC_API_KEY=… node advanced/factory/factory.ts
 npx @restatedev/restate-server
 ```
 
@@ -135,10 +134,6 @@ curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage
 
 Restate's UI, at http://localhost:9070, shows the same work as calls:
 triage's, and the planner's and coders' under it.
-
-No DeepSeek key? The coder's harness takes any model pi-ai knows: give it
-`model: 'openai/gpt-6-sol'` in [`factory.ts`](factory.ts), and it needs only
-`OPENAI_API_KEY`.
 
 `linear.ts` prints each issue, move and comment as it happens. The coders
 run real commands, on this machine, in `WORKSPACE/<issue>`
@@ -163,7 +158,7 @@ issues, and make real sub-issues. Use a team of its own, for the factory.
 
 ```sh
 LINEAR_API_KEY=lin_api_… LINEAR_WEBHOOK_SECRET=lin_wh_… \
-OPENAI_API_KEY=… ANTHROPIC_API_KEY=… DEEPSEEK_API_KEY=… \
+OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   node advanced/factory/factory.ts
 npx @restatedev/restate-server              # and register the factory, as above
 ```
@@ -193,6 +188,6 @@ and its sub-issues appear, each moving on its own.
 - **Status in Linear**: triage and each coder move their own issue with
   Linear's tools, so the board shows the work as it goes, down to each part.
 - **MCP tools in any agent**: `mcpTools(url)` turns an MCP server's tools
-  into `tool()`s, which pi, Claude and DeepSeek take alike. A tool call is
+  into `tool()`s, which pi, Claude and OpenCode take alike. A tool call is
   stored once it is done; a crash makes again only one that had not
   finished (moving an issue twice is harmless; a comment may show twice).
