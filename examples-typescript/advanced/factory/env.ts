@@ -17,10 +17,7 @@ const { GITHUB_REPO: repo, GITHUB_TOKEN: token } = process.env;
 if (repo && !token) throw new Error(`GITHUB_REPO is ${repo}: set GITHUB_TOKEN too, a token that can push to it`);
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
 
-/**
- * Who wrote a comment or a pull request: the agent `who`, and its part, if it
- * works on one (`ENG-1.parser`, and its reviewer's `ENG-1.parser.review`).
- */
+/** Who wrote a comment or a pull request: the agent `who`, and its part, if it works on one (`ENG-1.parser`). */
 const signature = (who: string, key: string) => {
   const part = key.split('.')[1];
   return `**${who}${part ? ` · ${part}` : ''}**`;
@@ -134,13 +131,13 @@ export const pullRequestTool = (who: string) =>
 const reading = (read: () => Promise<string>) =>
   read().catch((e: Error) => `Could not read it (pushed yet?): ${e.message}`);
 
-/** The pull request the reviewer `key` reviews: its coder's, as pushed. */
-const pullRequest = (key: string) => pushed(workspace, key.split('.').slice(0, 2).join('.'));
+/** The pull request the reviewer `key` reviews: its coder's, of the same key (`ENG-1.parser`), as pushed. */
+const pullRequest = (key: string) => pushed(workspace, key);
 
 /**
  * The reviewer's tools, for the agent `who`: the pull request it reviews, as
- * pushed (its coder's: `ENG-1.parser.review` reviews `ENG-1.parser`'s), and a
- * comment on it, its review. On the stand-in, a comment is only logged.
+ * pushed (its coder's: `reviewer/ENG-1.parser` reviews `coder/ENG-1.parser`'s),
+ * and a comment on it, its review. On the stand-in, a comment is only logged.
  */
 export const reviewTools = (who: string): Tool[] => [
   tool({

@@ -6,15 +6,14 @@ is ready to build, and leads the work: it asks a planner (Claude) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
 a coder (OpenCode) of its own, all at once: each on a git branch of its
-own, which it opens a pull request of, on GitHub. Each coder then has its
-pull request reviewed by a reviewer (Claude) of its own, in a conversation:
-the reviewer posts its review on the pull request, the coder makes the
-changes it asks for and asks again, until it approves. With every pull
-request approved, triage marks the issue Done, and leaves the merging to
-people. Triage and the coders
-move their issues along the team's workflow, and comment on them, through
-Linear's MCP server: on the real Linear, or on a stand-in,
-[`linear.ts`](linear.ts), with the same tools.
+own, which it opens a pull request of, on GitHub. As each answers with its
+pull request, triage has a reviewer (Claude) review it, which posts its
+review on the pull request; triage hands the changes it asks for back to the
+coder, and has it reviewed again, until it approves. With every pull request
+approved, triage marks the issue Done, and leaves the merging to people.
+Triage and the coders move their issues along the team's workflow, and
+comment on them, through Linear's MCP server: on the real Linear, or on a
+stand-in, [`linear.ts`](linear.ts), with the same tools.
 
 ## How it fits together
 
@@ -34,34 +33,30 @@ Linear's MCP server: on the real Linear, or on a stand-in,
   │    delivery; skips sub-issues                                                      │       │
   │        │ send                                                                      │       │
   │        ▼                                                                           │       │
-  │  ┌────────────────────────────────────┐  In Progress, the plan,                    │       │
-  │  │ triage/ENG-1                   pi  │  a sub-issue per part,  ───────────────────┼───────┤
-  │  │ (the parent: triages, then leads)  │  Done at the end                           │       │
-  │  └──┬───────────────▲───────┬─────────┘  (or Backlog, Canceled)                    │       │
-  │     │ subagent:     │ Plan, │ subagent, one per part, all at once                  │       │
-  │     │ plan          │ JSON  ├──────────────┐                                       │       │
-  │     ▼               │       ▼              ▼                                       │       │
-  │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │       │
-  │  │ planner/ENG-1.plan   │ │ coder/     │ │ coder/     │  each moves its sub-issue  │       │
-  │  │               Claude │ │ ENG-1.     │ │ ENG-1.     ├────────────────────────────┼───────┘
-  │  │                      │ │ parser     │ │ history    │                            │
-  │  │ replies with the     │ │  OpenCode  │ │  OpenCode  │                            │
-  │  │ plan, as JSON        │ └──┬─────▲───┘ └──┬─────▲───┘                            │
-  │  │ (its output,         │    │     │ Review │     │                                │
-  │  │  checked)            │    ▼     │        ▼     │                                │
-  │  └──────────────────────┘ ┌────────┴───┐ ┌────────┴───┐  each posts its review on  │
-  │                           │ reviewer/  │ │ reviewer/  │  the PR, round by round,   │
-  │                           │ ENG-1.     │ │ ENG-1.     │  until it approves         │
-  │                           │ parser.    │ │ history.   │                            │
-  │                           │ review     │ │ review     │                            │
-  │                           │     Claude │ │     Claude │                            │
-  │                           └────────────┘ └────────────┘                            │
-  └────────────────────────────────────────────────────────────────────────────────────┘
-   each coder in a clone of its own,    ┌────────────┐ ┌────────────┐
-   with OpenCode's read, edit, bash;    │ eng-1-     │ │ eng-1-     │
-   it pushes its branch, and opens a    │ parser     │ │ history    │
-   PR, which its reviewer reads         │ PR → main  │ │ PR → main  │
-                                        └────────────┘ └────────────┘
+  │  ┌────────────────────────────────────┐  In Progress, the plan, sub-issues,        │       │
+  │  │ triage/ENG-1                   pi  │  Done once approved ───────────────────────┼───────┘
+  │  │ (the parent: triages, leads, and   │  (or Backlog, Canceled)                    │
+  │  │  has each pull request reviewed)   │                                            │
+  │  └──┬───────────────▲───────┬──────┬──┘                                            │
+  │     │ subagent:     │ Plan, │      │     subagents: a coder per part,              │
+  │     │ plan          │ JSON  │      └───────────┐  then a reviewer per PR;          │
+  │     ▼               │       ▼                  ▼  its changes back to the coder    │
+  │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │
+  │  │ planner/ENG-1.plan   │ │ coder/     │ │ reviewer/  │  coders push and           │
+  │  │               Claude │ │ ENG-1.     │ │ ENG-1.     │  open the PRs;             │
+  │  │                      │ │ parser,    │ │ parser,    │  reviewers read            │
+  │  │ replies with the     │ │ ENG-1.     │ │ ENG-1.     │  them, and post            │
+  │  │ plan, as JSON        │ │ history    │ │ history    │  their reviews             │
+  │  │ (its output,         │ │   OpenCode │ │     Claude │  on them                   │
+  │  │  checked)            │ │            │ │            │                            │
+  │  └──────────────────────┘ └─────┬──────┘ └─────┬──────┘                            │
+  └─────────────────────────────────┼──────────────┼───────────────────────────────────┘
+   each coder in a clone of its     │ push, PR     │ read, review
+   own, on its own branch, with     ▼              ▼
+   OpenCode's read, edit, bash ┌───────────────────────────┐
+                               │ GitHub: eng-1-parser and  │
+                               │ eng-1-history, PRs → main │
+                               └───────────────────────────┘
 ```
 
 The planner only plans: a Claude agent whose `output` is the plan's schema
@@ -74,41 +69,48 @@ Each agent is a virtual object with its conversation in its own SQL
 database, keyed by its task (`coder/ENG-1.parser`): a crash resumes it
 where it was, and the parent waits for its answers without holding a
 process. Tasks of different names run at once, so the coders work side by
-side. A coder asks its reviewer, a subagent of its own, in one task
-(`reviewer/ENG-1.parser.review`) each round: the reviewer remembers its last
-review, and reads what changed since. The factory stops with the pull
-requests approved and open, for people to merge.
+side. Each part has one task of each kind, `coder/ENG-1.parser` and
+`reviewer/ENG-1.parser`, which triage hands each round to: the coder
+remembers its work, the reviewer its last review, so it reads what changed
+since. The factory stops with the pull requests approved and open, for
+people to merge.
 
 ## An issue's life
 
 ```
   time ──▶
 
-  Linear                     triage (pi), the parent    planner (Claude)   coders (OpenCode)
-    │                                │                        │            parser     history
-  ENG-1  Backlog ──── webhook ──────▶│ reads it               │              │           │
-    │◀──────── In Progress ──────────┤                        │              │           │
-    │                                ├── subagent: plan ─────▶│ the issue in │           │
-    │                                │                        │ the task     │           │
-    │                                │◀── Plan, as JSON ──────┤              │           │
-    │◀──────── comment: the plan ────┤                        │              │           │
-  ENG-2  sub-issue: parser ◀─────────┤                        │              │           │
-  ENG-3  sub-issue: history ◀────────┤                        │              │           │
-    │                                ├── subagent: parser ──────────────────▶│           │
-    │                                ├── subagent: history ─────────────────────────────▶│
-  ENG-2  In Progress ◀───────────────────────────────────────────────────────┤           │
-  ENG-3  In Progress ◀───────────────────────────────────────────────────────────────────┤
-    │                                │                        │   code, tests, a PR      │
-    │                                │                        │   ⇅ reviewer (Claude):   │
-    │                                │                        │   rounds, until approved │
-  ENG-2  Done, a comment ◀───────────────────────────────────────────────────┤           │
-  ENG-3  Done, a comment ◀───────────────────────────────────────────────────────────────┤
-    │                                │◀── answers ───────────────────────────┴───────────┘
-    │◀──── comment: what was built ──┤  (the pull requests, approved, not merged)
-  ENG-1  Done ◀──────────────────────┤
+  Linear                     triage (pi), the parent   planner, reviewer   coders (OpenCode)
+    │                               │                  (Claude)         parser     history
+  ENG-1  Backlog ──── webhook ─────▶│ reads it              │             │           │
+    │◀── In Progress ───────────────┤                       │             │           │
+    │                               ├── subagent: plan ────▶│ the issue   │           │
+    │                               │                       │ in the task │           │
+    │                               │◀── Plan, as JSON ─────┤             │           │
+    │◀── comment: the plan ─────────┤                       │             │           │
+  ENG-2  sub-issue: parser ◀────────┤                       │             │           │
+  ENG-3  sub-issue: history ◀───────┤                       │             │           │
+    │                               ├── subagent: coder, parser ─────────▶│           │
+    │                               ├── subagent: coder, history ────────────────────▶│
+  ENG-2  In Progress ◀────────────────────────────────────────────────────┤           │
+  ENG-3  In Progress ◀────────────────────────────────────────────────────────────────┤
+    │                               │                       │   code, tests, a PR     │
+  ENG-2  In Review, a comment ◀───────────────────────────────────────────┤           │
+  ENG-3  In Review, a comment ◀───────────────────────────────────────────────────────┤
+    │                               │◀── the PRs ─────────────────────────┴───────────┘
+    │                               ├── subagent: reviewer ▶│ a review each,
+    │                               │                       │ posted on its PR
+    │                               │◀── approved, or ──────┤
+    │                               │    changes            │
+    │                               ├── changes, to their coders, then reviews again
+    │                               │   (three reviews of a PR at most)
+  ENG-2  Done ◀─────────────────────┤                       │
+  ENG-3  Done ◀─────────────────────┤                       │
+    │◀── comment: what was built ───┤  (the pull requests, approved, not merged)
+  ENG-1  Done ◀─────────────────────┤
 ```
 
-A pull request its reviewer has not approved after three rounds leaves its
+A pull request the reviewer has not approved after three reviews leaves its
 sub-issue, and the issue, **In Review**. And not every issue goes the whole
 way: triage leaves one that is unclear in **Backlog**, with a comment asking
 what it needs to know, and moves one that is a duplicate or nothing to build
@@ -118,7 +120,7 @@ to **Canceled**.
 
 | File                           | What                                                                                                                                       |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner and coders, each with a reviewer, as subagents                    |
+| [`factory.ts`](factory.ts)     | The webhook receiver, and the agents: triage, the parent, with a planner, coders and a reviewer as subagents                               |
 | [`env.ts`](env.ts)             | The environment: Linear's tools, user and webhook auth (the real Linear or the stand-in); GitHub's pull requests, and the reviewer's tools |
 | [`answers.ts`](answers.ts)     | The agents' structured answers (`output`): the planner's plan, the reviewer's review, a coder's pull request                               |
 | [`prompts.ts`](prompts.ts)     | The agents' system prompts: triage's, the planner's, a coder's, the reviewer's                                                             |
@@ -151,19 +153,19 @@ curl localhost:8080/triage/ENG-1/status            # what triage is doing now
 curl localhost:8080/triage/ENG-1/messages          # triage's conversation, with its tool calls
 curl localhost:8080/planner/ENG-1.plan/messages    # the planner's
 curl localhost:8080/coder/ENG-1.parser/messages    # a coder's, of a part triage named "parser"
-curl localhost:8080/reviewer/ENG-1.parser.review/messages   # its reviewer's: the review, round by round
+curl localhost:8080/reviewer/ENG-1.parser/messages # its reviewer's: the reviews, round by round
 curl localhost:3333/issues/ENG-1/comments --json '{"body": "How is it going?"}'   # triage answers on the issue
 ```
 
 Restate's UI, at http://localhost:9070, shows the same work as calls:
-triage's, the planner's and coders' under it, and each coder's reviewer
-under the coder.
+triage's, and the planner's, coders' and reviewer's under it.
 
 `linear.ts` prints each issue, move and comment as it happens. Without
 GitHub, a git repository in `WORKSPACE/origin.git` stands in for the
-project's, and `factory.ts` prints each pull request, and each review. The coders run real
-commands, on this machine, in `WORKSPACE` (`/tmp/restate-factory` by
-default): run it in a sandbox (a container, a VM).
+project's, and `factory.ts` prints each pull request, and each review. The
+coders run real commands, on this machine, in `WORKSPACE`
+(`/tmp/restate-factory` by default): run it in a sandbox (a container, a
+VM).
 
 ## Run it, on Linear and GitHub
 
@@ -227,12 +229,13 @@ it takes the comment once they answer.
   Its routes, auth and idempotency header are in the handler's metadata,
   in the admin API and the UI.
 - **Structured answers from agents**: the planner's answer is a `Plan`, the
-  reviewer's a `Review`, a coder's what it `Built` (its pull request, and
-  whether it is approved): the model's reply checked against its schema
+  reviewer's a `Review`, a coder's what it `Built` (its pull request): the
+  model's reply checked against its schema
   (`output`), the subagent call's return value, not text to parse.
-- **A conversation between agents**: a coder and its reviewer (OpenCode
-  and Claude) go round by round, the coder asking in the same task each
-  time, so the reviewer reviews what changed against its last review.
+- **A conversation between agents, led by their parent**: triage takes a
+  coder's pull request to the reviewer, and its changes back to the coder
+  (OpenCode and Claude), round by round, each in the same task every time,
+  so the coder knows its work, and the reviewer its last review.
 - **Work divided, at once**: the parent's subagent calls in one step run at
   the same time, each a coder with a conversation of its own; the parent
   waits for them all, holding no process.
