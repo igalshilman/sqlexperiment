@@ -9,7 +9,8 @@ runs, and calls the planner through Restate, as before.
     restate deployments register https://<workspace>--restate-factory-planner.us-east.modal.direct \\
         --extra-header "Modal-Key: wk-..." --extra-header "Modal-Secret: ws-..."
 
-The secret is the factory's .env: the planner needs only OPENAI_API_KEY, but the
+The secret is the factory's .env: the planner needs only MODAL_ENDPOINT_URL,
+MODAL_PROXY_KEY and MODAL_PROXY_SECRET (its model, on Modal's endpoint), but the
 endpoint asks Linear and GitHub for their tools as it starts (env.ts), whichever
 agents it serves. The Modal-Key and Modal-Secret are a proxy token's
 (modal.com/settings/proxy-auth-tokens): only Restate calls the planner. Serve
