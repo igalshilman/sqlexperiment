@@ -1,11 +1,12 @@
 /**
  * A software factory, in miniature: a new Linear issue starts it, through a
- * webhook. Triage (pi) leads the work: a planner (pi) plans it in parts, a
+ * webhook. Triage (pi) leads the work: a planner (the DeepSeek Harness) plans it in parts, a
  * coder (OpenCode) builds each part on a branch of its own, with a pull
  * request, and a reviewer (pi) reviews it, its changes going back to the
  * coder, until it approves. How to run it, and follow it: README.md.
  */
 import { serve, subagent, webhook } from 'restate-agents';
+import * as deepseek from 'restate-agents/deepseek';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
 import * as env from './env.ts';
@@ -15,10 +16,10 @@ import * as prompts from './prompts.ts';
 import { byAnAgent } from './signatures.ts';
 
 /**
- * Each agent on a model for its work: triage, which coordinates, and the
- * planner on OpenAI's GPT Sol, the reviewer on its GPT Astra, all three in
- * OpenAI's fast mode; the coders on Claude Sonnet. Their system prompts are
- * in prompts.ts.
+ * Each agent on a model for its work: triage, which coordinates, on OpenAI's
+ * GPT Sol, the reviewer on its GPT Astra, both in OpenAI's fast mode; the
+ * planner on DeepSeek V4.1 Flash, on Modal's endpoint; the coders on Claude
+ * Sonnet. Their system prompts are in prompts.ts.
  */
 const reviewer = pi.agent({
   name: 'reviewer',
@@ -40,12 +41,15 @@ const coder = opencode.agent({
   output: Built,
 });
 
-/** The planner: no tools, it reads the issue it is given. Its answer is a `Plan`. */
-const planner = pi.agent({
+/**
+ * The planner: no tools, it reads the issue it is given. Its answer is a
+ * `Plan`. On the DeepSeek Harness, its model on Modal's endpoint
+ * (MODAL_ENDPOINT_URL, with a proxy token's MODAL_PROXY_KEY and MODAL_PROXY_SECRET).
+ */
+const planner = deepseek.agent({
   name: 'planner',
   description: 'Plans the work on an issue, from its title and description: a summary, and parts to build at once',
-  model: 'openai/gpt-6.1-sol',
-  serviceTier: 'fast',
+  model: 'modal/deepseek-ai/DeepSeek-V4.1-Flash',
   system: prompts.PLANNER,
   output: Plan,
 });
