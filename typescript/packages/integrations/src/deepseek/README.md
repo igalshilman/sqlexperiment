@@ -41,6 +41,16 @@ deepseek.agent({ name: 'assistant', model: 'openai/gpt-6-sol' }); // with OPENAI
 deepseek.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with ANTHROPIC_API_KEY
 ```
 
+A model on [Modal's endpoints](https://modal.com/docs/guide/endpoints) is
+`modal/<model-id>` ([`modal.ts`](modal.ts)): the harness calls it with the
+Messages API, as it calls DeepSeek's, at `MODAL_ENDPOINT_URL`, with a proxy
+token's `MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET`; each conversation stays on
+one of the endpoint's containers, so its prompt cache is reused.
+
+```ts
+deepseek.agent({ name: 'planner', model: 'modal/deepseek-ai/DeepSeek-V4.1-Flash' });
+```
+
 A provider or model pi-ai does not know fails when the agent is defined; a
 missing or wrong key fails the invocation with a terminal error (424).
 

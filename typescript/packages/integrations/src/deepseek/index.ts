@@ -9,6 +9,7 @@
 //
 // The model is `model`, or else MODEL, or else deepseek/deepseek-flash:
 // DeepSeek's (@deepseek-ai/dsh-llm-deepseek-api-key), with DEEPSEEK_API_KEY,
+// a model on Modal's endpoint (`modal/<model-id>`, see modal.ts),
 // or any model pi-ai knows (@deepseek-ai/dsh-llm-pi-ai), with its provider's
 // key: `openai/gpt-6-sol` with OPENAI_API_KEY, say.
 //
@@ -34,6 +35,7 @@ import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
 import * as deepseek from '@deepseek-ai/dsh-llm-deepseek-api-key';
 import * as piAi from '@deepseek-ai/dsh-llm-pi-ai';
+import * as modal from './modal.ts';
 import { LlmRuntime, MessageId, freezeMessage, type Message, type UserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session';
 import * as checkpoints from '@deepseek-ai/dsh-session-checkpoint-policy';
@@ -103,11 +105,13 @@ interface Route {
 
 /**
  * `model` (`provider/model-id`) as the harness's route: DeepSeek's own
- * provider, or else pi-ai's provider of that name, if it has the model.
+ * provider, Modal's endpoint, or else pi-ai's provider of that name, if it
+ * has the model.
  */
 function routeOf(model: string): Route {
   const [provider, id] = providerOf(model);
   if (provider === 'deepseek') return { provider: 'deepseek-official', model: id };
+  if (provider === modal.PROVIDER) return { provider, model: id };
   const from = process.env.MODEL === model ? ' (from MODEL)' : '';
   const known = builtinProviders().find((p) => p.id === provider);
   if (!known) {
@@ -120,10 +124,11 @@ function routeOf(model: string): Route {
 }
 
 /**
- * The harness, its session in `db`: the services an agent loop needs, the
- * persistence and its checkpoints, and the provider of `route`.
+ * The harness, its session in `db` (the conversation `key`'s): the services
+ * an agent loop needs, the persistence and its checkpoints, and the provider
+ * of `route`.
  */
-async function boot(db: restate.SqlSession, route: Route, system?: string): Promise<Context> {
+async function boot(db: restate.SqlSession, key: string, route: Route, system?: string): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
@@ -135,6 +140,7 @@ async function boot(db: restate.SqlSession, route: Route, system?: string): Prom
   await harness.plugin(checkpoints);
   // DeepSeek's with DEEPSEEK_API_KEY; another's with the key pi-ai finds for it (OPENAI_API_KEY...).
   if (route.provider === 'deepseek-official') await harness.plugin(deepseek, {});
+  else if (route.provider === modal.PROVIDER) await harness.plugin(modal, { model: route.model, affinity: key });
   else await harness.plugin(piAi, { providers: { [route.provider]: {} } });
   await harness.plugin(AgentLoop, { agents: [] });
   return harness;
@@ -284,7 +290,7 @@ const answerOnce = async (
 ): Promise<string> => {
   const id = nextPromptId(ctx);
   const route = routeOf(modelOf(named, DEEPSEEK_MODEL));
-  const harness = await boot(ctx.db, route, system);
+  const harness = await boot(ctx.db, ctx.key, route, system);
   // A tool's error fails the attempt, which Restate retries: the harness
   // stores nothing more, so the retry finds the tool's call without a result.
   const { promise: failed, reject: fail } = Promise.withResolvers<never>();
