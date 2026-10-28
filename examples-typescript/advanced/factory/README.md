@@ -136,6 +136,7 @@ to **Canceled**.
 | [`workspace.ts`](workspace.ts)   | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
 | [`linear.ts`](linear.ts)         | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
 | [`board/`](board/board.ts)       | The board: a page that shows each issue as the agents work on it, live, and their conversations                                            |
+| [`on_modal.py`](on_modal.py)     | The planner on Modal: the factory's image, serving the planner alone, as a Modal Server                                                    |
 
 ## Talk to a coder, on its pull request
 
@@ -287,6 +288,26 @@ Restate, so one part serves it for all).
 docker run -e RESTATE_SERVE_ONLY=coder ...                                           # the coders
 docker run -e RESTATE_SERVE_ONLY=linear,github,triage,planner,reviewer,signals ...   # the rest
 ```
+
+## The planner, on Modal
+
+[`on_modal.py`](on_modal.py) deploys one agent of the factory, the planner,
+to [Modal](https://modal.com), as a Modal Server: the same image, serving the
+planner alone (`RESTATE_SERVE_ONLY=planner`), over HTTP/2, end to end
+(`h2_enabled`), as the agents need. Restate registers it as a deployment of
+its own, and triage calls the planner there, through Restate, as before.
+
+```sh
+uvx modal secret create factory --from-dotenv examples-typescript/.env
+uvx modal deploy examples-typescript/advanced/factory/on_modal.py
+restate deployments register https://<workspace>--restate-factory-planner.us-east.modal.direct \
+    --extra-header "Modal-Key: wk-…" --extra-header "Modal-Secret: ws-…"   # a Modal proxy token
+docker run -e RESTATE_SERVE_ONLY=linear,github,triage,signals ...           # the rest, without it
+```
+
+The secret is the whole `.env`: the planner needs only `OPENAI_API_KEY`, but
+the endpoint asks Linear and GitHub for their tools as it starts
+([`env.ts`](env.ts)), whichever agents it serves.
 
 ## Watch it, on the board
 
