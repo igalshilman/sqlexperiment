@@ -7,7 +7,8 @@ and [`restate-agents`](../agents/README.md), the agents they use.
 They come in three levels: **basic**, an agent and what it keeps;
 **intermediate**, one of Restate's patterns at a time (its tools, a person in
 the loop, teams, workflows, coding agents); and **advanced**, applications
-that put them together.
+that put them together. New to it all? Begin with
+[the tutorial](../template/README.md), one concept per file.
 
 ### Basic
 

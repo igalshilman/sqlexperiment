@@ -275,6 +275,18 @@ importers:
 
   packages/sql: {}
 
+  packages/template:
+    dependencies:
+      restate-agents:
+        specifier: workspace:*
+        version: link:../agents
+      restate-objects:
+        specifier: workspace:*
+        version: link:../objects
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
+
 packages:
 
   '@ai-sdk/cohere@3.0.27':

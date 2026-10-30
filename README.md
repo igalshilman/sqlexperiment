@@ -11,6 +11,9 @@ Two layers, the second on the first:
    object's database: pi, OpenCode, LangGraph, Claude and more
    ([`restate-agents`](packages/agents/README.md)).
 
+New to them? [The tutorial](packages/template/README.md) goes one concept per
+file, from a virtual object to agents that delegate.
+
 ## Objects with SQL
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
@@ -151,7 +154,7 @@ curl localhost:8080/assistant/alice/facts
 
 ## Where things are
 
-A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
+A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of six
 packages, each with its README, and its tests in its `test/` directory:
 
 - [`packages/sql`](packages/sql/README.md): `restate-sql`, the Node.js addon:
@@ -164,6 +167,8 @@ packages, each with its README, and its tests in its `test/` directory:
   virtual objects (`ctx.db`, `ctx.transaction`) on the published SDK.
 - [`packages/agents`](packages/agents/README.md): `restate-agents`,
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
+- [`packages/template`](packages/template/README.md): a tutorial, one concept
+  per file: a virtual object, then SQL in it, then agents.
 - [`packages/examples`](packages/examples/README.md): the examples, each a
   small file you run with node.
 - [`packages/e2e`](packages/e2e/README.md): the tests against a real Restate
