@@ -1,4 +1,4 @@
-// What the integrations share: their options (`Configure`, the model), the
+// What the frameworks share: their options (`Configure`, the model), the
 // ids of an invocation's prompts, the `chat` handler with its turn (status,
 // cancellation, steering, publishing for the clients that follow it), and
 // the `messages` handler with its `Transcript`.

@@ -9,7 +9,7 @@ Two layers, the second on the first:
    ([`restate-fns`](packages/fns/README.md)).
 2. **[AI agents](#ai-agents)** in those objects, their conversation in the
    object's database: pi, OpenCode, LangGraph, Claude and more
-   ([`restate-agents`](packages/integrations/README.md)).
+   ([`restate-agents`](packages/agents/README.md)).
 
 ## Objects with SQL
 
@@ -84,7 +84,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 ```
 
 The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
-or the DeepSeek Harness: see [`restate-agents`](packages/integrations/README.md)
+or the DeepSeek Harness: see [`restate-agents`](packages/agents/README.md)
 and [the examples](packages/examples/README.md).
 
 ### Tools of its own
@@ -161,7 +161,7 @@ packages, each with its README:
   key/value store up to `ctx.db`.
 - [`packages/fns`](packages/fns/README.md): `restate-fns`, SQL in virtual
   objects (`ctx.db`, `ctx.transaction`) on the published SDK.
-- [`packages/integrations`](packages/integrations/README.md): `restate-agents`,
+- [`packages/agents`](packages/agents/README.md): `restate-agents`,
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
 - [`packages/examples`](packages/examples/README.md): the examples, each a
   small file you run with node.
@@ -198,7 +198,7 @@ The tests are the `tests` package; `pnpm --filter tests <script>` runs one:
 
 ```sh
 pnpm --filter tests test langgraph   # vitest, filtered
-pnpm --filter tests crash            # the integrations and SQL objects through crashes
+pnpm --filter tests crash            # the agents and SQL objects through crashes
 pnpm --filter tests concurrency      # the context without journal replay
 pnpm --filter tests tools            # Restate's own agent tools
 pnpm --filter tests bench            # SQL in objects: latency, throughput and stored bytes

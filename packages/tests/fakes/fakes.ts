@@ -26,7 +26,7 @@ const packages: Record<string, string> = {
 };
 /** The fakes of the examples' modules, by URL. */
 const modules: Record<string, string> = {
-  [fake('../../integrations/src/opencode/db.ts')]: fake('opencode-db.ts'),
+  [fake('../../agents/src/opencode/db.ts')]: fake('opencode-db.ts'),
 };
 
 registerHooks({

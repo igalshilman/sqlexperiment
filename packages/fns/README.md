@@ -59,7 +59,7 @@ ends. A transaction commits as one tail entry, then the head that names it,
 and is durable when the statement or `ctx.transaction` that commits
 it resolves: the SDK waits for an empty `ctx.run` after the write. A library
 that wants a database for the handler's work gets `ctx.db`: the
-[pi integration](../integrations/src/pi/README.md) runs pi-durable's storage
+[pi integration](../agents/src/pi/README.md) runs pi-durable's storage
 this way.
 
 An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
@@ -297,7 +297,7 @@ on port 9080, or `PORT`):
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.
 
-[`restate-agents/pi`](../integrations/src/pi/README.md) has a durable agent on pi-durable, with its
+[`restate-agents/pi`](../agents/src/pi/README.md) has a durable agent on pi-durable, with its
 storage in the object's database.
 
 ```sh

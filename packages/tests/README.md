@@ -4,10 +4,10 @@ The tests of the TypeScript packages, on scripted models that need no API key
 ([`fakes/`](fakes/fakes.ts)), in place of the real ones: `vi.mock` in the unit
 tests, and `node --import ./fakes/fakes.ts` for processes.
 
-- [`agents/`](agents): an agent per integration, whose tools move money in a
+- [`agents/`](agents): an agent per framework, whose tools move money in a
   ledger, through crashes of the handler ([`testing.ts`](testing.ts)): every
   message moves the money once (`pnpm --filter tests test`).
-- [`storage/`](storage): each integration's storage on a database in memory,
+- [`storage/`](storage): each framework's storage on a database in memory,
   with the framework's own conformance suite where it has one.
 - [`sql/`](sql): SQL in virtual objects: a ledger, a shop, and
   `ctx.transaction`'s sends.

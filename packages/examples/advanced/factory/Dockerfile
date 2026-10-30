@@ -31,7 +31,7 @@ COPY packages/sql/package.json packages/sql/index.js packages/sql/index.d.ts \
   packages/sql/
 COPY --from=addon /src/packages/sql/sql.node packages/sql/
 COPY packages/fns packages/fns
-COPY packages/integrations packages/integrations
+COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
 RUN pnpm install --frozen-lockfile --prod --filter examples...
 

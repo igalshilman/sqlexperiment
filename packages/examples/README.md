@@ -3,7 +3,7 @@
 Each one is a file you run with Node (24 or later), from here, after
 `pnpm install && pnpm build` at the repository's root (see
 [Run an example](#run-an-example)). Start with [`chat.ts`](basic/chat.ts),
-and [`restate-agents`](../integrations/README.md), the integrations they use.
+and [`restate-agents`](../agents/README.md), the agents they use.
 They come in three levels: **basic**, an agent and what it keeps;
 **intermediate**, one of Restate's patterns at a time (its tools, a person in
 the loop, teams, workflows, coding agents); and **advanced**, applications
@@ -46,8 +46,8 @@ that put them together.
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a
-crash resumes the reply. The integrations are in
-[`restate-agents`](../integrations/README.md).
+crash resumes the reply. The agents are in
+[`restate-agents`](../agents/README.md).
 
 ## Run an example
 
@@ -77,12 +77,12 @@ OpenAI's and Anthropic's). `MODEL` picks another model, such as
 on pi, OpenCode and LangGraph (LangGraph takes OpenAI's and Anthropic's);
 Claude takes Anthropic's models, and DeepSeek its own, and refuse another
 provider's `MODEL` when they start (see
-[the models](../integrations/README.md#models)). To call an agent from code,
+[the models](../agents/README.md#models)). To call an agent from code,
 or to send a message again safely, see
-[Calling an agent](../integrations/README.md#calling-an-agent).
+[Calling an agent](../agents/README.md#calling-an-agent).
 
 ## Write your own
 
 A new file here, beside the others, runs the same way: its package has
 `restate-agents`, the SDK and zod. For a package of your own, see
-[Build your own](../integrations/README.md#build-your-own).
+[Build your own](../agents/README.md#build-your-own).
