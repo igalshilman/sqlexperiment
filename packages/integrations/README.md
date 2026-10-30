@@ -593,7 +593,7 @@ message being answered.
 [`restate-fns`](../sql/README.md) (SQL in virtual objects) and the Node.js
 addon, which this repository builds. Build it once, at the repository's root, with `make js`:
 it needs Rust (for the Node.js addon), Node 24 or later, and pnpm; `nix develop` has them all (see
-[Build and test](../../../README.md#build-and-test)).
+[Build and test](../../README.md#build-and-test)).
 
 Then the quickest start is a file in [`examples/`](../../examples/README.md),
 whose package has `restate-agents`, the SDK and zod. Or a package of your own

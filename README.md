@@ -154,13 +154,12 @@ The repository is one pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yam
 each part is a directory with its README, and the [`Makefile`](Makefile)
 builds and tests them all.
 
-- [`core/`](core): the storage every SDK builds on: the
-  [`state`](core/state/README.md) (records and paged files, changed
-  through a mutation and flushed atomically, in one round trip) and
-  [`sql`](core/sql/README.md) on it; [the layers](core/README.md#layers), from
-  Restate's key/value store up to the SDKs.
-- [`packages/sql/`](packages/sql/README.md): the Node.js addon, `restate-sql`,
-  the crates over a key/value store implemented in JavaScript.
+- [`packages/sql/`](packages/sql/README.md): the Node.js addon, `restate-sql`:
+  one Rust crate with the storage inside, the [`state`](packages/sql/src/state/README.md)
+  (records and paged files, changed through a mutation and flushed atomically,
+  in one round trip) and [`sql`](packages/sql/src/sql/README.md) on it;
+  [the layers](packages/sql/README.md#inside-the-layers), from Restate's
+  key/value store up to `ctx.db`.
 - [`packages/fns/`](packages/fns/README.md): `restate-fns`, SQL in virtual
   objects (`ctx.db`, `ctx.transaction`) on the published SDK.
 - [`packages/integrations/`](packages/integrations/README.md): `restate-agents`,
@@ -189,7 +188,7 @@ tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
 
 ```sh
 nix develop       # or `direnv allow`, with use flake in .envrc
-make              # build everything: the crates, the addon and the pnpm workspace
+make              # build everything: the addon (with the state and SQL inside) and the pnpm workspace
 make test         # every test that needs no Restate server
 make test-ts T=langgraph   # the TypeScript tests (vitest in tests/), optionally filtered
 make tools-test         # Restate's own agent tools, against a Restate server

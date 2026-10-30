@@ -8,7 +8,7 @@ single-writer execution per key, and retries. It uses the
 [SQL addon](../sql/README.md), on the published Restate TypeScript
 SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
 
-It runs on a released Restate server: see [the requirements](../../../README.md#requirements).
+It runs on a released Restate server: see [the requirements](../../README.md#requirements).
 
 ```ts
 import * as restate from 'restate-fns';
@@ -177,7 +177,7 @@ entry under a key of its own, then the head, which names it: the commit
 point. Then one empty `ctx.run` waits until all of it is stored: a commit is
 one round trip. Whatever prefix a crash keeps, the stored head names only a
 tail and checkpoints that are stored. Now and then a commit first folds the
-tail into a checkpoint (see the [state's architecture](../../core/state/docs/ARCHITECTURE.md)).
+tail into a checkpoint (see the [state's architecture](../sql/src/state/docs/ARCHITECTURE.md)).
 
 **The page cache.** The process's page cache keeps the pages it read and
 wrote, and the database's state as of its last head, for the object's next
@@ -345,7 +345,7 @@ writes nothing: what the handler writes stays in its session, and is never
 stored. It reads the state as of that call, a snapshot, whatever the
 exclusive handler commits meanwhile; only a shared handler that outlives 16
 of the exclusive handler's commits fails, and Restate retries it
-([the reader](../../core/state/docs/DESIGN.md#readers)).
+([the reader](../sql/src/state/docs/DESIGN.md#readers)).
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts

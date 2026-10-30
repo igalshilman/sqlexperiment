@@ -12,10 +12,9 @@
 # The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
-COPY core core
 COPY packages/sql packages/sql
 RUN cd packages/sql && cargo build --locked --release \
-  && cp target/release/libsql_node.so sql.node
+  && cp target/release/librestate_sql.so sql.node
 
 # The workspace's packages that the examples use, laid out as in the
 # repository: the pnpm workspace at its root.

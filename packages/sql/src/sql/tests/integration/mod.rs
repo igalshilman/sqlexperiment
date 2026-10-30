@@ -1,0 +1,22 @@
+//! The public API and the fault campaigns.
+mod block_io;
+mod cache;
+mod campaign;
+mod cancellation;
+mod durability;
+mod errors;
+mod failpoints;
+mod failure;
+mod fault;
+mod files;
+mod garbage;
+mod host;
+mod limits;
+mod publication;
+mod races;
+mod records;
+mod reference;
+mod reuse;
+mod session;
+mod sql;
+mod state;

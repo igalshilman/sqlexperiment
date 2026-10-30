@@ -25,7 +25,8 @@ describe('withPi', () => {
       }),
     );
     try {
-      const ctx = { db } as unknown as restate.ObjectContext;
+      // No state but the database: the log starts afresh.
+      const ctx = { db, get: async () => null } as unknown as restate.ObjectContext;
       const { answer, agent } = await withPi(ctx, { models, model: 'scribe/scribe', workspace }, async (pi) => ({
         answer: await pi.prompt('take a note', 'p1'),
         agent: await (await pi.harness.root(pi.context)).agent(pi.context),

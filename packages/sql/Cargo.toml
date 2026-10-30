@@ -1,23 +1,80 @@
 [package]
-name = "sql-node"
+name = "restate-sql"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Node.js bindings: SQL over a key/value store the host implements in JavaScript"
+description = "The Node.js addon: SQLite-compatible SQL over a key/value store the host implements in JavaScript, with the state it is stored in"
 
-# Its own workspace: the addon stays out of the main crate's build.
+# Its own workspace.
 [workspace]
 
 [lib]
-crate-type = ["cdylib"]
+# cdylib: the addon; rlib: the benchmarks and the example, with `bench`.
+crate-type = ["cdylib", "rlib"]
+bench = false
+
+[features]
+default = []
+# The fault-injecting stores, the monitor and the latency simulator (always in tests).
+simulation = []
+# The storage, public for the benchmarks and the example; no addon then.
+bench = ["simulation"]
+# Blobs in an object store (S3, GCS, Azure, a directory): `state::blobs::ObjectStoreBlobs`.
+# Enable the backend on `object_store` itself (its feature `aws` for S3).
+object-store = ["dep:object_store"]
 
 [dependencies]
-state = { path = "../../core/state" }
-sql = { path = "../../core/sql" }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"
-bytes = "1.10"
+turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
 futures = "0.3"
+bytes = "1.10"
+# The engine retains an owned schema lock across open-time I/O. Allow that
+# guard to move with the host future between executor threads, without a worker.
+parking_lot = { version = "0.12", features = ["send_guard"] }
+# Pages: zstd frames, a delta against the page before as the reference prefix.
+zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
+# Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line
+# to stdout whenever a file device opens.
+foyer = "=0.22.3"
+# foyer's disk tier runs on tokio; the cache starts a small runtime when the host has none.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+object_store = { version = "0.14", optional = true, default-features = false }
 
 [build-dependencies]
 napi-build = "2"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[[example]]
+name = "lookup"
+required-features = ["bench"]
+
+[[bench]]
+name = "amplification"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "small_databases"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "flush_costs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "read_latency"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "cache_cpu"
+harness = false
+required-features = ["bench"]

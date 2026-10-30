@@ -1,11 +1,11 @@
 # Build and test everything, part by part:
 #
-#   core/        the state crate (core/state), and SQL on it (core/sql)
-#   packages/    the pnpm workspace: the Node.js addon, restate-fns, the
+#   packages/    the pnpm workspace: the Node.js addon (the state and SQL
+#                inside it, in Rust), restate-fns, the
 #                integrations (tests/ and examples/ are members too)
 #
 #   make          build everything
-#   make test     every test that needs no Restate server (test-core, test-ts, ...)
+#   make test     every test that needs no Restate server (test-sql, test-ts, ...)
 #   make lint     every lint
 #   make help     every target
 #
@@ -14,10 +14,9 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 
 CARGO ?= cargo
 # The state, and SQL on it.
-CORE := core/state core/sql
 ADDON := packages/sql/sql.node
-# The Rust crates that rustfmt and clippy check.
-RUST_CRATES := $(CORE) packages/sql
+# The Rust crate: the addon, with the state and SQL.
+SQL := packages/sql
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
 OXFMT := node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
@@ -44,37 +43,34 @@ else
 RESTATE_TARGET := $(RESTATE_ARCH)-unknown-linux-musl
 endif
 
-.PHONY: all help core addon js examples-rust \
-	test test-core test-addon test-ts \
-	crash-test concurrency-test tools-test sql-bench lint lint-core lint-ts format clean
+.PHONY: all help addon js examples-rust \
+	test test-sql test-addon test-ts \
+	crash-test concurrency-test tools-test sql-bench lint lint-sql lint-ts format clean
 
 # --- Build
 
-all: core addon js ## Build everything
+all: addon js ## Build everything
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-20s %s\n", $$1, $$2}'
 
-core: ## The state crate and the SQL crate
-	for crate in $(CORE); do (cd $$crate && $(CARGO) build --locked --release) || exit 1; done
-
 addon: $(ADDON) ## The Node.js addon (packages/sql)
 
-$(ADDON): $(wildcard packages/sql/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) packages/sql/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
+$(ADDON): $(shell find $(SQL)/src -name '*.rs') $(SQL)/Cargo.toml $(SQL)/Cargo.lock
 	cd packages/sql && npm run build
 
 js: $(ADDON) ## The pnpm workspace, installed with the addon
 	pnpm install
 
-examples-rust: ## The Rust example: the SQL crate's lookup
-	cd core/sql && $(CARGO) build --locked --release --features simulation --example lookup
+examples-rust: ## The Rust example: a lookup in SQL on the state (packages/sql/examples)
+	cd $(SQL) && $(CARGO) build --locked --release --features bench --example lookup
 
 # --- Test
 
-test: test-core test-addon test-ts ## Every test that needs no Restate server
+test: test-sql test-addon test-ts ## Every test that needs no Restate server
 
-test-core: ## The state and SQL crates, with the simulation campaigns
-	for crate in $(CORE); do (cd $$crate && $(CARGO) test --locked && $(CARGO) test --locked --features simulation) || exit 1; done
+test-sql: ## The state and SQL in the addon's crate: their API, crashes and the simulation campaigns
+	cd $(SQL) && $(CARGO) test --locked --release
 
 test-addon: $(ADDON) ## The Node.js addon
 	cd packages/sql && npm test
@@ -82,12 +78,12 @@ test-addon: $(ADDON) ## The Node.js addon
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
 	cd tests && pnpm exec vitest run $(T)
 
-lint: lint-core lint-ts ## Every lint
+lint: lint-sql lint-ts ## Every lint
 
-lint-core: ## The Rust crates (the core and the addon): rustfmt --check and clippy
-	for crate in $(RUST_CRATES); do \
-		(cd $$crate && $(CARGO) fmt --check && $(CARGO) clippy --locked --all-targets --all-features -- -D warnings) || exit 1; \
-	done
+lint-sql: ## The addon's crate: rustfmt --check and clippy, with and without its features
+	cd $(SQL) && $(CARGO) fmt --check
+	cd $(SQL) && $(CARGO) clippy --locked --all-targets -- -D warnings
+	cd $(SQL) && $(CARGO) clippy --locked --all-targets --features bench,object-store -- -D warnings
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
 	pnpm typecheck
@@ -95,7 +91,7 @@ lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware)
 	$(OXFMT) --check
 
 format: js ## Format everything: rustfmt and oxfmt (TypeScript, JavaScript, Markdown)
-	for crate in $(RUST_CRATES); do (cd $$crate && $(CARGO) fmt) || exit 1; done
+	cd $(SQL) && $(CARGO) fmt
 	$(OXFMT)
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
@@ -104,7 +100,7 @@ crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through cra
 concurrency-test: js $(RESTATE_SERVER) ## Handlers with SQL: concurrent awaits, recovery, ctx.db and its transactions, against a Restate server
 	cd tests && node concurrency.ts
 
-sql-bench: js $(RESTATE_SERVER) ## SQL in objects against a Restate server: latency, throughput and stored bytes, for databases up to 100 MB (core/sql/benches/RESTATE_RESULTS.md)
+sql-bench: js $(RESTATE_SERVER) ## SQL in objects against a Restate server: latency, throughput and stored bytes, for databases up to 100 MB (packages/sql/benches/RESTATE_RESULTS.md)
 	cd tests && node sql/bench.ts
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
