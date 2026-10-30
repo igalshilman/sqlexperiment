@@ -19,7 +19,32 @@ const { GITHUB_REPO: repo, GITHUB_TOKEN: token } = process.env;
 if (repo && !token) throw new Error(`GITHUB_REPO is ${repo}: set GITHUB_TOKEN too, a token that can push to it`);
 const workspace = process.env.WORKSPACE ?? '/tmp/restate-factory';
 
-/** Linear's tools (issues, sub-issues, states, comments), from its MCP server. */
+/**
+ * `make()`, begun now and awaited where it is used: the endpoint does not
+ * wait for it to start serving (a coder's sandbox starts cold, on each new
+ * coder). If it fails, it is made again when next used.
+ */
+function begun<T>(what: string, make: () => Promise<T>): () => Promise<T> {
+  let made = make();
+  made.catch((e: Error) => console.warn(`${what}: ${e.message} (made again when next used)`));
+  return () => (made = made.catch(make));
+}
+
+/** The project's git repository: GitHub's (pushed to with GITHUB_TOKEN), or the stand-in's, in the workspace. */
+const remote = begun('the project', async () =>
+  project(repo ? `https://github.com/${repo}.git` : await standInRemote(workspace)),
+);
+
+/** GitHub's tools, from its MCP server: those the factory uses, when a tool needs them. */
+const github = begun("GitHub's tools", () =>
+  repo ? mcpTools('https://api.githubcopilot.com/mcp/', { authorization: `Bearer ${token}` }) : Promise.resolve([]),
+);
+
+/**
+ * Linear's tools (issues, sub-issues, states, comments), from its MCP server.
+ * Awaited before serving, the only one: they are the agents' tools, which
+ * their definitions name.
+ */
 const linear = apiKey
   ? await mcpTools('https://mcp.linear.app/mcp', { authorization: `Bearer ${apiKey}` })
   : await mcpTools('http://localhost:3333/mcp');
@@ -66,21 +91,15 @@ export const linearWebhookAuth: WebhookAuth | undefined = webhookSecret
   ? { header: 'linear-signature', secret: webhookSecret }
   : undefined;
 
-/** The project's git repository: GitHub's (pushed to with GITHUB_TOKEN), or the stand-in's, in the workspace. */
-const remote = await project(repo ? `https://github.com/${repo}.git` : await standInRemote(workspace));
-
 /** A coder's directory: a clone of the project, on a branch of its own (see workspace.ts). */
-export const coderWorkspace = ({ key }: { key: string }) => clone(workspace, remote, key);
+export const coderWorkspace = async ({ key }: { key: string }) => clone(workspace, await remote(), key);
 
-/** GitHub's tools, from its MCP server: those the factory uses. */
-const github = repo ? await mcpTools('https://api.githubcopilot.com/mcp/', { authorization: `Bearer ${token}` }) : [];
-const githubTool = (name: string) => {
-  const found = github.find((t) => t.name === name);
+/** GitHub's tool `name`. */
+const githubTool = async (name: string) => {
+  const found = (await github()).find((t) => t.name === name);
   if (!found) throw new Error(`GitHub's MCP server has no ${name} tool`);
   return found;
 };
-const createPullRequest = repo ? githubTool('create_pull_request') : undefined;
-const addComment = repo ? githubTool('add_issue_comment') : undefined;
 
 let standInPulls = 0;
 
@@ -103,11 +122,12 @@ export const pullRequestTool = (who: string) => {
     }),
     run: async ({ title, body, head, base }, call) => {
       const described = `${sign(call.ctx.key, body)}\n\n${pullRequestMark(call.ctx.key)}`;
-      if (!createPullRequest) {
+      if (!repo) {
         console.log(`pull request #${++standInPulls}: ${head} → ${base}, "${title}"`);
-        return `Pull request #${standInPulls}, ${head} → ${base} (on the stand-in: ${remote})`;
+        return `Pull request #${standInPulls}, ${head} → ${base} (on the stand-in: ${await remote()})`;
       }
-      const [owner, name] = repo!.split('/');
+      const [owner, name] = repo.split('/');
+      const createPullRequest = await githubTool('create_pull_request');
       return createPullRequest.run({ owner, repo: name, title, body: described, head, base }, call);
     },
   });
@@ -157,11 +177,12 @@ export const pullRequestCommentTool = (who: string) => {
     }),
     run: async ({ number, body }, call) => {
       const signed = sign(call.ctx.key, body);
-      if (!addComment) {
+      if (!repo) {
         console.log(`comment on pull request #${number}:\n${signed}`);
         return 'Posted (on the stand-in: logged)';
       }
-      const [owner, name] = repo!.split('/');
+      const [owner, name] = repo.split('/');
+      const addComment = await githubTool('add_issue_comment');
       return addComment.run({ owner, repo: name, issue_number: number, body: signed }, call);
     },
   });
