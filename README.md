@@ -195,9 +195,9 @@ pnpm format
 ```
 
 `pnpm --filter <package> test` runs one package's tests (add a filter, such
-as `langgraph`); the `e2e` package's run against a Restate server, the 1.8.0
-release that `@restatedev/restate-server` installs, or the binary
-`RESTATE_SERVER` names:
+as `langgraph`). The `e2e` package's scripts run against a Restate server:
+the 1.8.0 release that `@restatedev/restate-server` installs, or the binary
+`RESTATE_SERVER` names.
 
 ```sh
 pnpm --filter restate-agents test langgraph   # one framework's agent tests

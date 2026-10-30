@@ -1,9 +1,9 @@
 // Test only: the scripted tellers in place of the real models, for the
 // agents run as processes, such as the crash test's (packages/e2e/crash.ts):
 //
-//   MODEL=teller/teller node --import restate-agents/test/fakes/fakes serve.ts
+//   MODEL=teller/teller node --import restate-agents/test/fakes/fakes serve.ts   # in packages/e2e
 //
-// An example's import of a model's module gets the teller's module instead
+// An agent's import of a model's module gets the teller's module instead
 // (the unit tests do the same with vi.mock):
 // - pi-ai's provider `teller`: pi.ts;
 // - @anthropic-ai/sdk, of the Claude agent: claude.ts;
@@ -24,7 +24,7 @@ const packages: Record<string, string> = {
   '@langchain/anthropic': fake('langgraph.ts'),
   '@deepseek-ai/dsh-llm-deepseek-api-key': fake('deepseek.ts'),
 };
-/** The fakes of the examples' modules, by URL. */
+/** The fakes of restate-agents's own modules, by URL. */
 const modules: Record<string, string> = {
   [fake('../../src/opencode/db.ts')]: fake('opencode-db.ts'),
 };
