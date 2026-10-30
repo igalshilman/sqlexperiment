@@ -1,3 +1,0 @@
-# The durable functions run on CPython 3.15 (rust/functions/docs/PYTHON.md).
-extend = "../ruff.toml"
-target-version = "py314"

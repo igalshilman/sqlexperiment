@@ -14,8 +14,8 @@
 //!
 //! The state knows nothing of what writes it: the `sql` crate keeps its
 //! database in the file `db`, moving what it committed into a mutation
-//! before the host flushes it; the durable functions runtime adds a
-//! program's memory and its run. Coordinating them is theirs.
+//! before the host flushes it, and the host sets records of its own
+//! beside it. Coordinating them is theirs.
 //!
 //! # A tail and checkpoints
 //!

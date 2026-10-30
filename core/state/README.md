@@ -12,9 +12,8 @@ and a listing of its keys to collect the garbage.
 
 The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
 database in the file `db` and moves what it committed into a mutation before
-the host flushes it; the durable functions runtime adds a program's memory (a
-file and a log) and its run's state (a record). Coordinating them is the
-host's: see [the layers](../README.md#layers).
+the host flushes it, and the host adds records of its own beside it.
+Coordinating them is the host's: see [the layers](../README.md#layers).
 
 ## Use
 
@@ -72,8 +71,6 @@ writes since the last sync.
 - [Storage format](docs/FORMAT.md): exact encodings
 - [SQL](../sql/README.md): SQLite-compatible SQL on the state, with the
   storage tests and benchmarks that run SQL workloads
-- [Extensions](../../rust/functions/docs/EXTENSIONS.md): how the durable
-  functions runtime and its extensions keep their state here
 
 ## Layout
 

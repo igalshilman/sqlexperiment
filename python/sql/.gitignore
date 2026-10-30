@@ -1,4 +1,0 @@
-target/
-*.so
-*.pyd
-__pycache__/

@@ -536,8 +536,8 @@ impl Owner {
 }
 
 /// `value` in an allocation of its own. A value read from the store can be
-/// a slice of a larger receive buffer (the Rust SDK's eager state is slices
-/// of the invocation's start message), which the cache would otherwise keep
+/// a slice of a larger receive buffer (eager state is slices of the
+/// invocation's start message), which the cache would otherwise keep
 /// whole, uncounted, for as long as it keeps the value.
 fn owned(value: &Bytes) -> Bytes {
     Bytes::copy_from_slice(value)

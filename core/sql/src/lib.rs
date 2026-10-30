@@ -16,9 +16,8 @@
 //! leaves SQL's changes private. A mutation dropped discards what it
 //! holds, and SQL keeps its pages for the next flush. The host decides when
 //! to flush: after each SQL transaction (as SQLite does, and as the Node.js
-//! addon and the Python extension do, through [`binding::Session`]), or once
-//! per turn of everything that took part (as the durable functions runtime
-//! does).
+//! addon does, through [`binding::Session`]), or once for everything that
+//! took part in a step of its own.
 //!
 //! | Layer | Representation | Survives dropping it? |
 //! |---|---|---|

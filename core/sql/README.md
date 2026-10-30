@@ -40,8 +40,7 @@ into the mutation: one flushed without it leaves SQL's changes private, for a
 later one. A mutation dropped unflushed
 discards its writes; SQL still holds the pages it moved there, and its next
 `flush` moves them again. The host chooses when to flush:
-after each SQL transaction, as the Node.js addon and the Python extension do,
-or once per turn, as the durable functions runtime does. Bind values with
+after each SQL transaction, as the Node.js addon does, or less often. Bind values with
 `query_with`/`execute_with` rather than formatting them into SQL.
 `SqlOptions` caps a session's private changes and a statement's result rows.
 
@@ -52,12 +51,9 @@ outstanding requests and open a new one; a failed flush's outcome is unknown.
 
 ## Bindings
 
-- [Node.js addon](../../typescript/packages/sql/README.md): SQL over a
-  key/value store implemented in JavaScript, in `typescript/packages/sql/`
-- [Python extension](../../python/sql/README.md): the same in Python, in
-  `python/sql/`
-
-Both expose `binding::Session`: a session that flushes SQL into a mutation, with
+The [Node.js addon](../../typescript/packages/sql/README.md), in
+`typescript/packages/sql/`, runs SQL over a key/value store implemented in
+JavaScript. It exposes `binding::Session`: a session that flushes SQL into a mutation, with
 the `effects` record, and flushes the mutation after each call that leaves no SQL
 transaction open, with the transaction calls behind their `transaction()`.
 

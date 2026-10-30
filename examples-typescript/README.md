@@ -81,10 +81,6 @@ they start (see
 from code, or to send a message again safely, see
 [Calling an agent](../typescript/packages/integrations/README.md#calling-an-agent).
 
-## Python
-
-The Python examples are in [`examples-python`](../examples-python/README.md).
-
 ## Write your own
 
 A new file here, beside the others, runs the same way: its package has

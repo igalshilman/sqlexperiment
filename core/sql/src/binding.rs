@@ -1,5 +1,5 @@
-//! The session the language bindings expose (the Node.js addon, the Python
-//! extension), over a key/value store the host implements in its language.
+//! The session the Node.js addon exposes, over a key/value store the host
+//! implements in JavaScript.
 //!
 //! Unlike [`Sql`], a [`Session`] flushes the state itself: a call that
 //! leaves no SQL transaction open moves the SQL into a mutation and flushes it

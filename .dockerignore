@@ -1,6 +1,5 @@
 **/target
 **/node_modules
-**/.venv
 .git
 .direnv
 .env

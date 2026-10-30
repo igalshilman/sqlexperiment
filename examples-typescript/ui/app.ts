@@ -7,9 +7,6 @@
 //   npx @restatedev/restate deployments register http://localhost:9080
 //   npx vite ui                                                          # this page: http://localhost:5173
 //
-// The Python support agent (../../examples-python/intermediate/support.py) has the same
-// handlers: `uv run support.py` there serves this page as it is.
-//
 // Each user (`?user=alice`) is a conversation of its own: the agent's key.
 import * as clients from '@restatedev/restate-sdk-clients';
 import { agent, type ChatMessage, follow, type Part, type Status } from 'restate-agents/client';

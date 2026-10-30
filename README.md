@@ -1,6 +1,6 @@
-# Durable functions on Restate
+# SQL objects and agents on Restate
 
-Three layers, each on the one before:
+Two layers, the second on the first:
 
 1. **[Objects with SQL](#objects-with-sql)**: Restate virtual objects whose
    handlers run without journal replay, so a retried attempt runs again
@@ -10,9 +10,6 @@ Three layers, each on the one before:
 2. **[AI agents](#ai-agents)** in those objects, their conversation in the
    object's database: pi, OpenCode, LangGraph, Claude and more
    ([`restate-agents`](typescript/packages/integrations/README.md)).
-3. **[Durable functions](#durable-functions)**: plain JavaScript or Python,
-   with no SDK, whose memory is saved while they wait
-   ([`rust/functions`](rust/functions/README.md)).
 
 ## Objects with SQL
 
@@ -50,9 +47,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
-[`restate-fns`](typescript/packages/fns/README.md), and
-[`examples-python/basic/notes.py`](examples-python/basic/notes.py) for the same in Python
-([`restate_fns`](python/fns/README.md)).
+[`restate-fns`](typescript/packages/fns/README.md).
 
 ## AI agents
 
@@ -90,9 +85,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 
 The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
 or the DeepSeek Harness: see [`restate-agents`](typescript/packages/integrations/README.md)
-and [the examples](examples-typescript/README.md). In Python, it runs on
-Claude, LangGraph or Pydantic AI ([`restate_agents`](python/agents/README.md),
-[the examples](examples-python/README.md)).
+and [the examples](examples-typescript/README.md).
 
 ### Tools of its own
 
@@ -155,56 +148,6 @@ curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
 curl localhost:8080/assistant/alice/facts
 ```
 
-## Durable functions
-
-Plain JavaScript or Python, with no SDK: each file is a virtual object, and
-each function it exports is a handler. While a call waits, on a timer,
-another service or a model, its memory is saved: variables, closures, loops
-in progress. After a crash it carries on where it stopped; nothing is
-replayed. In this saga, the undo steps are closures in an array, and a crash
-between two steps loses none of them
-([`examples-functions/checkout.js`](examples-functions/checkout.js)):
-
-```js
-export async function pay({ customer, items }, ctx) {
-  const done = await ctx.kv.get('outcome');
-  if (done) return done;
-  let outcome;
-  const inventory = (sku, handler, qty) => ctx.rpc.call({ service: 'inventory', handler, key: sku }, qty);
-  const undo = [];
-  try {
-    for (const { sku, qty } of items) {
-      await inventory(sku, 'reserve', qty);
-      undo.push(() => inventory(sku, 'release', qty));
-    }
-    const total = items.reduce((sum, { qty, price }) => sum + qty * price, 0);
-    await ctx.rpc.call({ service: 'payments', handler: 'charge', key: customer }, total);
-    outcome = { status: 'paid', total };
-  } catch (error) {
-    for (const step of undo.reverse()) await step();
-    outcome = { status: 'cancelled', reason: error.message };
-  }
-  await ctx.kv.set('outcome', outcome);
-  return outcome;
-}
-```
-
-```sh
-make functions && target/release/functions   # every function in examples-functions/, on port 9080
-curl localhost:9070/deployments --json '{"uri": "http://localhost:9080"}'
-curl localhost:8080/inventory/widget/restock --json 5
-curl localhost:8080/payments/alice/deposit --json 100
-curl localhost:8080/checkout/order-1/pay --json '{"customer": "alice", "items": [{"sku": "widget", "qty": 2, "price": 10}]}'
-# {"status":"paid","total":20}
-curl localhost:8080/checkout/order-2/pay --json '{"customer": "alice", "items": [{"sku": "widget", "qty": 3, "price": 30}]}'
-# {"status":"cancelled","reason":"Error: Declined: balance 80, charge 90"}, and the 3 widgets back in stock
-```
-
-The [functions](examples-functions/README.md) include timers, retries,
-deadlines, fan-out and AI agents; the
-[same in Python](examples-functions-python/README.md) runs on CPython 3.15
-in WebAssembly. How it works: [`rust/functions`](rust/functions/README.md).
-
 ## Where things are
 
 Each part is a directory with its README, a workspace of its own; the
@@ -218,23 +161,14 @@ Each part is a directory with its README, a workspace of its own; the
 - [`typescript/`](typescript/README.md): the Node.js addon,
   [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the
   published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
-- [`python/`](python/README.md): the same for Python, with
-  [`restate-fns`](python/fns/README.md) on the published SDK.
-- [`rust/`](rust/README.md): the patched Rust SDK, and
-  [`functions`](rust/functions/README.md), the runtime for durable functions.
-- `examples-<part>/`: the examples, one directory per part:
-  [TypeScript](examples-typescript/README.md), [Python](examples-python/README.md),
-  [functions](examples-functions/README.md),
-  [functions in Python](examples-functions-python/README.md).
+- [`examples-typescript/`](examples-typescript/README.md): the examples.
 
 ## Requirements
 
-|                | Version                                                                                                   |
-| -------------- | --------------------------------------------------------------------------------------------------------- |
-| Restate server | 1.8 or later                                                                                              |
-| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md)                             |
-| Python SDK     | 1.1.0, as published, with [`restate-fns`](python/fns/README.md)                                           |
-| Rust SDK       | 0.12.1 with [the patches](rust/sdk/README.md), on the released shared core 8.1.0; `make sdk-rs` builds it |
+|                | Version                                                                       |
+| -------------- | ----------------------------------------------------------------------------- |
+| Restate server | 1.8 or later                                                                  |
+| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md) |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -248,22 +182,16 @@ tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
 
 ```sh
 nix develop       # or `direnv allow`, with use flake in .envrc
-make              # build everything: the crate, the addon, the pnpm and uv workspaces
+make              # build everything: the crates, the addon and the pnpm workspace
 make test         # every test that needs no Restate server
 make test-ts T=langgraph   # the TypeScript tests (vitest in typescript/tests), optionally filtered
-make test-py      # the Python tests: the extension, restate-fns and the integrations
 make crash-test         # the integrations and SQL objects through crashes, against a Restate server
 make concurrency-test   # the context without journal replay, against a Restate server
-make crash-test-py concurrency-test-py   # the same, in Python
-make test-functions           # durable JavaScript in Restate objects, with a Restate server
 make help
 ```
 
 Without Nix: besides Rust, the Node.js parts need node 24 or later (the
 examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs [their workspace](typescript/README.md) (`make js`).
-The Python parts need Python 3.13 and [uv](https://docs.astral.sh/uv/), which
-installs [their workspace](python/README.md) into `python/.venv` (`make py`),
-building the extension with maturin.
 
 The tests against a Restate server download its 1.8.0 release on first use
 (see the [`Makefile`](Makefile): `RESTATE_VERSION`,

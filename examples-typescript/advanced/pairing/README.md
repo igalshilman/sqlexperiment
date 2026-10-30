@@ -4,8 +4,7 @@ A coding agent you talk with about a project, for as long as the project
 lasts. You chat with it from a terminal; it plans, edits and runs code in
 the project's directory with pi's coding tools, has a reviewer read its
 diff, and asks for your approval before it ships. The agent's loop runs in
-Restate: each model step and each tool call is stored. The same example in
-Python, in a sandbox: [`examples-python/advanced/pairing`](../../../examples-python/advanced/pairing/README.md).
+Restate: each model step and each tool call is stored.
 
 ```
 you ──▶ pair.ts (a terminal) ──▶ pair/<project> (pi) ──▶ WORKSPACE/<project>: read, write, edit, bash

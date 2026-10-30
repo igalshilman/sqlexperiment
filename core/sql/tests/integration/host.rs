@@ -1,8 +1,7 @@
 //! A host of the state, as the tests use it: SQL on a state of its own, and
 //! the turn's mutation, which the host sets records and writes files in. It
 //! flushes when the host saves ([`Durability::Save`]) or after each SQL
-//! transaction ([`Durability::Commit`]), as the Node.js addon and the Python
-//! extension do.
+//! transaction ([`Durability::Commit`]), as the Node.js addon does.
 use bytes::Bytes;
 use sql::{Sql, SqlOptions, Value};
 pub use state::simulation::Setup as StateSetup;

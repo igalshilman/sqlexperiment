@@ -1,11 +1,6 @@
 target/
 /.direnv/
 node_modules/
-.venv/
-__pycache__/
-/dist/
-/rust/functions/bench-*.json
-/rust/functions/workspaces/
 .env
 .env.*
 !.env.example
