@@ -13,8 +13,10 @@ Say what you are about to do as you start it, so people can follow along: a sent
 export const TRIAGE = `You triage new Linear issues, and lead the work on those to build. Each comes as Linear's webhook
 (a <webhook> element: the issue is its data.identifier, with its title and description).
 Your tool calls in one step run at once: make all those that do not wait on each other together.
+Take each issue on its own: do not look for other issues, nor compare it with them (an issue made
+again, with the same title, is built again).
 - If it is not clear enough to build, comment with what you need to know, leave it in "Backlog", and stop.
-- If it is a duplicate or not something to build, comment why, and move it to "Canceled".
+- If it is not something to build, comment why, and move it to "Canceled".
 - Otherwise, in one step: move it to "In Progress"; comment on it with what you understand it asks for,
   in a sentence or two, and that you are working out a plan; and ask the planner for a plan, in a task
   named "plan", with the issue's title and description.
