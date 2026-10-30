@@ -1,9 +1,8 @@
 # A software factory
 
-A new issue in Linear starts it, through a webhook. Agents on three
+A new issue in Linear starts it, through a webhook. Agents on two
 frameworks take it from there. A triage agent (pi) decides whether the issue
-is ready to build, and leads the work: it asks a planner (the DeepSeek
-Harness, on a model of Modal's) for a
+is ready to build, and leads the work: it asks a planner (pi) for a
 plan, which comes back structured (a summary, and parts that can be built
 at once); it makes a Linear sub-issue for each part, and hands every part to
 a coder (OpenCode) of its own, all at once: each on a git branch of its
@@ -46,7 +45,7 @@ stand-in, [`linear.ts`](linear.ts), with the same tools.
   │     ▼               │       ▼                  ▼  its changes back to the coder    │
   │  ┌──────────────────┴───┐ ┌────────────┐ ┌────────────┐                            │
   │  │ planner/ENG-1.plan   │ │ coder/     │ │ reviewer/  │  coders push, open         │
-  │  │             DeepSeek │ │ ENG-1.     │ │ ENG-1.     │  the PRs, and answer       │
+  │  │                   pi │ │ ENG-1.     │ │ ENG-1.     │  the PRs, and answer       │
   │  │                      │ │ parser,    │ │ parser,    │  each review on them;      │
   │  │ replies with the     │ │ ENG-1.     │ │ ENG-1.     │  reviewers read them,      │
   │  │ plan, as JSON        │ │ history    │ │ history    │  and post their reviews    │
@@ -62,7 +61,7 @@ stand-in, [`linear.ts`](linear.ts), with the same tools.
                                └───────────────────────────┘
 ```
 
-The planner only plans: a DeepSeek Harness agent whose `output` is the plan's schema
+The planner only plans: a pi agent whose `output` is the plan's schema
 ([`answers.ts`](answers.ts)), and no tools: triage hands it the issue's title
 and description. The model replies with the plan as JSON of that schema, which
 is checked, and the planner's `chat` answers with it, as a call answers.
@@ -84,7 +83,7 @@ people to merge.
   time ──▶
 
   Linear                     triage (pi), the parent   planner, reviewer   coders (OpenCode)
-    │                               │                    (DeepSeek; pi) parser     history
+    │                               │                    (pi)           parser     history
   ENG-1  Backlog ──── webhook ─────▶│ reads it              │             │           │
     │◀── In Progress, comment: ─────┤                       │             │           │
     │    "let me make a plan"       │                       │             │           │
@@ -137,7 +136,6 @@ to **Canceled**.
 | [`workspace.ts`](workspace.ts)   | The coders' clones of the project, each on its own branch, and what they pushed; a first commit for an empty project; the stand-in's       |
 | [`linear.ts`](linear.ts)         | Linear, a stand-in: issues and sub-issues in memory, its MCP server, and a signed webhook for each issue and comment                       |
 | [`board/`](board/board.ts)       | The board: a page that shows each issue as the agents work on it, live, and their conversations                                            |
-| [`on_modal.py`](on_modal.py)     | The planner on Modal: the factory's image, serving the planner alone, as a Modal Server                                                    |
 
 ## Talk to a coder, on its pull request
 
@@ -165,14 +163,12 @@ each event, which `webhook()`'s `message` leaves out.
 
 From [`examples-typescript/`](../..), after `make js` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
-OpenAI's for triage (GPT Sol) and the reviewer (GPT Astra), both in OpenAI's
-fast mode, Anthropic's for the coders (Claude Sonnet), and a Modal endpoint
-of DeepSeek V4.1 Flash for the planner (see [below](#the-planners-model-on-modal)):
+OpenAI's for triage and the planner (GPT Sol) and the reviewer (GPT Astra),
+all in OpenAI's fast mode, and Anthropic's for the coders (Claude Sonnet):
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
-OPENAI_API_KEY=… ANTHROPIC_API_KEY=… MODAL_ENDPOINT_URL=… MODAL_PROXY_KEY=wk-… MODAL_PROXY_SECRET=ws-… \
-  node advanced/factory/factory.ts
+OPENAI_API_KEY=… ANTHROPIC_API_KEY=… node advanced/factory/factory.ts
 npx @restatedev/restate-server
 ```
 
@@ -257,7 +253,7 @@ requests. Use a team and a repository of their own, for the factory.
 ```sh
 LINEAR_API_KEY=lin_api_… LINEAR_WEBHOOK_SECRET=lin_wh_… \
 GITHUB_REPO=igalshilman/demos GITHUB_TOKEN=github_pat_… GITHUB_WEBHOOK_SECRET=… \
-OPENAI_API_KEY=… ANTHROPIC_API_KEY=… MODAL_ENDPOINT_URL=… MODAL_PROXY_KEY=wk-… MODAL_PROXY_SECRET=ws-… \
+OPENAI_API_KEY=… ANTHROPIC_API_KEY=… \
   node advanced/factory/factory.ts
 npx @restatedev/restate-server              # and register the factory, as above
 ```
@@ -291,42 +287,6 @@ Restate, so one part serves it for all).
 docker run -e RESTATE_SERVE_ONLY=coder ...                                           # the coders
 docker run -e RESTATE_SERVE_ONLY=linear,github,triage,planner,reviewer,signals ...   # the rest
 ```
-
-## The planner, on Modal
-
-[`on_modal.py`](on_modal.py) deploys one agent of the factory, the planner,
-to [Modal](https://modal.com), as a Modal Server: the same image, serving the
-planner alone (`RESTATE_SERVE_ONLY=planner`), over HTTP/2, end to end
-(`h2_enabled`), as the agents need. Restate registers it as a deployment of
-its own, and triage calls the planner there, through Restate, as before.
-
-```sh
-uvx modal secret create factory --from-dotenv examples-typescript/.env
-uvx modal deploy examples-typescript/advanced/factory/on_modal.py
-restate deployments register https://<workspace>--restate-factory-planner.us-east.modal.direct \
-    --extra-header "Modal-Key: wk-…" --extra-header "Modal-Secret: ws-…"   # a Modal proxy token
-docker run -e RESTATE_SERVE_ONLY=linear,github,triage,signals ...           # the rest, without it
-```
-
-The secret is the whole `.env`: the planner needs only its model's (below), but
-the endpoint asks Linear and GitHub for their tools as it starts
-([`env.ts`](env.ts)), whichever agents it serves.
-
-## The planner's model, on Modal
-
-The planner runs on DeepSeek V4.1 Flash, on a shared endpoint of
-[Modal's](https://modal.com/docs/guide/endpoints): Modal runs the model, and
-bills by the token. `restate-agents/deepseek` calls it as `modal/<model-id>`,
-with Anthropic's Messages API, as it calls DeepSeek's own; each conversation
-stays on one of the endpoint's containers (its routing affinity), so its
-prompt cache is reused.
-
-```sh
-uvx modal endpoint create --shared --model deepseek-ai/DeepSeek-V4.1-Flash   # its URL: MODAL_ENDPOINT_URL
-```
-
-`MODAL_PROXY_KEY` and `MODAL_PROXY_SECRET` are a proxy token's
-(modal.com/settings/proxy-auth-tokens), as for the planner's deployment above.
 
 ## Watch it, on the board
 
