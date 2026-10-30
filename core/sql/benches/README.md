@@ -7,7 +7,7 @@ feature. They count logical KV operations and bytes in MemoryKv; they do
 not model a real remote backend.
 
 Against a real Restate server, `make sql-bench` from the repository's root runs
-[the end-to-end benchmark](../../../typescript/tests/sql/bench.ts): see
+[the end-to-end benchmark](../../../tests/sql/bench.ts): see
 [RESTATE_RESULTS.md](RESTATE_RESULTS.md) (measured on the log format, v15,
 before copy-on-write).
 

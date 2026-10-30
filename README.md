@@ -6,16 +6,16 @@ Two layers, the second on the first:
    handlers run without journal replay, so a retried attempt runs again
    against the state as stored, each key with its own SQLite-compatible
    database, stored in the object's state
-   ([`restate-fns`](typescript/packages/fns/README.md)).
+   ([`restate-fns`](packages/fns/README.md)).
 2. **[AI agents](#ai-agents)** in those objects, their conversation in the
    object's database: pi, OpenCode, LangGraph, Claude and more
-   ([`restate-agents`](typescript/packages/integrations/README.md)).
+   ([`restate-agents`](packages/integrations/README.md)).
 
 ## Objects with SQL
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
 kept in the object's state: no database to run. `restate-fns` is the Restate SDK with
-that in its objects ([`examples-typescript/basic/notes.ts`](examples-typescript/basic/notes.ts)):
+that in its objects ([`examples/basic/notes.ts`](examples/basic/notes.ts)):
 
 ```ts
 import * as restate from 'restate-fns';
@@ -47,7 +47,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
-[`restate-fns`](typescript/packages/fns/README.md).
+[`restate-fns`](packages/fns/README.md).
 
 ## AI agents
 
@@ -55,7 +55,7 @@ An agent is an object with SQL: its conversation is in its own database, so
 a crash, or a manager who takes a day, changes nothing. This one's tools are
 Restate itself: it looks an order up with a service, waits for a manager's
 approval, and refunds with a workflow
-([`examples-typescript/intermediate/support.ts`](examples-typescript/intermediate/support.ts)):
+([`examples/intermediate/support.ts`](examples/intermediate/support.ts)):
 
 ```ts
 const support = pi.agent({
@@ -84,15 +84,15 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 ```
 
 The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
-or the DeepSeek Harness: see [`restate-agents`](typescript/packages/integrations/README.md)
-and [the examples](examples-typescript/README.md).
+or the DeepSeek Harness: see [`restate-agents`](packages/integrations/README.md)
+and [the examples](examples/README.md).
 
 ### Tools of its own
 
 A tool is a function with the object's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
 conversation, and a handler of yours serves that table, for a profile page
-say ([`examples-typescript/basic/memory.ts`](examples-typescript/basic/memory.ts)):
+say ([`examples/basic/memory.ts`](examples/basic/memory.ts)):
 
 ```ts
 import { handlers } from 'restate-fns';
@@ -150,25 +150,32 @@ curl localhost:8080/assistant/alice/facts
 
 ## Where things are
 
-Each part is a directory with its README, a workspace of its own; the
-[`Makefile`](Makefile) builds and tests them all.
+The repository is one pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml));
+each part is a directory with its README, and the [`Makefile`](Makefile)
+builds and tests them all.
 
 - [`core/`](core): the storage every SDK builds on: the
   [`state`](core/state/README.md) (records and paged files, changed
   through a mutation and flushed atomically, in one round trip) and
   [`sql`](core/sql/README.md) on it; [the layers](core/README.md#layers), from
   Restate's key/value store up to the SDKs.
-- [`typescript/`](typescript/README.md): the Node.js addon,
-  [`restate-fns`](typescript/packages/fns/README.md) (SQL in virtual objects, on the
-  published SDK) and the [`restate-agents`](typescript/packages/integrations/README.md) integrations.
-- [`examples-typescript/`](examples-typescript/README.md): the examples.
+- [`packages/sql/`](packages/sql/README.md): the Node.js addon, `restate-sql`,
+  the crates over a key/value store implemented in JavaScript.
+- [`packages/fns/`](packages/fns/README.md): `restate-fns`, SQL in virtual
+  objects (`ctx.db`, `ctx.transaction`) on the published SDK.
+- [`packages/integrations/`](packages/integrations/README.md): `restate-agents`,
+  pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
+- [`examples/`](examples/README.md): the examples, each a small file you run with node.
+- [`tests/`](tests/README.md): the agents on scripted models, the storage
+  conformance suites, SQL in objects, and the crash and concurrency tests
+  against a real Restate server.
 
 ## Requirements
 
-|                | Version                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| Restate server | 1.8 or later                                                                  |
-| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](typescript/packages/fns/README.md) |
+|                | Version                                                            |
+| -------------- | ------------------------------------------------------------------ |
+| Restate server | 1.8 or later                                                       |
+| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](packages/fns/README.md) |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -184,14 +191,15 @@ tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
 nix develop       # or `direnv allow`, with use flake in .envrc
 make              # build everything: the crates, the addon and the pnpm workspace
 make test         # every test that needs no Restate server
-make test-ts T=langgraph   # the TypeScript tests (vitest in typescript/tests), optionally filtered
+make test-ts T=langgraph   # the TypeScript tests (vitest in tests/), optionally filtered
+make tools-test         # Restate's own agent tools, against a Restate server
 make crash-test         # the integrations and SQL objects through crashes, against a Restate server
 make concurrency-test   # the context without journal replay, against a Restate server
 make help
 ```
 
 Without Nix: besides Rust, the Node.js parts need node 24 or later (the
-examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs [their workspace](typescript/README.md) (`make js`).
+examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs the workspace (`make js`).
 
 The tests against a Restate server download its 1.8.0 release on first use
 (see the [`Makefile`](Makefile): `RESTATE_VERSION`,

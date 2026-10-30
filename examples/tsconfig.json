@@ -1,0 +1,7 @@
+{
+  // The examples, as the workspace's TypeScript (../tsconfig.json)
+  // checks them: `make lint-ts`. The pages (ui/, advanced/factory/board/) have their own.
+  "extends": "../tsconfig.json",
+  "include": ["**/*.ts"],
+  "exclude": ["**/node_modules", "ui", "advanced/factory/board"]
+}

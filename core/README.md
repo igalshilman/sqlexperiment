@@ -7,7 +7,7 @@ core, which runs such a handler since 8.1.0, is used as released.)
 | Path                        | What                                                                                                                                                                                                     |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`state/`](state/README.md) | **The state.** Records and paged files over an asynchronous key/value store, changed through a mutation that a flush makes durable atomically, in one round trip, for one owner at a time: a Rust crate. |
-| [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../typescript/packages/sql/README.md) wraps it.                                               |
+| [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../packages/sql/README.md) wraps it.                                                          |
 
 ## Layers
 

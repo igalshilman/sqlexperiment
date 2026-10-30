@@ -51,8 +51,8 @@ outstanding requests and open a new one; a failed flush's outcome is unknown.
 
 ## Bindings
 
-The [Node.js addon](../../typescript/packages/sql/README.md), in
-`typescript/packages/sql/`, runs SQL over a key/value store implemented in
+The [Node.js addon](../../packages/sql/README.md), in
+`packages/sql/`, runs SQL over a key/value store implemented in
 JavaScript. It exposes `binding::Session`: a session that flushes SQL into a mutation, with
 the `effects` record, and flushes the mutation after each call that leaves no SQL
 transaction open, with the transaction calls behind their `transaction()`.

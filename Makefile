@@ -1,8 +1,8 @@
 # Build and test everything, part by part:
 #
 #   core/        the state crate (core/state), and SQL on it (core/sql)
-#   typescript/  the pnpm workspace: the Node.js addon, restate-fns, the
-#                integrations, their tests and the examples
+#   packages/    the pnpm workspace: the Node.js addon, restate-fns, the
+#                integrations (tests/ and examples/ are members too)
 #
 #   make          build everything
 #   make test     every test that needs no Restate server (test-core, test-ts, ...)
@@ -15,14 +15,14 @@ export CARGO_TARGET_DIR ?= $(CURDIR)/target
 CARGO ?= cargo
 # The state, and SQL on it.
 CORE := core/state core/sql
-ADDON := typescript/packages/sql/sql.node
+ADDON := packages/sql/sql.node
 # The Rust crates that rustfmt and clippy check.
-RUST_CRATES := $(CORE) typescript/packages/sql
+RUST_CRATES := $(CORE) packages/sql
 # Formats the TypeScript, JavaScript and Markdown of every part, as .oxfmtrc.json says.
-OXFMT := typescript/node_modules/.bin/oxfmt
+OXFMT := node_modules/.bin/oxfmt
 # Lints the TypeScript of every part, as .oxlintrc.json says; its type-aware
 # rules run tsgolint, from the pnpm workspace too.
-OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/typescript/node_modules/.bin/tsgolint typescript/node_modules/.bin/oxlint
+OXLINT := OXLINT_TSGOLINT_PATH=$(CURDIR)/node_modules/.bin/tsgolint node_modules/.bin/oxlint
 # The tests against a Restate server run RESTATE_VERSION's GitHub release for
 # this platform by default (1.8; its protocol is v7: the stores' state reads
 # are journaled until v8 ships, see FUTURE.md). Or RESTATE_FROM=image
@@ -58,13 +58,13 @@ help: ## List the targets
 core: ## The state crate and the SQL crate
 	for crate in $(CORE); do (cd $$crate && $(CARGO) build --locked --release) || exit 1; done
 
-addon: $(ADDON) ## The Node.js addon (typescript/packages/sql)
+addon: $(ADDON) ## The Node.js addon (packages/sql)
 
-$(ADDON): $(wildcard typescript/packages/sql/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) typescript/packages/sql/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
-	cd typescript/packages/sql && npm run build
+$(ADDON): $(wildcard packages/sql/src/*.rs $(addsuffix /src/*.rs,$(CORE)) $(addsuffix /src/*/*.rs,$(CORE))) packages/sql/Cargo.toml $(addsuffix /Cargo.toml,$(CORE))
+	cd packages/sql && npm run build
 
 js: $(ADDON) ## The pnpm workspace, installed with the addon
-	cd typescript && pnpm install
+	pnpm install
 
 examples-rust: ## The Rust example: the SQL crate's lookup
 	cd core/sql && $(CARGO) build --locked --release --features simulation --example lookup
@@ -77,10 +77,10 @@ test-core: ## The state and SQL crates, with the simulation campaigns
 	for crate in $(CORE); do (cd $$crate && $(CARGO) test --locked && $(CARGO) test --locked --features simulation) || exit 1; done
 
 test-addon: $(ADDON) ## The Node.js addon
-	cd typescript/packages/sql && npm test
+	cd packages/sql && npm test
 
 test-ts: js ## The integrations, their storage and SQL in objects, without a Restate server (T=<filter>, such as T=langgraph)
-	cd typescript/tests && pnpm exec vitest run $(T)
+	cd tests && pnpm exec vitest run $(T)
 
 lint: lint-core lint-ts ## Every lint
 
@@ -90,8 +90,8 @@ lint-core: ## The Rust crates (the core and the addon): rustfmt --check and clip
 	done
 
 lint-ts: js ## The TypeScript, JavaScript and Markdown: tsc, oxlint (type-aware) and oxfmt --check
-	cd typescript && pnpm typecheck
-	$(OXLINT) --type-aware typescript examples-typescript
+	pnpm typecheck
+	$(OXLINT) --type-aware packages tests examples
 	$(OXFMT) --check
 
 format: js ## Format everything: rustfmt and oxfmt (TypeScript, JavaScript, Markdown)
@@ -99,16 +99,16 @@ format: js ## Format everything: rustfmt and oxfmt (TypeScript, JavaScript, Mark
 	$(OXFMT)
 
 crash-test: js $(RESTATE_SERVER) ## The integrations and SQL objects through crashes, against a Restate server
-	cd typescript/tests && node crash.ts
+	cd tests && node crash.ts
 
 concurrency-test: js $(RESTATE_SERVER) ## Handlers with SQL: concurrent awaits, recovery, ctx.db and its transactions, against a Restate server
-	cd typescript/tests && node concurrency.ts
+	cd tests && node concurrency.ts
 
 sql-bench: js $(RESTATE_SERVER) ## SQL in objects against a Restate server: latency, throughput and stored bytes, for databases up to 100 MB (core/sql/benches/RESTATE_RESULTS.md)
-	cd typescript/tests && node sql/bench.ts
+	cd tests && node sql/bench.ts
 
 tools-test: js $(RESTATE_SERVER) ## Restate's own agent tools (call, signal, workflow), against a Restate server
-	cd typescript/tests && node restate-tools.ts
+	cd tests && node restate-tools.ts
 
 # Into a temporary file, moved into place once it runs: a failed download or
 # copy leaves no binary that make would take as up to date.
@@ -127,4 +127,4 @@ endif
 
 clean: ## Remove build outputs
 	rm -rf $(CARGO_TARGET_DIR) $(ADDON) \
-		typescript/node_modules typescript/*/node_modules typescript/packages/*/node_modules examples-typescript/node_modules
+		node_modules packages/*/node_modules tests/node_modules examples/node_modules

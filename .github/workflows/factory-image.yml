@@ -1,4 +1,4 @@
-# The software factory's image (examples-typescript/advanced/factory), on
+# The software factory's image (examples/advanced/factory), on
 # GitHub's container registry: ghcr.io/igalshilman/sqlexperiment/factory,
 # for linux/amd64 and linux/arm64 (each built natively, on a runner of its own).
 #
@@ -10,9 +10,12 @@ on:
   push:
     branches: [main]
     paths: &paths
-      - examples-typescript/advanced/factory/**
-      - examples-typescript/package.json
-      - typescript/**
+      - examples/advanced/factory/**
+      - examples/package.json
+      - packages/**
+      - package.json
+      - pnpm-workspace.yaml
+      - pnpm-lock.yaml
       - core/**
       - .dockerignore
       - .github/workflows/factory-image.yml
@@ -52,7 +55,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: examples-typescript/advanced/factory/Dockerfile
+          file: examples/advanced/factory/Dockerfile
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUSH }}
           cache-from: type=gha,scope=${{ matrix.platform }}
