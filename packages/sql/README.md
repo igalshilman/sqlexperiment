@@ -3,8 +3,8 @@
 SQLite-compatible SQL over a key/value store implemented in JavaScript: a
 native addon ([napi-rs](https://napi.rs)) with the storage inside it, the
 [state and SQL on it](#inside-the-layers). It is for the Restate TypeScript
-SDK, where the store is an object's state: [`restate-fns`](../fns/README.md)
-builds `ctx.db` on it.
+SDK, where the store is an object's state:
+[`restate-objects`](../objects/README.md) builds `ctx.db` on it.
 
 ```js
 const { open } = require('restate-sql');
@@ -82,7 +82,7 @@ same way: a layer keeps it private until the one above hands it on, and only
 the state's flush makes it durable.
 
 ```
-host     restate-fns (Node.js): flush after each SQL transaction
+host     restate-objects (Node.js): flush after each SQL transaction
              │
              ▼
 SQL      Sql: statements change a private view; Sql::flush(&mut mutation)
@@ -115,7 +115,7 @@ A storage error, a cancelled call or a failed flush ends the `Sql` and the
 `State` alike: the flush's outcome is unknown, so the host settles outstanding
 requests and opens them again, reading whatever head last landed.
 
-**The host.** `binding::Session`, the Node.js addon's under `restate-fns`,
+**The host.** `binding::Session`, the Node.js addon's under `restate-objects`,
 pairs `Sql::flush` with the mutation's flush after each call that leaves no
 SQL transaction open. In the same mutation it sets the record `effects`: the
 sends committed with the rows, an outbox, opaque to the storage.

@@ -2,7 +2,7 @@
 // before or after random requests of the objects' stores; and with ABORT_AT,
 // at that request (counted from 1), so that it aborts at least once.
 import * as restate from '@restatedev/restate-sdk';
-import { setStoreWrapper } from 'restate-fns/internal';
+import { setStoreWrapper } from 'restate-objects/internal';
 import { fileURLToPath } from 'node:url';
 
 const perMille = Number(process.env.ABORT_PER_MILLE ?? 0);

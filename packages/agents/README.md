@@ -522,7 +522,7 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-fns';
+import { handlers } from 'restate-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -591,8 +591,9 @@ message being answered.
 ## Build your own
 
 `restate-agents` is not published: it runs on
-[`restate-fns`](../fns/README.md) (SQL in virtual objects) and the Node.js
-addon ([`restate-sql`](../sql/README.md)), which this repository builds.
+[`restate-objects`](../objects/README.md) (SQL in virtual objects) and the
+Node.js addon ([`restate-sql`](../sql/README.md)), which this repository
+builds.
 Build them once, at the repository's root, with `pnpm install && pnpm build`:
 it needs Rust (for the addon), Node 24 or later, and pnpm (see
 [Build and test](../../README.md#build-and-test)).

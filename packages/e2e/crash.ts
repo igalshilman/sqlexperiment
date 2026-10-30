@@ -27,8 +27,8 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import type { ChildProcess } from 'node:child_process';
 import type { Messages } from 'restate-agents';
-import type { Audit } from 'restate-fns/test/ledger';
-import type { Order, Reservation } from 'restate-fns/test/shop';
+import type { Audit } from 'restate-objects/test/ledger';
+import type { Order, Reservation } from 'restate-objects/test/shop';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';

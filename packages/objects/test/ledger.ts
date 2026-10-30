@@ -5,7 +5,7 @@
 // Environment: PORT (default 9080), ABORT_PER_MILLE (abort the process at
 // random state requests, for crash tests; see faults.ts) and
 // RESTATE_SQL_CACHE_FILE.
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import { serveIfMain } from './faults.ts';
 import { row } from './sql.ts';
 

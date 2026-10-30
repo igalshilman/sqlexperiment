@@ -8,8 +8,8 @@ it waits on, and where the code marks it (`TODO:` comments).
 **Waits on:** a Restate release with service protocol v8, and a TypeScript
 SDK release that exposes its ephemeral get.
 
-**Now:** the SQL store of `restate-fns` reads the object's state with
-regular, journaled gets (`objectStore` in `packages/fns/src/session.ts`:
+**Now:** the SQL store of `restate-objects` reads the object's state with
+regular, journaled gets (`objectStore` in `packages/objects/src/session.ts`:
 `ctx.get`). Restate 1.8.0, the release the tests run
 (`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
 at most.
@@ -52,16 +52,16 @@ every tail entry and pack, and a session's first read is the head
 the server ships it with the invocation (best effort, within its
 eager-state size limit), and the open starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be
-listed. The options are `sqlOptions` in `restate-fns`
-(`packages/fns/src/index.ts`); its `TODO:` marks them.
+listed. The options are `sqlOptions` in `restate-objects`
+(`packages/objects/src/index.ts`); its `TODO:` marks them.
 
 ## Concurrent awaits in the TypeScript SDK
 
 **Waits on:** an SDK release whose explicit recovery lets a handler
 await concurrently.
 
-**Now:** `restate-fns` drives a SQL handler's promises with a selector of its
-own (`packages/fns/src/selector.ts`), which takes over the
+**Now:** `restate-objects` drives a SQL handler's promises with a selector of its
+own (`packages/objects/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
 package pins `@restatedev/restate-sdk` 1.17.4. The published SDK lets one
 awaited promise wait for the server at a time

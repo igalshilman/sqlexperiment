@@ -1,9 +1,9 @@
 // Test support: an object's state in memory, and an attempt of a handler over
-// it, with restate-fns's own `ctx.db`, `ctx.transaction` and `ctx.step`, through
+// it, with restate-objects's own `ctx.db`, `ctx.transaction` and `ctx.step`, through
 // crashes and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
-import * as restate from 'restate-fns';
-import { SqlAttempt, type SqlHost, withSql } from 'restate-fns/internal';
+import * as restate from 'restate-objects';
+import { SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
 import type { Store } from 'restate-sql';
 
 /**
@@ -51,7 +51,7 @@ export interface AttemptOptions {
 }
 
 /**
- * `ctx.db`, `ctx.transaction` and `ctx.step` of an attempt, restate-fns's own,
+ * `ctx.db`, `ctx.transaction` and `ctx.step` of an attempt, restate-objects's own,
  * over `map`, and `end`, which runs the handler and ends the attempt's session
  * as an object's handler does. Each attempt is a database of its own in this
  * process (a namespace of its own), so that one a crash abandoned does not

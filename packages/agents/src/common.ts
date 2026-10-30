@@ -2,7 +2,7 @@
 // ids of an invocation's prompts, the `chat` handler with its turn (status,
 // cancellation, steering, publishing for the clients that follow it), and
 // the `messages` handler with its `Transcript`.
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import * as log from './log.ts';
 import type { Said } from './log.ts';
 import { agentOf, type Steer, signals, signalsOf } from './signals.ts';

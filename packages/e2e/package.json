@@ -16,7 +16,7 @@
     "@restatedev/restate-sdk": "1.17.4",
     "@restatedev/restate-sdk-clients": "1.17.4",
     "restate-agents": "workspace:*",
-    "restate-fns": "workspace:*",
+    "restate-objects": "workspace:*",
     "zod": "4.6.5"
   },
   "devDependencies": {

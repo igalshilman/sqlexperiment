@@ -2,7 +2,7 @@
 // own, kept in the object's state, `ctx.db`. It is the Restate SDK, with
 // `object`, `handlers.object` and the object contexts of SQL:
 //
-//   import * as restate from 'restate-fns';
+//   import * as restate from 'restate-objects';
 //
 //   const notes = restate.object({
 //     name: 'notes',
@@ -115,7 +115,7 @@ export const sqlMetadata = {
 };
 
 // Marks the handlers made here.
-const SQL = Symbol('restate-fns handler');
+const SQL = Symbol('restate-objects handler');
 
 type Fn<C> = (ctx: C, input: never) => Promise<unknown>;
 

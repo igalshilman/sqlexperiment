@@ -4,7 +4,7 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
-import { memoryStore } from 'restate-fns/test/support';
+import { memoryStore } from 'restate-objects/test/support';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';
 
 const State = Annotation.Root({

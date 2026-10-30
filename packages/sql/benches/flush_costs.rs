@@ -130,7 +130,7 @@ struct Workload {
 }
 
 const WORKLOADS: [Workload; 11] = [
-    // A restate-fns object: a message row, and its sends as effects.
+    // A restate-objects object: a message row, and its sends as effects.
     Workload {
         name: "chat+effects",
         rows: 0,

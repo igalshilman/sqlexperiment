@@ -1,7 +1,7 @@
-// A key's databases apart from the object's own (databaseOf of restate-fns),
+// A key's databases apart from the object's own (databaseOf of restate-objects),
 // without a Restate server: each its own tables, stored in the object's state
 // beside `ctx.db`'s, opened on first use and ended with the attempt.
-import { databaseOf } from 'restate-fns/internal';
+import { databaseOf } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 

@@ -173,9 +173,9 @@ importers:
       effect:
         specifier: 4.0.1
         version: 4.0.1
-      restate-fns:
+      restate-objects:
         specifier: workspace:*
-        version: link:../fns
+        version: link:../objects
       restate-sql:
         specifier: workspace:*
         version: link:../sql
@@ -201,9 +201,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-fns:
+      restate-objects:
         specifier: workspace:*
-        version: link:../fns
+        version: link:../objects
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -244,9 +244,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-fns:
+      restate-objects:
         specifier: workspace:*
-        version: link:../fns
+        version: link:../objects
       restate-sql:
         specifier: workspace:*
         version: link:../sql
@@ -261,7 +261,7 @@ importers:
         specifier: 8.3.4
         version: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)
 
-  packages/fns:
+  packages/objects:
     dependencies:
       '@restatedev/restate-sdk':
         specifier: 1.17.4

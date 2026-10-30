@@ -4,7 +4,7 @@
  * the pair keeps up to date as it works.
  */
 import { tool } from 'restate-agents';
-import type { SqlDatabase } from 'restate-fns';
+import type { SqlDatabase } from 'restate-objects';
 import { z } from 'zod';
 
 /** The plan's table, the project's own, beside the agent's: the pair's schema. */

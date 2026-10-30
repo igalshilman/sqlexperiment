@@ -23,7 +23,7 @@
  * (a container, a VM). REVIEWER sets the reviewer's model (GPT-6 Astra by
  * default).
  */
-import { handlers } from 'restate-fns';
+import { handlers } from 'restate-objects';
 import { object, serve, signal, subagent, workflow } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

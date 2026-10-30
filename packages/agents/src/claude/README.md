@@ -79,6 +79,6 @@ The tests run on a scripted model, [`test/fakes/claude.ts`](../../test/fakes/cla
   any of its state requests, and abandon it, keeping what it committed; and
   `messages`.
 - [`test/claude.ts`](../../test/claude.ts): the bank
-  agent, whose tools move money in the [ledger](../../../fns/test/ledger.ts),
+  agent, whose tools move money in the [ledger](../../../objects/test/ledger.ts),
   through crashes in [the crash test](../../../e2e/crash.ts)
   (`pnpm --filter e2e crash`): every message moves money exactly once.

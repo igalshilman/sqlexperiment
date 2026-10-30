@@ -98,6 +98,6 @@ which needs no key (`pnpm --filter restate-agents test pi`, from the repository 
 - [`test/pi.test.ts`](../../test/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
 - [`test/pi.ts`](../../test/pi.ts): the bank agent,
-  whose tools move money in the [ledger](../../../fns/test/ledger.ts)
+  whose tools move money in the [ledger](../../../objects/test/ledger.ts)
   with the tool call id as the transfer id, through crashes in
   [the crash test](../../../e2e/crash.ts) (`pnpm --filter e2e crash`).

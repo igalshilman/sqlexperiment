@@ -4,7 +4,7 @@
 the whole OpenCode server in your process, with no HTTP listener. Here it
 runs in the agent's virtual object, and OpenCode's database (sessions,
 messages, the inbox, durable events) is an SQL database of the key's own,
-in the object's state beside `ctx.db` (`databaseOf` of restate-fns): OpenCode
+in the object's state beside `ctx.db` (`databaseOf` of restate-objects): OpenCode
 boots only on a database that is empty or its own, so its tables are alone
 there, and `ctx.db` keeps the conversation's log and the tables of yours
 ([SQL in Restate virtual objects](../../../sql/README.md)). The integration

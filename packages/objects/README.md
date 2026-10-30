@@ -1,4 +1,4 @@
-# restate-fns: SQL in Restate virtual objects
+# restate-objects: SQL in Restate virtual objects
 
 Each key of a Restate virtual object gets a SQL database of its own, `ctx.db`,
 kept in the object's state. The handlers that use it run with the SDK's
@@ -11,7 +11,7 @@ SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)
 It runs on a released Restate server: see [the requirements](../../README.md#requirements).
 
 ```ts
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 
 const ledger = restate.object({
   name: 'Ledger',
@@ -28,7 +28,7 @@ const ledger = restate.object({
 });
 ```
 
-`restate-fns` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
+`restate-objects` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
 with the virtual objects of SQL: in `restate.object`, each function in
 `handlers` is an exclusive handler with `ctx.db`;
 `restate.handlers.object.shared(fn)` makes a shared one, and
@@ -364,12 +364,12 @@ since a suspension is a restart.
 ## Tests
 
 The library's own: [`test/`](test) (sessions, transactions and their sends,
-readers, SQL errors) without a server (`pnpm --filter restate-fns test`), and
+readers, SQL errors) without a server (`pnpm --filter restate-objects test`), and
 [`e2e/concurrency.ts`](../e2e/concurrency.ts) and
 [`e2e/crash.ts`](../e2e/crash.ts) against one.
 [`test/support.ts`](test/support.ts) runs a handler's attempts over an
 object's state in memory, through crashes and fencing; `restate-agents`'s
-tests use it too (`restate-fns/test/support`). `restate-fns/internal`
+tests use it too (`restate-objects/test/support`). `restate-objects/internal`
 has what the tests take apart: an attempt's session over a context of their
 own (`SqlAttempt`, `withSql`), and the store's fault injection
 (`setStoreWrapper`).

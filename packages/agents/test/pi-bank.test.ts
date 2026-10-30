@@ -3,7 +3,7 @@
 // `pnpm --filter restate-agents test pi`.
 import { describe, expect, it, vi } from 'vitest';
 import { conversation, crashedAnywhere, SAID } from './support.ts';
-import type * as restate from 'restate-fns';
+import type * as restate from 'restate-objects';
 import * as pi from 'restate-agents/pi';
 import { prompt } from './pi.ts';
 

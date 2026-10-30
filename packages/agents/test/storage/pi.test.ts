@@ -3,7 +3,7 @@
 import { registerStorageConformance } from '@earendil-works/pi-durable/testing';
 import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
-import { memoryStore } from 'restate-fns/test/support';
+import { memoryStore } from 'restate-objects/test/support';
 import { openSqlKvStorage } from 'restate-agents/pi/storage';
 
 let n = 0;

@@ -2,11 +2,11 @@
 // agent's handler with the `signals` object, and a conversation with a ledger
 // that records its calls, through crashes of the handler.
 import { expect } from 'vitest';
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import { type Steer, tool, type Tool } from 'restate-agents';
-import { type AttemptOptions, sqlAttempt as fnsAttempt } from 'restate-fns/test/support';
+import { type AttemptOptions, sqlAttempt as baseAttempt } from 'restate-objects/test/support';
 import { z } from 'zod';
-import type { Audit, Transfer } from 'restate-fns/test/ledger';
+import type { Audit, Transfer } from 'restate-objects/test/ledger';
 
 /**
  * The `signals` object of an agent's tests, as far as steering and following
@@ -44,11 +44,11 @@ export const steeringOf = (map: ReadonlyMap<string, Uint8Array>) => {
   return steerings.get(object)!;
 };
 
-/** An attempt of a handler, restate-fns's own, with the `signals` object of steering over `map`. */
+/** An attempt of a handler, restate-objects's own, with the `signals` object of steering over `map`. */
 export function sqlAttempt(options: AttemptOptions) {
   const steering = steeringOf(options.map);
   return {
-    ...fnsAttempt(options),
+    ...baseAttempt(options),
     /** The `signals` object, as steering calls it. */
     objectClient: (definition: { name: string }) => {
       if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);

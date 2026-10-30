@@ -1,8 +1,13 @@
-// The selector of restate-fns (packages/fns/src/selector.ts), against a fake VM
+// The selector of restate-objects (packages/objects/src/selector.ts), against a fake VM
 // with the shared core's rules, and the SDK's single-waiter progress channel.
 import { describe, expect, it } from 'vitest';
 import { setImmediate } from 'node:timers/promises';
-import { type DoProgressResult, PromiseSelector, type Selectable, type UnresolvedFuture } from 'restate-fns/internal';
+import {
+  type DoProgressResult,
+  PromiseSelector,
+  type Selectable,
+  type UnresolvedFuture,
+} from 'restate-objects/internal';
 
 // The SDK's progress channel (`ExternalProgressChannel`), as it is: signals
 // with no one waiting are buffered, and a second waiter rejects.

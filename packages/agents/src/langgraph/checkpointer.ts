@@ -33,8 +33,8 @@ import {
   type PendingWrite,
   type SerializerProtocol,
 } from '@langchain/langgraph-checkpoint';
-import type { SqlSession, SqlValue } from 'restate-fns';
-import { Schema } from 'restate-fns/internal';
+import type { SqlSession, SqlValue } from 'restate-objects';
+import { Schema } from 'restate-objects/internal';
 
 const SCHEMA = new Schema('restate-agents.langgraph', [
   `CREATE TABLE restate_langgraph_checkpoints (

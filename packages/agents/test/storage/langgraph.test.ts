@@ -2,7 +2,7 @@
 // SQL database in memory: `pnpm --filter restate-agents test langgraph`.
 import { validate } from '@langchain/langgraph-checkpoint-validation';
 import { open, type Database } from 'restate-sql';
-import { memoryStore } from 'restate-fns/test/support';
+import { memoryStore } from 'restate-objects/test/support';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';
 
 let n = 0;

@@ -1,4 +1,4 @@
-// Handlers with SQL (restate-fns), against a real Restate server: they run
+// Handlers with SQL (restate-objects), against a real Restate server: they run
 // with explicit recovery (a retried attempt starts over, against the state as
 // stored), and their operations are awaited concurrently, with native or
 // hand-written combinators (the patched SDK's promise selector drives them
@@ -6,13 +6,13 @@
 // them. With lazy state, every state read of the database goes to the server.
 //
 //   pnpm --filter e2e concurrency   (RESTATE_SERVER=/path/to/restate-server to use another)
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { row } from 'restate-fns/test/sql';
+import { row } from 'restate-objects/test/sql';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';

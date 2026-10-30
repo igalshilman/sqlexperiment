@@ -6,7 +6,7 @@ Two layers, the second on the first:
    handlers run without journal replay, so a retried attempt runs again
    against the state as stored, each key with its own SQLite-compatible
    database, stored in the object's state
-   ([`restate-fns`](packages/fns/README.md)).
+   ([`restate-objects`](packages/objects/README.md)).
 2. **[AI agents](#ai-agents)** in those objects, their conversation in the
    object's database: pi, OpenCode, LangGraph, Claude and more
    ([`restate-agents`](packages/agents/README.md)).
@@ -14,11 +14,12 @@ Two layers, the second on the first:
 ## Objects with SQL
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
-kept in the object's state: no database to run. `restate-fns` is the Restate SDK with
-that in its objects ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
+kept in the object's state: no database to run. `restate-objects` is the
+Restate SDK with that in its objects
+([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 
 const notes = restate.object({
   name: 'notes',
@@ -47,7 +48,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.transaction` groups
 statements, and the sends made in it, into one commit. See
-[`restate-fns`](packages/fns/README.md).
+[`restate-objects`](packages/objects/README.md).
 
 ## AI agents
 
@@ -95,7 +96,7 @@ conversation, and a handler of yours serves that table, for a profile page
 say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-fns';
+import { handlers } from 'restate-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -159,8 +160,8 @@ packages, each with its README, and its tests in its `test/` directory:
   in one round trip) and [`sql`](packages/sql/src/sql/README.md) on it;
   [the layers](packages/sql/README.md#inside-the-layers), from Restate's
   key/value store up to `ctx.db`.
-- [`packages/fns`](packages/fns/README.md): `restate-fns`, SQL in virtual
-  objects (`ctx.db`, `ctx.transaction`) on the published SDK.
+- [`packages/objects`](packages/objects/README.md): `restate-objects`, SQL in
+  virtual objects (`ctx.db`, `ctx.transaction`) on the published SDK.
 - [`packages/agents`](packages/agents/README.md): `restate-agents`,
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
 - [`packages/examples`](packages/examples/README.md): the examples, each a
@@ -171,10 +172,10 @@ packages, each with its README, and its tests in its `test/` directory:
 
 ## Requirements
 
-|                | Version                                                            |
-| -------------- | ------------------------------------------------------------------ |
-| Restate server | 1.8 or later                                                       |
-| TypeScript SDK | 1.17.4, as published, with [`restate-fns`](packages/fns/README.md) |
+|                | Version                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| Restate server | 1.8 or later                                                               |
+| TypeScript SDK | 1.17.4, as published, with [`restate-objects`](packages/objects/README.md) |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \

@@ -1,7 +1,7 @@
 # SQL in objects against a Restate server — 2026-10-22
 
 [`e2e/bench.ts`](../../e2e/bench.ts)
-calls SQL handlers of a virtual object (`restate-fns`) through a real Restate
+calls SQL handlers of a virtual object (`restate-objects`) through a real Restate
 server's ingress, and reads what the objects store from the server's state
 table. Run it with `pnpm --filter e2e bench`.
 

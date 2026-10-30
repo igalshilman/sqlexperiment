@@ -11,7 +11,7 @@
  *   curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
  *   curl localhost:8080/assistant/alice/facts
  */
-import { handlers } from 'restate-fns';
+import { handlers } from 'restate-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

@@ -2,7 +2,7 @@
 // and `ctx.step` over the object's state in memory. Attempts with the same
 // request id are one invocation's; a crash is an attempt abandoned, whose
 // commits stay.
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 

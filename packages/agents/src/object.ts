@@ -1,5 +1,5 @@
 // Virtual objects set up for SQL and agents.
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import { inBackground, type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
 import * as log from './log.ts';
 import {
@@ -262,7 +262,7 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  * too), and `sync`, which `follow()` of restate-agents/client reads.
  *
  * `schema`, optional: tables of your own, beside the agent's (which are its
- * own business), made in each key's database as restate-fns's `object` makes
+ * own business), made in each key's database as restate-objects's `object` makes
  * them. Any name is yours but those starting with `restate_`, the agent's
  * (`restate_pi_tasks`, `restate_claude_messages`, `restate_agent_log`...);
  * OpenCode's tables are in a database of their own.

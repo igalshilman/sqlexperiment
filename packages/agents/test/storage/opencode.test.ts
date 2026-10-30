@@ -1,11 +1,11 @@
 // The Effect SqlClient of restate-agents/opencode/db over an SQL database in memory.
 // `pnpm --filter restate-agents test opencode`.
-import type { SqlSession } from 'restate-fns';
+import type { SqlSession } from 'restate-objects';
 import { Effect, Exit, Fiber } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { open } from 'restate-sql';
 import { describe, expect, it } from 'vitest';
-import { memoryStore } from 'restate-fns/test/support';
+import { memoryStore } from 'restate-objects/test/support';
 import { sqlClient } from 'restate-agents/opencode/db';
 
 let n = 0;

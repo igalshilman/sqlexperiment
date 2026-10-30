@@ -12,7 +12,7 @@
 // each statement here has them renamed `restate_pi_<name>`, apart from the
 // tables of yours in the same database. Its SQL is fixed text, where those
 // names are only ever tables' and indexes' (storage/sqlite of 1.1.0).
-import type { SqlDatabase, SqlSession } from 'restate-fns';
+import type { SqlDatabase, SqlSession } from 'restate-objects';
 import {
   SqliteStorage,
   type SqliteDatabase,

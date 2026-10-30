@@ -4,7 +4,7 @@
 // with it. On pi's chat, with a fake model (../fakes/pi.ts), and Claude's
 // (the teller's client, ../fakes/claude.ts); the others share the same code
 // (output.ts).
-import * as restate from 'restate-fns';
+import * as restate from 'restate-objects';
 import * as claude from 'restate-agents/claude';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
