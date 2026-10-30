@@ -119,7 +119,7 @@ people to merge.
 A pull request the reviewer has not approved after three reviews leaves its
 sub-issue, and the issue, **In Review**. And not every issue goes the whole
 way: triage leaves one that is unclear in **Backlog**, with a comment asking
-what it needs to know, and moves one that is a duplicate or nothing to build
+what it needs to know, and moves one that is nothing to build
 to **Canceled**.
 
 ## The files
