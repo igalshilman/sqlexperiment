@@ -140,7 +140,8 @@ async function boot(db: restate.SqlSession, key: string, route: Route, system?: 
   await harness.plugin(checkpoints);
   // DeepSeek's with DEEPSEEK_API_KEY; another's with the key pi-ai finds for it (OPENAI_API_KEY...).
   if (route.provider === 'deepseek-official') await harness.plugin(deepseek, {});
-  else if (route.provider === modal.PROVIDER) await harness.plugin(modal, { model: route.model, affinity: key });
+  else if (route.provider === modal.PROVIDER)
+    await harness.plugin(piAi, { providers: modal.providers(route.model, key) });
   else await harness.plugin(piAi, { providers: { [route.provider]: {} } });
   await harness.plugin(AgentLoop, { agents: [] });
   return harness;

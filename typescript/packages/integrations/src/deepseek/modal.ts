@@ -3,25 +3,16 @@
 // (`modal/deepseek-ai/DeepSeek-V4.1-Flash`). Its URL is MODAL_ENDPOINT_URL;
 // it is called with a proxy token's MODAL_PROXY_KEY and MODAL_PROXY_SECRET.
 //
-// The endpoint speaks Anthropic's Messages API, as DeepSeek's does: the
-// harness's DeepSeek transport (@deepseek-ai/dsh-llm-deepseek) calls it, with
-// the token and the endpoint's routing affinity in place of DeepSeek's key.
-import type { Context } from '@deepseek-ai/cordis';
+// The endpoint is an OpenAI-compatible gateway, not DeepSeek's API: the
+// harness reaches it as a route of its pi-ai adapter (@deepseek-ai/dsh-llm-pi-ai),
+// Chat Completions with `reasoning_effort`. DeepSeek's own transport
+// (@deepseek-ai/dsh-llm-deepseek) does not fit it: it asks for Messages with
+// `thinking: { type: 'enabled' }` and no `budget_tokens`, which DeepSeek's API
+// takes and the endpoint refuses (400).
 import { LlmError } from '@deepseek-ai/dsh-llm';
-import { catalogModelInfo, registerDeepSeekProvider, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek';
-
-export const name = 'llm-modal';
-export const inject = ['llm'];
 
 /** The provider's name, in `modal/<model-id>`. */
 export const PROVIDER = 'modal';
-
-export interface Config {
-  /** The endpoint's model id, such as deepseek-ai/DeepSeek-V4.1-Flash. */
-  model: string;
-  /** The conversation, which the endpoint keeps on one container: its prompt cache is reused. */
-  affinity: string;
-}
 
 /** `variable` of the environment, or an error that says to set it. */
 function required(variable: string): string {
@@ -30,21 +21,28 @@ function required(variable: string): string {
   return value;
 }
 
-export function apply(ctx: Context, { model, affinity }: Config) {
-  const options = () =>
-    resolveAdapterOptions({
-      baseURL: required('MODAL_ENDPOINT_URL'),
-      models: [{ id: model, contextWindow: 1_000_000 }],
-    });
-  registerDeepSeekProvider(ctx, PROVIDER, {
-    options,
-    providerName: 'Modal',
-    resolveAuth: async () => ({
-      headers: {
-        authorization: `Bearer ${required('MODAL_PROXY_KEY')}.${required('MODAL_PROXY_SECRET')}`,
-        'modal-routing-affinity-key': affinity,
-      },
-    }),
-    discoverModels: async (provider) => options().models.map((m) => catalogModelInfo(provider, m)),
-  });
+/**
+ * pi-ai's providers for `model` on the endpoint: the `modal` route, for the
+ * conversation `affinity`, which the endpoint keeps on one container: its
+ * prompt cache is reused. The proxy token is the route's `Authorization`
+ * header (the route names no key).
+ */
+export function providers(model: string, affinity: string) {
+  const route = {
+    displayName: 'Modal',
+    api: 'openai-completions' as const,
+    baseURL: `${required('MODAL_ENDPOINT_URL').replace(/\/+$/, '')}/v1`,
+    headers: {
+      authorization: `Bearer ${required('MODAL_PROXY_KEY')}.${required('MODAL_PROXY_SECRET')}`,
+      'modal-routing-affinity-key': affinity,
+    },
+    // pi-ai takes an endpoint it does not know for OpenAI's, and sends the
+    // system prompt as a `developer` message: the endpoint drops those
+    // without a word (the model never sees the prompt). `system` it keeps.
+    compat: { supportsDeveloperRole: false },
+    // DeepSeek's efforts, `high` unless the request picks another.
+    reasoning: 'high' as const,
+    models: [{ id: model, contextWindow: 1_000_000, reasoningEfforts: { low: 'low', high: 'high', max: 'max' } }],
+  };
+  return { [PROVIDER]: route };
 }
