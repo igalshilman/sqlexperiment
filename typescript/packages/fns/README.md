@@ -36,7 +36,7 @@ with the virtual objects of SQL: in `restate.object`, each function in
 (such as `input`). With `journalReplay: true` in its options, a handler is
 the SDK's own: it replays its journal and has no `ctx.db` (its context is
 `restate.JournaledObjectContext`), such as one that waits on an awakeable.
-The object's options are `restate.sqlOptions` (lazy state, no journal kept),
+The object's options are `restate.sqlOptions` (lazy state),
 and its metadata hides the database's state commands in Restate's UI.
 
 `ctx.db`, on the context of an exclusive object handler, is the object's

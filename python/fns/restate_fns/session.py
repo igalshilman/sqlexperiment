@@ -46,19 +46,17 @@ class SqlOptions(typing.TypedDict):
     """The options of an object whose handlers use ``ctx.db``: see ``sql_options``."""
 
     enable_lazy_state: bool
-    journal_retention: timedelta
 
 
 # TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
 sql_options: SqlOptions = {
     "enable_lazy_state": True,
-    "journal_retention": timedelta(0),
 }
 """
 The options of an object whose handlers use ``ctx.db``, which
 ``restate_fns.VirtualObject`` sets: lazy state, so an invocation does not
-start by loading every page; and no journal kept after an invocation
-completes, since it holds every page it read. Its handlers also run with
+start by loading every page. Journals are kept as Restate's default keeps
+them. Its handlers also run with
 explicit recovery, since a later attempt makes different reads.
 """
 

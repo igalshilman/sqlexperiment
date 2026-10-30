@@ -44,10 +44,10 @@ class Database:
         return [[len(self.statements)]]
 
 
-def test_its_handlers_run_with_explicit_recovery_lazy_state_and_no_journal_kept():
+def test_its_handlers_run_with_explicit_recovery_and_lazy_state():
     assert isinstance(notes, restate.VirtualObject)
     assert notes.enable_lazy_state
-    assert notes.journal_retention == timedelta(0)
+    assert notes.journal_retention is None
     assert not notes.explicit_recovery
     assert notes.handlers["add"].explicit_recovery
     assert notes.handlers["count"].explicit_recovery
