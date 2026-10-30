@@ -66,8 +66,7 @@ transaction calls behind their `transaction()`.
 | ------------------------------------- | --------------------------------------------------------------------------------------- |
 | `mod.rs`, `io.rs`, `binding.rs`       | `Sql`, the adapter (`io`) from the engine's files to the state, and the addon's session |
 | `tests/`                              | SQL, and the state's storage, crash and cache campaigns under SQL workloads             |
-| [`examples/`](../../examples)         | `lookup`: a small database, opened and queried                                          |
-| [`benches/`](../../benches/README.md) | Benchmarks of SQL workloads on the state, and their results                             |
+| [`benches/`](../../benches/README.md) | Benchmarks of SQL workloads on the state                                                |
 
 ## Build and test
 
@@ -76,12 +75,11 @@ From `packages/sql`:
 ```sh
 cargo test --locked --release
 cargo clippy --locked --all-targets -- -D warnings
-cargo run --locked --release --features bench --example lookup
 ```
 
 The tests run on the state's in-memory KV store, fault injection and latency
 simulator (its `simulation` module, always on in tests; the feature `bench`
-turns it on for the benchmarks and the example).
+turns it on for the benchmarks).
 
 The randomized campaign (`tests/integration/campaign.rs`) runs a few seeds by
 default; run more, or replay a failing one with a trace:

@@ -200,8 +200,8 @@ durable flush (an overlapping state's engine may be older) and its SQL
 changed no per-connection state (`PRAGMA`, `ATTACH`, `DETACH`, the temp schema).
 Only the database is kept: the next session connects afresh, so connection
 counters (`last_insert_rowid()`, `changes()`) and settings never carry over.
-This keeps the parsed schema warm, which cuts CPU per session several-fold
-([cache results](../../../benches/CACHE_RESULTS.md)). Parked engines share
+This keeps the parsed schema warm, which saves each session parsing it again
+(the `cache_cpu` benchmark measures it). Parked engines share
 a byte budget (`PageCacheConfig::parked_bytes`, 64 MiB), each weighed as 4 MiB
 (turso's buffer pool) plus 16 bytes per byte of schema SQL. Namespace states
 are kept by their bytes (above). Least recently used go first; dropping either only makes
@@ -222,8 +222,7 @@ one-thread runtime of its own. It is the only background work.
 | Cold open        | Up to 3: the head; the manifest and the tail (from Restate); the large values, and a small database whole                      | None                               |
 | Cold page read   | 1 ranged get of its frame (and its patch, together); for a page in the overlay, of its reference                               | None                               |
 
-Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
-[cache](../../../benches/CACHE_RESULTS.md).
+Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers).
 
 ## Limits and open questions
 

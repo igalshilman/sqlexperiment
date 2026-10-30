@@ -10,7 +10,7 @@
 //! - `node`: the napi bindings, around [`sql::binding::Session`].
 //!
 //! With the feature `bench`, `state` and `sql` are public instead, for the
-//! benchmarks and the example, and the addon is left out.
+//! benchmarks, and the addon is left out.
 
 #[cfg(not(any(test, feature = "bench")))]
 mod node;

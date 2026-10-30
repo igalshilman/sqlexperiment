@@ -139,7 +139,6 @@ pnpm test                       # node:test, against an in-memory store
 pnpm test:rust                  # cargo test: the state and SQL, their API, crashes and fault campaigns
 pnpm lint                       # rustfmt, and clippy with and without the crate's features
 cargo bench --features bench    # the benchmarks (benches/README.md)
-cargo run --release --features bench --example lookup
 ```
 
 `pnpm test` covers SQL and value round trips, SQL errors and rollback, a write

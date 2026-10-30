@@ -17,5 +17,4 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
 - [`restate-tools.ts`](restate-tools.ts): Restate's own agent tools, on a
   scripted model (`pnpm --filter e2e tools`).
 - [`bench.ts`](bench.ts): SQL in objects: latency, throughput and stored
-  bytes, for databases up to 100 MB (`pnpm --filter e2e bench`; results in
-  [RESTATE_RESULTS.md](../sql/benches/RESTATE_RESULTS.md)).
+  bytes, for databases up to 100 MB (`pnpm --filter e2e bench [out.json]`).

@@ -9,7 +9,7 @@ description = "The Node.js addon: SQLite-compatible SQL over a key/value store t
 [workspace]
 
 [lib]
-# cdylib: the addon; rlib: the benchmarks and the example, with `bench`.
+# cdylib: the addon; rlib: the benchmarks, with `bench`.
 crate-type = ["cdylib", "rlib"]
 bench = false
 
@@ -17,7 +17,7 @@ bench = false
 default = []
 # The fault-injecting stores, the monitor and the latency simulator (always in tests).
 simulation = []
-# The storage, public for the benchmarks and the example; no addon then.
+# The storage, public for the benchmarks; no addon then.
 bench = ["simulation"]
 # Blobs in an object store (S3, GCS, Azure, a directory): `state::blobs::ObjectStoreBlobs`.
 # Enable the backend on `object_store` itself (its feature `aws` for S3).
@@ -49,10 +49,6 @@ debug = 0
 
 [profile.test]
 debug = 0
-
-[[example]]
-name = "lookup"
-required-features = ["bench"]
 
 [[bench]]
 name = "amplification"
