@@ -1,8 +1,8 @@
 target/
-/.direnv/
+# The addon, built (pnpm build).
+packages/sql/sql.node
 node_modules/
 .env
 .env.*
-!.env.example
 .DS_Store
 .vite/
