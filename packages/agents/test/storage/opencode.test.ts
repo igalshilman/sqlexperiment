@@ -3,7 +3,7 @@
 import type { SqlSession } from 'restate-objects';
 import { Effect, Exit, Fiber } from 'effect';
 import { SqlClient } from 'effect/sql';
-import { open } from 'restate-sql';
+import { open } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from 'restate-objects/test/support';
 import { sqlClient } from 'restate-agents/opencode/db';

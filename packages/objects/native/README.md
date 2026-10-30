@@ -1,14 +1,13 @@
-# restate-sql: the Node.js addon
+# The addon: an object's database in its state
 
-SQLite-compatible SQL over a key/value store implemented in JavaScript: a
-native addon ([napi-rs](https://napi.rs)) with the storage inside it, the
-[state and SQL on it](#inside-the-layers). It is for the Restate TypeScript
-SDK, where the store is an object's state:
-[`restate-objects`](../objects/README.md) builds `ctx.db` on it.
+The storage of [`restate-objects`](../README.md): SQLite-compatible SQL over
+a key/value store implemented in JavaScript, the object's state. A native
+addon ([napi-rs](https://napi.rs)), one Rust crate, with the [state and SQL
+on it](#inside-the-layers) inside. [`src/database.ts`](../src/database.ts)
+opens it over a store, and `ctx.db` builds that store on the object's state
+([`src/session.ts`](../src/session.ts)):
 
-```js
-const { open } = require('restate-sql');
-
+```ts
 const db = await open('Ledger/a', {
   get: (key) => ctx.get(key, serde.binary), // stored value, or this request's own write
   set: (key, value) => ctx.set(key, value, serde.binary),
@@ -20,9 +19,6 @@ await db.transaction(async (tx) => {
 });
 await db.save(); // ends the session, leaving its engine to the next one
 ```
-
-This is the shape of the store. With the Restate SDK, use `ctx.db` instead,
-which builds the store inside the SDK.
 
 ## The store
 
@@ -82,7 +78,7 @@ same way: a layer keeps it private until the one above hands it on, and only
 the state's flush makes it durable.
 
 ```
-host     restate-objects (Node.js): flush after each SQL transaction
+host     restate-objects (TypeScript): flush after each SQL transaction
              │
              ▼
 SQL      Sql: statements change a private view; Sql::flush(&mut mutation)
@@ -129,21 +125,21 @@ bindings, around `sql::binding::Session`.
 
 ## Build and test
 
-From this directory; at the repository's root, `pnpm build` builds the addon,
-and `pnpm test` runs both its tests with the rest:
+From `packages/objects`; at the repository's root, `pnpm build` builds the
+addon, and `pnpm test` runs its tests with the rest:
 
 ```sh
-pnpm build                      # release build, copied to sql.node
+pnpm build                          # release build, copied to native/objects.node
 pnpm build:debug
-pnpm test                       # node:test, against an in-memory store
-pnpm test:rust                  # cargo test: the state and SQL, their API, crashes and fault campaigns
-pnpm lint                       # rustfmt, and clippy with and without the crate's features
-cargo bench --features bench    # the benchmarks (benches/README.md)
+pnpm test:rust                      # cargo test: the state and SQL, their API, crashes and fault campaigns
+pnpm lint:rust                      # rustfmt, and clippy with and without the crate's features
+cd native && cargo bench --features bench   # the benchmarks (benches/README.md)
 ```
 
-`pnpm test` covers SQL and value round trips, SQL errors and rollback, a write
-the store rejects, and lost writes: for every position of a request that
-loses its writes (its `sync` failing, or the session closed first), the owner
-and a reader with no cached state read exactly the stored rows. `pnpm test:rust` runs
-the state's and SQL's own tests, in the crate (`src/state/tests`,
-`src/sql/tests`), with the simulated stores.
+`pnpm test` runs [`test/database.test.ts`](../test/database.test.ts) with
+the package's other tests: SQL and value round trips, SQL errors and
+rollback, a write the store rejects, and lost writes: for every position of
+a request that loses its writes (its `sync` failing, or the session closed
+first), the owner and a reader with no cached state read exactly the stored
+rows. `pnpm test:rust` runs the state's and SQL's own tests, in the crate
+(`src/state/tests`, `src/sql/tests`), with the simulated stores.

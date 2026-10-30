@@ -12,7 +12,6 @@ on:
     paths: &paths
       - packages/examples/advanced/factory/**
       - packages/examples/package.json
-      - packages/sql/**
       - packages/objects/**
       - packages/agents/**
       - package.json

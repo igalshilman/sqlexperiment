@@ -17,9 +17,9 @@
 # The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
-COPY packages/sql packages/sql
-RUN cd packages/sql && cargo build --locked --release \
-  && cp target/release/librestate_sql.so sql.node
+COPY packages/objects/native packages/objects/native
+RUN cd packages/objects/native && cargo build --locked --release \
+  && cp target/release/librestate_objects.so objects.node
 
 # The workspace's packages that the examples use, laid out as in the
 # repository: the pnpm workspace at its root.
@@ -27,10 +27,8 @@ FROM node:24-bookworm AS deps
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/sql/package.json packages/sql/index.js packages/sql/index.d.ts \
-  packages/sql/
-COPY --from=addon /src/packages/sql/sql.node packages/sql/
 COPY packages/objects packages/objects
+COPY --from=addon /src/packages/objects/native/objects.node packages/objects/native/
 COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
 RUN pnpm install --frozen-lockfile --prod --filter examples...

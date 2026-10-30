@@ -176,9 +176,6 @@ importers:
       restate-objects:
         specifier: workspace:*
         version: link:../objects
-      restate-sql:
-        specifier: workspace:*
-        version: link:../sql
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -247,9 +244,6 @@ importers:
       restate-objects:
         specifier: workspace:*
         version: link:../objects
-      restate-sql:
-        specifier: workspace:*
-        version: link:../sql
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -269,11 +263,6 @@ importers:
       '@restatedev/restate-sdk-core':
         specifier: 1.17.4
         version: 1.17.4
-      restate-sql:
-        specifier: workspace:*
-        version: link:../sql
-
-  packages/sql: {}
 
   packages/template:
     dependencies:

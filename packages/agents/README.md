@@ -591,9 +591,8 @@ message being answered.
 ## Build your own
 
 `restate-agents` is not published: it runs on
-[`restate-objects`](../objects/README.md) (SQL in virtual objects) and the
-Node.js addon ([`restate-sql`](../sql/README.md)), which this repository
-builds.
+[`restate-objects`](../objects/README.md) (SQL in virtual objects, with its
+Node.js addon), which this repository builds.
 Build them once, at the repository's root, with `pnpm install && pnpm build`:
 it needs Rust (for the addon), Node 24 or later, and pnpm (see
 [Build and test](../../README.md#build-and-test)).

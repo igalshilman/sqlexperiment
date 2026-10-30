@@ -84,7 +84,7 @@ writes since the last sync.
 
 ## Build and test
 
-From `packages/sql`:
+From `packages/objects/native`:
 
 ```sh
 cargo test --locked --release state::     # the state's tests, with the in-memory store and fault injection

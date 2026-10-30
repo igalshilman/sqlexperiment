@@ -8,8 +8,8 @@
 //! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
-use restate_sql::sql::Sql;
-use restate_sql::state::{
+use restate_objects::sql::Sql;
+use restate_objects::state::{
     PageCache, Result, State,
     kv::KvStore,
     simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
@@ -24,7 +24,7 @@ use std::{
 };
 
 /// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_sql::state::Result<restate_sql::state::FlushReport> {
+async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
     let state = db.state();
     let mut mutation = state.mutation();
     db.flush(&mut mutation).await?;

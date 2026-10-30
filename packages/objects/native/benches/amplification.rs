@@ -1,13 +1,13 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
-use restate_sql::sql::Sql;
-use restate_sql::state::{
+use restate_objects::sql::Sql;
+use restate_objects::state::{
     Result, State,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
 
 /// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_sql::state::Result<restate_sql::state::FlushReport> {
+async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
     let state = db.state();
     let mut mutation = state.mutation();
     db.flush(&mut mutation).await?;

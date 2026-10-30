@@ -154,17 +154,14 @@ curl localhost:8080/assistant/alice/facts
 
 ## Where things are
 
-A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of six
+A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
 packages, each with its README, and its tests in its `test/` directory:
 
-- [`packages/sql`](packages/sql/README.md): `restate-sql`, the Node.js addon:
-  one Rust crate with the storage inside, the [`state`](packages/sql/src/state/README.md)
-  (records and paged files, changed through a mutation and flushed atomically,
-  in one round trip) and [`sql`](packages/sql/src/sql/README.md) on it;
-  [the layers](packages/sql/README.md#inside-the-layers), from Restate's
-  key/value store up to `ctx.db`.
 - [`packages/objects`](packages/objects/README.md): `restate-objects`, SQL in
-  virtual objects (`ctx.db`, `ctx.transaction`) on the published SDK.
+  virtual objects (`ctx.db`, `ctx.transaction`) on the published SDK, with
+  its storage in a Rust addon, [`native/`](packages/objects/native/README.md):
+  [the layers](packages/objects/native/README.md#inside-the-layers), from
+  Restate's key/value store up to `ctx.db`.
 - [`packages/agents`](packages/agents/README.md): `restate-agents`,
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
 - [`packages/template`](packages/template/README.md): a tutorial, one concept

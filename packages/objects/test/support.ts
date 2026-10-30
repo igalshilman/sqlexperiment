@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
 import { SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
-import type { Store } from 'restate-sql';
+import type { Store } from 'restate-objects/internal';
 
 /**
  * An SQL store over `map`. Give the same map to several databases for an

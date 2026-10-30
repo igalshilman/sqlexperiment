@@ -19,7 +19,7 @@
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
 // they use them, in any object: internal, from restate-objects/internal.
-import type { Database } from 'restate-sql';
+import type { Database } from './database.ts';
 import type { SqlDatabase, SqlSession } from './session.ts';
 
 const TABLE = 'restate_schema';

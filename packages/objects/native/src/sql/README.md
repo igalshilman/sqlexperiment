@@ -70,7 +70,7 @@ transaction calls behind their `transaction()`.
 
 ## Build and test
 
-From `packages/sql`:
+From `packages/objects/native`:
 
 ```sh
 cargo test --locked --release

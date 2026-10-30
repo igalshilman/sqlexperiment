@@ -1,6 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use restate_sql::sql::Sql;
-use restate_sql::state::{
+use restate_objects::sql::Sql;
+use restate_objects::state::{
     Result, State,
     simulation::{MemoryKv, Stats},
 };
@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_sql::state::Result<restate_sql::state::FlushReport> {
+async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
     let state = db.state();
     let mut mutation = state.mutation();
     db.flush(&mut mutation).await?;

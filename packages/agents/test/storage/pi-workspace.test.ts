@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { open } from 'restate-sql';
+import { open } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from 'restate-objects/test/support';
 import { callTools, fakeProvider, say } from '../fakes/pi.ts';

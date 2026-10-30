@@ -287,7 +287,7 @@ const database = restate.object({
 
 // --- Harness
 
-const dir = mkdtempSync(join(tmpdir(), 'restate-sql-concurrency-'));
+const dir = mkdtempSync(join(tmpdir(), 'restate-objects-concurrency-'));
 console.error(`logs in ${dir}`);
 // A server left running (by a run that was killed) would serve this run its
 // state: refuse to start against it.

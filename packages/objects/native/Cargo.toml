@@ -1,9 +1,9 @@
 [package]
-name = "restate-sql"
+name = "restate-objects"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The Node.js addon: SQLite-compatible SQL over a key/value store the host implements in JavaScript, with the state it is stored in"
+description = "The Node.js addon of restate-objects: an object's SQLite-compatible database, kept in its Restate state"
 
 # Its own workspace.
 [workspace]

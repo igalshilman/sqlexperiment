@@ -19,7 +19,6 @@
     "@restatedev/restate-sdk-clients": "1.17.4",
     "restate-agents": "workspace:*",
     "restate-objects": "workspace:*",
-    "restate-sql": "workspace:*",
     "zod": "4.6.5"
   },
   "devDependencies": {

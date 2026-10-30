@@ -18,8 +18,8 @@ use futures::{
     future::BoxFuture,
     task::{ArcWake, waker},
 };
-use restate_sql::sql::{Sql, Value};
-use restate_sql::state::{
+use restate_objects::sql::{Sql, Value};
+use restate_objects::state::{
     Result, State,
     blobs::BlobStore,
     kv::KvStore,
@@ -228,7 +228,7 @@ impl Stores {
     async fn open(&self) -> Result<Sql> {
         let mut open = State::open(self.restate.clone());
         if let Ok(bytes) = std::env::var("L0_BYTES") {
-            open = open.options(restate_sql::state::StateOptions {
+            open = open.options(restate_objects::state::StateOptions {
                 l0_bytes: bytes.parse()?,
                 ..Default::default()
             });

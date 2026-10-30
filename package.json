@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter restate-sql build",
-    "test": "pnpm -r --workspace-concurrency=1 test && pnpm --filter restate-sql test:rust",
+    "build": "pnpm --filter restate-objects build",
+    "test": "pnpm -r --workspace-concurrency=1 test && pnpm --filter restate-objects test:rust",
     "typecheck": "tsc -p . && tsc -p packages/examples && tsc -p packages/examples/ui && tsc -p packages/examples/advanced/factory/board",
-    "lint": "pnpm typecheck && OXLINT_TSGOLINT_PATH=node_modules/.bin/tsgolint oxlint --type-aware packages && oxfmt --check && pnpm --filter restate-sql lint",
-    "format": "oxfmt && pnpm --filter restate-sql format"
+    "lint": "pnpm typecheck && OXLINT_TSGOLINT_PATH=node_modules/.bin/tsgolint oxlint --type-aware packages && oxfmt --check && pnpm --filter restate-objects lint:rust",
+    "format": "oxfmt && pnpm --filter restate-objects format:rust"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

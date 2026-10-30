@@ -2,7 +2,7 @@
 // numbers, goes on with the current one, whose versions are strings.
 // `pnpm --filter restate-agents test langgraph`.
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-import { open } from 'restate-sql';
+import { open } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from 'restate-objects/test/support';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';

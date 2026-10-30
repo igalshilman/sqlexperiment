@@ -4,8 +4,8 @@ Each key of a Restate virtual object gets a SQL database of its own, `ctx.db`,
 kept in the object's state. The handlers that use it run with the SDK's
 explicit recovery instead of journal replay: the storage protocol of this
 repository provides durability and recovery, and Restate provides the state,
-single-writer execution per key, and retries. It uses the
-[SQL addon](../sql/README.md), on the published Restate TypeScript
+single-writer execution per key, and retries. Its storage is
+a Rust addon in [`native/`](native/README.md), on the published Restate TypeScript
 SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
 
 It runs on a released Restate server: see [the requirements](../../README.md#requirements).
@@ -177,7 +177,7 @@ entry under a key of its own, then the head, which names it: the commit
 point. Then one empty `ctx.run` waits until all of it is stored: a commit is
 one round trip. Whatever prefix a crash keeps, the stored head names only a
 tail and checkpoints that are stored. Now and then a commit first folds the
-tail into a checkpoint (see the [state's architecture](../sql/src/state/docs/ARCHITECTURE.md)).
+tail into a checkpoint (see the [state's architecture](native/src/state/docs/ARCHITECTURE.md)).
 
 **The page cache.** The process's page cache keeps the pages it read and
 wrote, and the database's state as of its last head, for the object's next
@@ -346,7 +346,7 @@ writes nothing: what the handler writes stays in its session, and is never
 stored. It reads the state as of that call, a snapshot, whatever the
 exclusive handler commits meanwhile; only a shared handler that outlives 16
 of the exclusive handler's commits fails, and Restate retries it
-([the reader](../sql/src/state/docs/DESIGN.md#readers)).
+([the reader](native/src/state/docs/DESIGN.md#readers)).
 `ctx.transaction` is the exclusive handlers'.
 
 ```ts
@@ -364,12 +364,15 @@ since a suspension is a restart.
 ## Tests
 
 The library's own: [`test/`](test) (sessions, transactions and their sends,
-readers, SQL errors) without a server (`pnpm --filter restate-objects test`), and
+readers, SQL errors, lost writes) without a server
+(`pnpm --filter restate-objects test`), the addon's in
+[`native/`](native/README.md#build-and-test)
+(`pnpm --filter restate-objects test:rust`), and
 [`e2e/concurrency.ts`](../e2e/concurrency.ts) and
 [`e2e/crash.ts`](../e2e/crash.ts) against one.
 [`test/support.ts`](test/support.ts) runs a handler's attempts over an
 object's state in memory, through crashes and fencing; `restate-agents`'s
 tests use it too (`restate-objects/test/support`). `restate-objects/internal`
 has what the tests take apart: an attempt's session over a context of their
-own (`SqlAttempt`, `withSql`), and the store's fault injection
-(`setStoreWrapper`).
+own (`SqlAttempt`, `withSql`), a database over a store of their own
+(`open`), and the store's fault injection (`setStoreWrapper`).

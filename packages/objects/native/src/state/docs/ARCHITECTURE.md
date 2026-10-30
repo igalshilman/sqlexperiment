@@ -494,7 +494,7 @@ What changes, once a database outgrows L0:
 ## 6. Numbers
 
 Bytes and request counts below come from the `flush_costs` bench
-(`packages/sql/benches`), which runs the real encoding over in-memory stores.
+(`packages/objects/native/benches`), which runs the real encoding over in-memory stores.
 Latencies come from `read_latency`, a discrete-event simulation that
 **assumes** 2 ms per Restate round trip and 20 ms per S3 request; they show
 the shape, not production timings.

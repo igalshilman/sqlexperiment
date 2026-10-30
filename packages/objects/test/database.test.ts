@@ -1,15 +1,14 @@
-// The addon over an in-memory store: SQL, values, effects, and lost writes.
-import { test } from 'node:test';
+// A database over an in-memory store, without the SDK: SQL, values, effects,
+// and lost writes.
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-const { open } = require('../index.js');
+import { Buffer } from 'node:buffer';
+import { open, type Database, type Store, type Transaction } from 'restate-objects/internal';
+import { test } from 'vitest';
 
 /** Stored values, and writes issued but not yet synced. */
 class Backend {
-  stored = new Map();
-  unconfirmed = [];
+  stored = new Map<string, Uint8Array>();
+  unconfirmed: [key: string, value: Uint8Array | undefined][] = [];
   // How many unsynced writes a failure keeps, in order: none, or a pseudo-random prefix.
   #seed = 0;
 
@@ -35,28 +34,27 @@ class Backend {
     this.confirm();
   }
 
+  /** What a request reads: its own latest write, or the stored value. */
+  read(key: string): Uint8Array | undefined {
+    for (let i = this.unconfirmed.length - 1; i >= 0; i--) {
+      const [written, value] = this.unconfirmed[i]!;
+      if (written === key) return value;
+    }
+    return this.stored.get(key);
+  }
+
   /** A request's view: its own writes over the stored values. */
-  request({ fails = false } = {}) {
-    const backend = this;
+  request({ fails = false } = {}): Store {
     return {
-      async get(key) {
-        for (let i = backend.unconfirmed.length - 1; i >= 0; i--) {
-          if (backend.unconfirmed[i][0] === key) return backend.unconfirmed[i][1];
-        }
-        return backend.stored.get(key);
-      },
-      set(key, value) {
-        backend.unconfirmed.push([key, Uint8Array.from(value)]);
-      },
-      clear(key) {
-        backend.unconfirmed.push([key, undefined]);
-      },
-      async sync() {
+      get: async (key) => this.read(key),
+      set: (key, value) => void this.unconfirmed.push([key, Uint8Array.from(value)]),
+      clear: (key) => void this.unconfirmed.push([key, undefined]),
+      sync: async () => {
         if (fails) {
-          backend.lose();
+          this.lose();
           throw new Error('the request failed');
         }
-        backend.confirm();
+        this.confirm();
       },
     };
   }
@@ -99,7 +97,7 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
   );
   assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
   assert.equal(
-    await db.transaction(async (tx) => tx.query('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0][0]),
+    await db.transaction(async (tx) => tx.query('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0]![0]),
     2,
   );
   await db.save();
@@ -111,7 +109,7 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
  * without cached state must then read the rows of the other requests, and
  * the lost one's only if both do.
  */
-async function consistentAfterLoss(lost, seed) {
+async function consistentAfterLoss(lost: number, seed: number) {
   const backend = new Backend({ seed });
   const ns = fresh();
   let db = await open(ns, backend.request());
@@ -129,11 +127,13 @@ async function consistentAfterLoss(lost, seed) {
       await db.save();
     }
   }
-  const seen = [];
+  const seen: number[] = [];
   for (const name of [ns, fresh()]) {
     const view = await open(name, backend.request());
-    const [[rows, landed]] = await view.query('SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t', [lost]);
-    const [[integrity]] = await view.query('PRAGMA integrity_check');
+    const [[rows, landed]] = (await view.query('SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t', [lost])) as [
+      [number, number],
+    ];
+    const [[integrity]] = (await view.query('PRAGMA integrity_check')) as [[string]];
     await view.save();
     if (rows !== 19 + landed || integrity !== 'ok') return false;
     seen.push(landed);
@@ -141,7 +141,7 @@ async function consistentAfterLoss(lost, seed) {
   return seen[0] === seen[1];
 }
 
-test('lost writes leave every reader consistent', async () => {
+test('lost writes leave every reader consistent', { timeout: 120_000 }, async () => {
   for (const seed of [0, 1, 2, 3, 4, 5]) {
     for (let lost = 1; lost < 15; lost++) {
       assert.ok(await consistentAfterLoss(lost, seed), `lost request ${lost}, seed ${seed}`);
@@ -164,7 +164,7 @@ test('a write the store rejects is reported by the next sync', async () => {
 test('a transaction holds the session: other calls wait until it ends', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');
-  let handle;
+  let handle: Transaction | undefined;
   const rolledBack = db.transaction(async (tx) => {
     handle = tx;
     await tx.execute('INSERT INTO t VALUES(1)');
@@ -178,7 +178,7 @@ test('a transaction holds the session: other calls wait until it ends', async ()
   await write;
   await committed;
   assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[2], [3]]);
-  await assert.rejects(async () => handle.query('SELECT 1'), /the transaction has ended/);
+  await assert.rejects(async () => handle!.query('SELECT 1'), /the transaction has ended/);
   await db.save();
 });
 
@@ -275,7 +275,7 @@ test('a call running meanwhile does not make the session look unusable', async (
 });
 
 /** A session's effects, as text. */
-const text = async (session) => new TextDecoder().decode(await session.effects());
+const text = async (session: Database) => new TextDecoder().decode(await session.effects());
 
 test('effects commit with their transaction, and only then', async () => {
   const backend = new Backend();
@@ -284,7 +284,7 @@ test('effects commit with their transaction, and only then', async () => {
   await db.execute('CREATE TABLE t(id INTEGER)');
   assert.equal(await text(db), '');
   // Even with a transaction that changes nothing.
-  let inside;
+  let inside: string | undefined;
   await db.transaction(async (tx) => {
     await tx.query('SELECT * FROM t');
     tx.commitEffects(new TextEncoder().encode('sends 1'));
@@ -315,7 +315,7 @@ test('effects commit with their transaction, and only then', async () => {
 test('a call to the session inside its transaction is refused, not left waiting', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
-  let later = Promise.resolve();
+  let later: Promise<void> = Promise.resolve();
   await db.transaction(async (tx) => {
     await tx.execute('INSERT INTO t VALUES(1)');
     // It would wait for this transaction, which waits for this body.
@@ -363,10 +363,10 @@ test('a statement that commits resolves once its writes are stored, however many
 });
 
 /** How many pack parts `backend` stores. */
-const packs = (backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v22/pack/')).length;
+const packs = (backend: Backend) => [...backend.stored.keys()].filter((key) => key.startsWith('v22/pack/')).length;
 
 /** The pack parts left after 100 commits that each replace a row, with a store that lists its keys or not. */
-const packsAfterCommits = async (listing) => {
+const packsAfterCommits = async (listing: boolean) => {
   const backend = new Backend();
   const store = backend.request();
   // As the object's ctx.stateKeys().
@@ -387,7 +387,7 @@ for (const { how, keys } of [
   { how: 'rejects', keys: async () => Promise.reject(new Error('listing failed')) },
   {
     how: 'throws',
-    keys: () => {
+    keys: (): Promise<string[]> => {
       throw new Error('listing failed');
     },
   },
@@ -411,20 +411,15 @@ for (const { how, keys } of [
 }
 
 /** A reader's view of `backend`: what is stored and written so far, and no writes. */
-const readerOf = (backend) => ({
-  async get(key) {
-    for (let i = backend.unconfirmed.length - 1; i >= 0; i--) {
-      if (backend.unconfirmed[i][0] === key) return backend.unconfirmed[i][1];
-    }
-    return backend.stored.get(key);
-  },
+const readerOf = (backend: Backend): Store => ({
+  get: async (key) => backend.read(key),
   set() {
     throw new Error('a reader wrote');
   },
   clear() {
     throw new Error('a reader wrote');
   },
-  sync() {},
+  async sync() {},
 });
 
 test('a reader reads beside the owner, writes nothing, and keeps the state it opened on', async () => {

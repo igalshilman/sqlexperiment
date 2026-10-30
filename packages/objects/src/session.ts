@@ -1,5 +1,5 @@
-// An attempt's SQL session: the object's database, kept in its state through
-// the SQL addon, opened on the handler's first use of `ctx.db`,
+// An attempt's SQL session: the object's database, kept in its state
+// (database.ts), opened on the handler's first use of `ctx.db`,
 // `ctx.transaction` or `ctx.step` and saved when the handler ends;
 // `ctx.transaction(body)`, one transaction of it with the sends it commits
 // with; and `ctx.step(name, body)`, one whose result the invocation keeps.
@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type * as restate from '@restatedev/restate-sdk';
 import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
-import { open, type Database, type SqlParam, type SqlValue, type Store, type TransactionHandle } from 'restate-sql';
+import { open, type Database, type SqlParam, type SqlValue, type Store, type Transaction } from './database.ts';
 import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 
@@ -77,13 +77,7 @@ export interface SqlHost {
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
 
-/** A store, as the SQL addon takes it. */
-export interface SqlStore extends Store {
-  get(key: string): Promise<Uint8Array | null | undefined>;
-  sync(): Promise<void>;
-}
-
-type Wrap = (store: SqlStore) => SqlStore;
+type Wrap = (store: Store) => Store;
 let wrapStore: Wrap | undefined;
 
 /** Wrap each object's store, such as for fault injection in tests. */
@@ -170,7 +164,7 @@ const unbeside = (name: string) => (key: string) => {
  * rejects, so the session that made it ends instead of holding its lock for
  * the life of the process.
  */
-function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined): SqlStore {
+function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined): Store {
   const keyOf = database === undefined ? (key: string) => key : beside(database);
   // TODO: read with protocol v8's ephemeral get, left out of the journal, once
   // a Restate release ships v8 and the SDK lets a library make one (FUTURE.md
@@ -234,7 +228,7 @@ class SqlErrors {
    * `inner` as one transaction of `db`: the body's own error passes as it is,
    * the transaction's (a failed COMMIT) is recorded.
    */
-  transaction<T>(db: Database, inner: (tx: SqlDatabase, handle: TransactionHandle) => Promise<T>): Promise<T> {
+  transaction<T>(db: Database, inner: (tx: SqlDatabase, handle: Transaction) => Promise<T>): Promise<T> {
     let own: { error: unknown } | undefined;
     return db
       .transaction(async (tx) => {

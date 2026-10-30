@@ -10,12 +10,16 @@
     "./test/*": "./test/*.ts"
   },
   "scripts": {
-    "test": "vitest run"
+    "build": "cargo build --release --manifest-path native/Cargo.toml && node native/copy-addon.mjs release",
+    "build:debug": "cargo build --manifest-path native/Cargo.toml && node native/copy-addon.mjs debug",
+    "test": "vitest run",
+    "test:rust": "cd native && cargo test --locked --release",
+    "lint:rust": "cd native && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo clippy --locked --all-targets --features bench,object-store -- -D warnings",
+    "format:rust": "cd native && cargo fmt"
   },
   "dependencies": {
     "@restatedev/restate-sdk": "1.17.4",
-    "@restatedev/restate-sdk-core": "1.17.4",
-    "restate-sql": "workspace:*"
+    "@restatedev/restate-sdk-core": "1.17.4"
   },
   "engines": {
     "node": ">=24"

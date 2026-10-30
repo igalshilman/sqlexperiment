@@ -3,7 +3,7 @@
 // records the sends it makes. A crash is an attempt whose later writes and
 // sends are lost: what it stored before stays.
 import * as restate from 'restate-objects';
-import { open } from 'restate-sql';
+import { open } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore, sqlAttempt } from './support.ts';
 

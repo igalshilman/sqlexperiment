@@ -82,4 +82,4 @@ asks for transparent huge pages: where the kernel grants them on request
 2 MiB page to be zeroed, up to 15 ms on a virtual machine. The Node.js addon
 runs in its users' processes, which it leaves alone.
 
-**Then:** open the engine without huge pages in the addon's `sql` module (`open_engine`, `packages/sql/src/sql`).
+**Then:** open the engine without huge pages in the addon's `sql` module (`open_engine`, `packages/objects/native/src/sql`).

@@ -18,8 +18,8 @@
 //! store, and the rows are what S3 would bill:
 //! requests and bytes per flush, and dollars per million flushes and per
 //! month stored, at S3 Standard's and S3 Express One Zone's prices.
-use restate_sql::sql::{Sql, Value};
-use restate_sql::state::{
+use restate_objects::sql::{Sql, Value};
+use restate_objects::state::{
     Result, State, StateOptions,
     kv::KvStore,
     simulation::{LatencyKv, MemoryBlobs, MemoryKv, Namespace, cache_config, open_cache},

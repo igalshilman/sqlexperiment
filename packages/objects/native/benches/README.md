@@ -9,7 +9,7 @@ not model a real remote backend.
 Against a real Restate server, `pnpm --filter e2e bench` from the
 repository's root runs [the end-to-end benchmark](../../e2e/bench.ts).
 
-Run from `packages/sql`:
+Run from `packages/objects/native`:
 
 ```sh
 cargo bench --locked --features bench --bench flush_costs

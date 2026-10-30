@@ -65,7 +65,7 @@ const PROMPTS = 8;
 const ACCOUNTS = 8;
 const OPENING = 1000;
 
-const dir = mkdtempSync(join(tmpdir(), 'restate-sql-examples-'));
+const dir = mkdtempSync(join(tmpdir(), 'restate-objects-examples-'));
 // One descriptor per log, however often its process restarts.
 const logs = new Map<string, number>();
 const log = (name: string) => logs.get(name) ?? logs.set(name, openSync(join(dir, name), 'a')).get(name)!;

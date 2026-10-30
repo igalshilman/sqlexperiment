@@ -1,6 +1,6 @@
 target/
 # The addon, built (pnpm build).
-packages/sql/sql.node
+packages/objects/native/objects.node
 node_modules/
 .env
 .env.*
