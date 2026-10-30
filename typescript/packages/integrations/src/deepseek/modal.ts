@@ -36,6 +36,10 @@ export function providers(model: string, affinity: string) {
       authorization: `Bearer ${required('MODAL_PROXY_KEY')}.${required('MODAL_PROXY_SECRET')}`,
       'modal-routing-affinity-key': affinity,
     },
+    // pi-ai takes an endpoint it does not know for OpenAI's, and sends the
+    // system prompt as a `developer` message: the endpoint drops those
+    // without a word (the model never sees the prompt). `system` it keeps.
+    compat: { supportsDeveloperRole: false },
     // DeepSeek's efforts, `high` unless the request picks another.
     reasoning: 'high' as const,
     models: [{ id: model, contextWindow: 1_000_000, reasoningEfforts: { low: 'low', high: 'high', max: 'max' } }],

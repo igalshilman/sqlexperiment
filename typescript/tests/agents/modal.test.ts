@@ -25,15 +25,16 @@ const answering = (text: string) =>
     .join('')
     .concat('data: [DONE]\n\n');
 
-/** What the stand-in was asked: each request's path, headers, model and reasoning effort. */
-const asked: { path: string; headers: IncomingHttpHeaders; model: string; effort: string }[] = [];
+/** What the stand-in was asked: each request's path, headers, model, reasoning effort and messages' roles. */
+const asked: { path: string; headers: IncomingHttpHeaders; model: string; effort: string; roles: string[] }[] = [];
 
 const endpoint = createServer((req, res) => {
   let body = '';
   req.on('data', (chunk) => (body += chunk));
   req.on('end', () => {
-    const { model, reasoning_effort } = JSON.parse(body);
-    asked.push({ path: req.url!, headers: req.headers, model, effort: reasoning_effort });
+    const { model, reasoning_effort, messages } = JSON.parse(body);
+    const roles = messages.map((m: { role: string }) => m.role);
+    asked.push({ path: req.url!, headers: req.headers, model, effort: reasoning_effort, roles });
     res.writeHead(200, { 'content-type': 'text/event-stream' }).end(answering('Hello from Modal'));
   });
 });
@@ -54,13 +55,15 @@ afterAll(() => {
 
 describe("DeepSeek's agent on Modal's endpoint", () => {
   it('asks the endpoint, with the proxy token, keeping the conversation on one container', async () => {
-    const chat = deepseek.chat({ model: 'modal/deepseek-ai/DeepSeek-V4.1-Flash' });
+    const chat = deepseek.chat({ model: 'modal/deepseek-ai/DeepSeek-V4.1-Flash', system: 'You plan.' });
     expect(await conversation(chat, 'ENG-1.plan').attempt('inv1', 'Hi')).toBe('Hello from Modal');
     expect(asked).toEqual([
       {
         path: '/v1/chat/completions',
         model: 'deepseek-ai/DeepSeek-V4.1-Flash',
         effort: 'high',
+        // The system prompt as `system`: the endpoint drops a `developer` message.
+        roles: ['system', 'user'],
         headers: expect.objectContaining({
           authorization: 'Bearer wk-test.ws-test',
           'modal-routing-affinity-key': 'ENG-1.plan',
