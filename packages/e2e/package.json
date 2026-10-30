@@ -1,0 +1,28 @@
+{
+  "name": "e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tests against a real Restate server: the agents and SQL objects through crashes, the context without journal replay, Restate's own agent tools, and the SQL benchmark",
+  "type": "module",
+  "scripts": {
+    "crash": "node crash.ts",
+    "concurrency": "node concurrency.ts",
+    "tools": "node restate-tools.ts",
+    "bench": "node bench.ts",
+    "serve": "node serve.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@restatedev/restate-sdk": "1.17.4",
+    "@restatedev/restate-sdk-clients": "1.17.4",
+    "restate-agents": "workspace:*",
+    "restate-fns": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@restatedev/restate-server": "1.8.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

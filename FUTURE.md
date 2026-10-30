@@ -11,7 +11,7 @@ SDK release that exposes its ephemeral get.
 **Now:** the SQL store of `restate-fns` reads the object's state with
 regular, journaled gets (`objectStore` in `packages/fns/src/session.ts`:
 `ctx.get`). Restate 1.8.0, the release the tests run
-(`@restatedev/restate-server` in `packages/tests`), negotiates protocol v7
+(`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
 at most.
 
 **Then:** read with v8's ephemeral get, which leaves the read out of the
@@ -33,7 +33,7 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 1.8.2-dev) has v8, behind that variable, for local benchmarks.
 
 **To switch:** once both releases are out, update `@restatedev/restate-server`
-in `packages/tests` to the server's (with
+in `packages/e2e` to the server's (with
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` where the tests start it,
 unless it enables v8 by default), and switch the read above to the
 ephemeral one.
@@ -68,7 +68,7 @@ awaited promise wait for the server at a time
 (`ExternalProgressChannel.awaitNext`), so concurrent awaits that need the
 server fail with `awaitNext already pending`.
 
-**Then:** drop the selector, and the pin. `packages/tests/concurrency.ts` tells
+**Then:** drop the selector, and the pin. `packages/e2e/concurrency.ts` tells
 whether a release has it (with the hook off, its concurrent awaits fail).
 
 ## The SQL engine's huge pages, in the addon

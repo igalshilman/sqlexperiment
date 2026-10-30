@@ -65,21 +65,21 @@ With a Restate server, and the agent registered with it: see
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/langgraph.ts`](../../../tests/fakes/langgraph.ts)
-(`pnpm --filter tests test langgraph`, from the repository root):
+The tests run on a scripted model, [`test/fakes/langgraph.ts`](../../test/fakes/langgraph.ts)
+(`pnpm --filter restate-agents test langgraph`, from the repository root):
 
-- [`tests/storage/langgraph.test.ts`](../../../tests/storage/langgraph.test.ts):
+- [`test/storage/langgraph.test.ts`](../../test/storage/langgraph.test.ts):
   LangGraph's checkpointer conformance suite
   (`@langchain/langgraph-checkpoint-validation`, 718 tests);
-  [`langgraph-fork.test.ts`](../../../tests/storage/langgraph-fork.test.ts),
+  [`langgraph-fork.test.ts`](../../test/storage/langgraph-fork.test.ts),
   a forked thread; and
-  [`langgraph-upgrade.test.ts`](../../../tests/storage/langgraph-upgrade.test.ts),
+  [`langgraph-upgrade.test.ts`](../../test/storage/langgraph-upgrade.test.ts),
   a thread of an earlier version of the checkpointer.
-- [`tests/agents/langgraph.test.ts`](../../../tests/agents/langgraph.test.ts):
+- [`test/langgraph.test.ts`](../../test/langgraph.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; the
   system prompt; and `messages`. With `durability: 'async'`, or `ToolNode`'s
   default error handling, it fails.
-- [`tests/agents/langgraph.ts`](../../../tests/agents/langgraph.ts): the
-  bank agent, through crashes in [the crash test](../../../tests/crash.ts)
-  (`pnpm --filter tests crash`): every message moves money exactly once.
+- [`test/langgraph.ts`](../../test/langgraph.ts): the
+  bank agent, through crashes in [the crash test](../../../e2e/crash.ts)
+  (`pnpm --filter e2e crash`): every message moves money exactly once.

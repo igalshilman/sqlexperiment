@@ -71,14 +71,14 @@ With a Restate server, and the agent registered with it: see
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/claude.ts`](../../../tests/fakes/claude.ts)
-(`pnpm --filter tests test claude`, from the repository root):
+The tests run on a scripted model, [`test/fakes/claude.ts`](../../test/fakes/claude.ts)
+(`pnpm --filter restate-agents test claude`, from the repository root):
 
-- [`tests/agents/claude.test.ts`](../../../tests/agents/claude.test.ts):
+- [`test/claude.test.ts`](../../test/claude.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or at
   any of its state requests, and abandon it, keeping what it committed; and
   `messages`.
-- [`tests/agents/claude.ts`](../../../tests/agents/claude.ts): the bank
-  agent, whose tools move money in the [ledger](../../../tests/sql/ledger.ts),
-  through crashes in [the crash test](../../../tests/crash.ts)
-  (`pnpm --filter tests crash`): every message moves money exactly once.
+- [`test/claude.ts`](../../test/claude.ts): the bank
+  agent, whose tools move money in the [ledger](../../../fns/test/ledger.ts),
+  through crashes in [the crash test](../../../e2e/crash.ts)
+  (`pnpm --filter e2e crash`): every message moves money exactly once.

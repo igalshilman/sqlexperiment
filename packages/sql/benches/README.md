@@ -6,8 +6,8 @@ Restate and checkpoints in packs, and require the crate's `bench`
 feature. They count logical KV operations and bytes in MemoryKv; they do
 not model a real remote backend.
 
-Against a real Restate server, `pnpm --filter tests bench` from the repository's root runs
-[the end-to-end benchmark](../../tests/sql/bench.ts): see
+Against a real Restate server, `pnpm --filter e2e bench` from the
+repository's root runs [the end-to-end benchmark](../../e2e/bench.ts): see
 [RESTATE_RESULTS.md](RESTATE_RESULTS.md) (measured on the log format, v15,
 before copy-on-write).
 

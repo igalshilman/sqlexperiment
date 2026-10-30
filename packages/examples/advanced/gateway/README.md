@@ -77,5 +77,5 @@ The image's model is `openai/gpt-6-luna`: give it `OPENAI_API_KEY`.
 In Docker: [`Dockerfile`](Dockerfile), published as
 `ghcr.io/igalshilman/tool-gateway`, serves the endpoint on 9080.
 
-[`tests/gateway.test.ts`](../../../tests/gateway.test.ts) tests its parts
-without a Restate server (`pnpm --filter tests test gateway`).
+[`gateway.test.ts`](gateway.test.ts) tests its parts
+without a Restate server (`pnpm --filter examples test gateway`).

@@ -1,9 +1,9 @@
 # SQL in objects against a Restate server — 2026-10-22
 
-[`tests/sql/bench.ts`](../../tests/sql/bench.ts)
+[`e2e/bench.ts`](../../e2e/bench.ts)
 calls SQL handlers of a virtual object (`restate-fns`) through a real Restate
 server's ingress, and reads what the objects store from the server's state
-table. Run it with `pnpm --filter tests bench`.
+table. Run it with `pnpm --filter e2e bench`.
 
 Rows hold what an agent stores: model replies, tool calls and tool output, as
 generated JSON text of about 1.15 KB per row (zstd compresses it about 2.5×

@@ -151,7 +151,7 @@ curl localhost:8080/assistant/alice/facts
 ## Where things are
 
 A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
-packages, each with its README:
+packages, each with its README, and its tests in its `test/` directory:
 
 - [`packages/sql`](packages/sql/README.md): `restate-sql`, the Node.js addon:
   one Rust crate with the storage inside, the [`state`](packages/sql/src/state/README.md)
@@ -165,9 +165,9 @@ packages, each with its README:
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
 - [`packages/examples`](packages/examples/README.md): the examples, each a
   small file you run with node.
-- [`packages/tests`](packages/tests/README.md): the agents on scripted models,
-  the storage conformance suites, SQL in objects, and the crash and
-  concurrency tests against a real Restate server.
+- [`packages/e2e`](packages/e2e/README.md): the tests against a real Restate
+  server: the agents and SQL objects through crashes, the context without
+  journal replay, and the SQL benchmark.
 
 ## Requirements
 
@@ -189,22 +189,22 @@ is, and OpenCode needs 24), pnpm, and Rust for the addon:
 ```sh
 pnpm install
 pnpm build        # the addon, with the state and SQL inside
-pnpm test         # every test that needs no Restate server: the addon, its Rust, and vitest
+pnpm test         # every package's tests, which need no Restate server
 pnpm lint         # tsc, oxlint, oxfmt --check, rustfmt and clippy
 pnpm format
 ```
 
-The tests are the `tests` package; `pnpm --filter tests <script>` runs one:
+`pnpm --filter <package> test` runs one package's tests (add a filter, such
+as `langgraph`); the `e2e` package's run against a Restate server, the 1.8.0
+release that `@restatedev/restate-server` installs, or the binary
+`RESTATE_SERVER` names:
 
 ```sh
-pnpm --filter tests test langgraph   # vitest, filtered
-pnpm --filter tests crash            # the agents and SQL objects through crashes
-pnpm --filter tests concurrency      # the context without journal replay
-pnpm --filter tests tools            # Restate's own agent tools
-pnpm --filter tests bench            # SQL in objects: latency, throughput and stored bytes
+pnpm --filter restate-agents test langgraph   # one framework's agent tests
+pnpm --filter e2e crash                       # the agents and SQL objects through crashes
+pnpm --filter e2e concurrency                 # the context without journal replay
+pnpm --filter e2e tools                       # Restate's own agent tools
+pnpm --filter e2e bench                       # SQL in objects: latency, throughput and stored bytes
 ```
-
-The last four run against a Restate server: the 1.8.0 release that
-`@restatedev/restate-server` installs, or the binary `RESTATE_SERVER` names.
 
 To run an example, see [Run an example](packages/examples/README.md#run-an-example).

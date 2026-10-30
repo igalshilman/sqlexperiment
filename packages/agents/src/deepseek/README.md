@@ -95,16 +95,16 @@ With a Restate server, and the agent registered with it: see
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/deepseek.ts`](../../../tests/fakes/deepseek.ts),
+The tests run on a scripted model, [`test/fakes/deepseek.ts`](../../test/fakes/deepseek.ts),
 which makes a fresh tool call id for every call, as a model does
-(`pnpm --filter tests test deepseek`, from the repository root):
+(`pnpm --filter restate-agents test deepseek`, from the repository root):
 
-- [`tests/agents/deepseek.test.ts`](../../../tests/agents/deepseek.test.ts):
+- [`test/deepseek.test.ts`](../../test/deepseek.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; and
   `messages`. Without the checkpoint policy four of its tests fail, and with
   a transfer tool that ignores `retryOf` three do.
-- [`tests/agents/deepseek.ts`](../../../tests/agents/deepseek.ts): the
+- [`test/deepseek.ts`](../../test/deepseek.ts): the
   bank agent, whose `transfer` uses `retryOf`, or its own call id, as the
-  transfer id, through crashes in [the crash test](../../../tests/crash.ts)
-  (`pnpm --filter tests crash`): every message moves money exactly once.
+  transfer id, through crashes in [the crash test](../../../e2e/crash.ts)
+  (`pnpm --filter e2e crash`): every message moves money exactly once.

@@ -253,7 +253,7 @@ SQL drives every promise it awaits with one loop of its own,
 invocation's `promisesExecutor.doProgress`, and at the attempt's end gives it
 back. That is the SDK's internals, as of 1.17.4: the package pins that
 version, and refuses to run a handler on an SDK without them.
-[`tests/sql/selector.test.ts`](../tests/sql/selector.test.ts) tests the
+[`test/selector.test.ts`](test/selector.test.ts) tests the
 selector against a fake VM and the SDK's single-waiter channel.
 
 - **One await point.** The loop asks the server about every awaited promise
@@ -279,20 +279,20 @@ const counter = restate.object({
 });
 ```
 
-[`tests/concurrency.ts`](../tests/concurrency.ts) tests all of this against
+[`e2e/concurrency.ts`](../e2e/concurrency.ts) tests all of this against
 a real server.
 
 ## The examples
 
-The smallest is [`examples/basic/notes.ts`](../examples/basic/notes.ts): plain SQL
-with `ctx.db`. The ledger and the shop are in [`tests/sql/`](../tests/sql),
-where the tests use them. Each runs alone (`node sql/shop.ts` from
-[`packages/tests/`](../tests)), or together with the others
-(`pnpm --filter tests serve`, or `node serve.ts ledger shop` there for some,
-on port 9080, or `PORT`):
+The smallest is [`examples/basic/notes.ts`](../examples/basic/notes.ts):
+plain SQL with `ctx.db`. The ledger and the shop are in [`test/`](test), where
+the tests use them. Each runs alone (`node test/shop.ts`, from here), or
+together with the others (`pnpm --filter e2e serve`, or
+`node serve.ts ledger shop` in [`packages/e2e/`](../e2e) for some), on port
+9080, or `PORT`:
 
-- [`ledger.ts`](../tests/sql/ledger.ts): accounts and transfers, deduped by transfer id.
-- [`shop.ts`](../tests/sql/shop.ts): a Warehouse object per SKU and an Orders object per
+- [`ledger.ts`](test/ledger.ts): accounts and transfers, deduped by transfer id.
+- [`shop.ts`](test/shop.ts): a Warehouse object per SKU and an Orders object per
   order, each with its own database, over RPC. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.
@@ -302,7 +302,7 @@ storage in the object's database.
 
 ```sh
 pnpm install && pnpm build   # from the repository root: the workspace and the addon
-pnpm --filter tests serve                                            # the objects, on port 9080
+pnpm --filter e2e serve                                            # the objects, on port 9080
 npx @restatedev/restate-server                                       # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
@@ -311,7 +311,7 @@ curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
 ```
 
 Both run through crashes against a real server: see
-[the crash test](../tests/crash.ts) (`pnpm --filter tests crash`). 200 sequential ledger
+[the crash test](../e2e/crash.ts) (`pnpm --filter e2e crash`). 200 sequential ledger
 transfers take 18.8 ms each on one local node.
 
 ## Caveats
@@ -363,10 +363,13 @@ since a suspension is a restart.
 
 ## Tests
 
-The library's own: [`tests/sql`](../tests/sql) (sessions, transactions
-and their sends, readers, SQL errors) without a server, and
-[`tests/concurrency.ts`](../tests/concurrency.ts) and
-[`tests/crash.ts`](../tests/crash.ts) against one. `restate-fns/internal`
+The library's own: [`test/`](test) (sessions, transactions and their sends,
+readers, SQL errors) without a server (`pnpm --filter restate-fns test`), and
+[`e2e/concurrency.ts`](../e2e/concurrency.ts) and
+[`e2e/crash.ts`](../e2e/crash.ts) against one.
+[`test/support.ts`](test/support.ts) runs a handler's attempts over an
+object's state in memory, through crashes and fencing; `restate-agents`'s
+tests use it too (`restate-fns/test/support`). `restate-fns/internal`
 has what the tests take apart: an attempt's session over a context of their
 own (`SqlAttempt`, `withSql`), and the store's fault injection
 (`setStoreWrapper`).

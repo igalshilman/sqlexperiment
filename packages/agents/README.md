@@ -612,6 +612,22 @@ in the pnpm workspace: a directory under `packages/`
 and `pnpm install`. Node runs
 TypeScript as it is: `node agent.ts`.
 
+## Tests
+
+[`test/`](test) has each framework's agent on a scripted model
+([`test/fakes/`](test/fakes/fakes.ts)), which needs no API key, through
+crashes of the handler, and each framework's storage on a database in memory,
+with the framework's own conformance suite where it has one
+([`test/storage/`](test/storage)). Each framework's README lists its own.
+
+```sh
+pnpm --filter restate-agents test             # all of them, without a Restate server
+pnpm --filter restate-agents test langgraph   # one framework's
+```
+
+The same agents run against a real Restate server, through crashes, in
+[the crash test](../e2e/README.md).
+
 ## Words
 
 - **Object, key.** A Restate virtual object: `assistant/alice` is the

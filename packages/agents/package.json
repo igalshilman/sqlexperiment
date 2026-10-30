@@ -13,7 +13,11 @@
     "./opencode": "./src/opencode/index.ts",
     "./opencode/db": "./src/opencode/db.ts",
     "./pi": "./src/pi/index.ts",
-    "./pi/storage": "./src/pi/storage.ts"
+    "./pi/storage": "./src/pi/storage.ts",
+    "./test/*": "./test/*.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
   },
   "dependencies": {
     "@ai-sdk/provider": "3.0.8",
@@ -67,6 +71,9 @@
     "restate-fns": "workspace:*",
     "restate-sql": "workspace:*",
     "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-checkpoint-validation": "1.1.1"
   },
   "engines": {
     "node": ">=24"

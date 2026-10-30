@@ -86,18 +86,18 @@ coordinator that hands coding tasks to OpenCode coders.
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/pi.ts`](../../../tests/fakes/pi.ts),
-which needs no key (`pnpm --filter tests test pi`, from the repository root):
+The tests run on a scripted model, [`test/fakes/pi.ts`](../../test/fakes/pi.ts),
+which needs no key (`pnpm --filter restate-agents test pi`, from the repository root):
 
-- [`tests/storage/pi.test.ts`](../../../tests/storage/pi.test.ts):
+- [`test/storage/pi.test.ts`](../../test/storage/pi.test.ts):
   pi-durable's storage conformance suite on the object's database;
-  [`pi-workspace.test.ts`](../../../tests/storage/pi-workspace.test.ts),
+  [`pi-workspace.test.ts`](../../test/storage/pi-workspace.test.ts),
   `withPi` with a workspace.
-- [`tests/agents/pi-bank.test.ts`](../../../tests/agents/pi-bank.test.ts):
+- [`test/pi-bank.test.ts`](../../test/pi-bank.test.ts):
   the bank agent, with crashes at any of a message's state requests.
-- [`tests/agents/pi.test.ts`](../../../tests/agents/pi.test.ts): the chat,
+- [`test/pi.test.ts`](../../test/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
-- [`tests/agents/pi.ts`](../../../tests/agents/pi.ts): the bank agent,
-  whose tools move money in the [ledger](../../../tests/sql/ledger.ts)
+- [`test/pi.ts`](../../test/pi.ts): the bank agent,
+  whose tools move money in the [ledger](../../../fns/test/ledger.ts)
   with the tool call id as the transfer id, through crashes in
-  [the crash test](../../../tests/crash.ts) (`pnpm --filter tests crash`).
+  [the crash test](../../../e2e/crash.ts) (`pnpm --filter e2e crash`).
