@@ -1,5 +1,5 @@
 //! A seeded random campaign over the public API: mutations of changes to several
-//! files (one with a base), records and logs, flushed with small frames and
+//! files and records, flushed with small frames and
 //! random checkpoint thresholds so that checkpoints, patches, compactions and
 //! garbage collection all happen, and random
 //! faults, cancellations, crashes and reopens by owners with and without a
@@ -344,10 +344,7 @@ impl World {
         let mut mutation = session.state.mutation();
         let mut pending = self.model.clone();
         for _ in 0..1 + self.rng.below(8) {
-            let op = match self.rng.percent(10) {
-                true => self.model.truncation(&mut self.rng),
-                false => Op::random(&mut self.rng),
-            };
+            let op = Op::random(&mut self.rng);
             trace(|| format!("  {}", describe(&op)));
             text(session.apply(&mut mutation, &op))?;
             pending.apply(&op);
@@ -707,8 +704,6 @@ fn describe(op: &Op) -> String {
         }
         Op::Write(name, index, None) => format!("hole {name} page {index}"),
         Op::SetLen(name, len) => format!("set_len {name} {len}"),
-        Op::Append(name, entry) => format!("append {name} {} bytes", entry.len()),
-        Op::Truncate(name, before) => format!("truncate {name} before {before}"),
     }
 }
 
@@ -731,7 +726,7 @@ async fn run(seed: u64) -> std::result::Result<Totals, String> {
     if let Some(packs) = &packs {
         monitor = monitor.packs(packs);
     }
-    let store = Arc::new(monitor.with_base("vm", golden()));
+    let store = Arc::new(monitor);
     let caches = [new_owner(&mut rng), new_owner(&mut rng)];
     let mut world = World {
         rng,

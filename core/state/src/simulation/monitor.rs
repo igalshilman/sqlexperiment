@@ -27,17 +27,16 @@
 //!    than the head's previous checkpoint, and neither checkpoint names it,
 //!    and a manifest only if older than the previous checkpoint.
 //! 5. **Decodable**: every head, tail entry and manifest decodes, and so
-//!    does every page, frame and value they name: a file's pages and frames
-//!    against its golden base (given [`MonitorKv::with_base`]).
+//!    does every page, frame and value they name.
 use crate::{
-    Base, PAGE,
+    PAGE,
     blobs::{KV_PREFIX, MANIFEST_PREFIX},
     format::{
         Checkpoint, Entry, HEAD_KEY, Head, Location, Manifest, PackId, Tier, Value, parse_tail_key,
     },
     kv::KvStore,
     simulation::MemoryBlobs,
-    store::{FileState, base_page, decode_page, decode_value, hole_page, implicit},
+    store::{FileState, decode_page, decode_value, hole_page},
     zstd,
 };
 use bytes::Bytes;
@@ -46,7 +45,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io,
     ops::{Deref, Range},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 /// A store wrapper that checks the protocol invariants on every request.
@@ -84,8 +83,6 @@ struct Known {
     /// Frames decoded, by location: `None` if they do not decode.
     frames: HashMap<Location, Option<Bytes>>,
     violations: Vec<String>,
-    /// The bases of files made with one, by name.
-    bases: BTreeMap<String, Arc<dyn Base>>,
     checked: usize,
 }
 
@@ -304,14 +301,10 @@ impl Known {
                 Err(error) => return self.violation(format!("tail entry {version}: {error}")),
             };
             for (name, change) in &entry.files {
-                // Unknown, or its base not known: not checked.
-                let Some(base) = self.base(name, change.base) else {
-                    continue;
-                };
                 let mut file = match files.remove(name) {
                     Some(file) => file,
                     None => {
-                        let Some(file) = self.checkpointed_file(head, name, change.base) else {
+                        let Some(file) = self.checkpointed_file(head, name) else {
                             return;
                         };
                         file
@@ -321,9 +314,9 @@ impl Known {
                     let Some(frame) = frame else {
                         continue;
                     };
-                    let hole = hole_page(base.as_ref(), *page);
+                    let hole = hole_page();
                     let checkpointed = match file.on_checkpoint(*page) {
-                        true => match self.checkpointed(head, name, *page, base.as_ref()) {
+                        true => match self.checkpointed(head, name, *page) {
                             Some(page) => page,
                             None => return,
                         },
@@ -344,12 +337,7 @@ impl Known {
 
     /// The file `name` as `head`'s checkpoint holds it, with no tail over
     /// it; `None` where the monitor does not see the checkpoint.
-    fn checkpointed_file(
-        &mut self,
-        head: &Head,
-        name: &str,
-        base: Option<u64>,
-    ) -> Option<FileState> {
+    fn checkpointed_file(&mut self, head: &Head, name: &str) -> Option<FileState> {
         let size = match head.checkpoint {
             Some(checkpoint) => {
                 (self.manifest(&checkpoint)?.files.get(name)).map_or(0, |file| file.size)
@@ -358,7 +346,6 @@ impl Known {
         };
         Some(FileState {
             size,
-            base,
             ..FileState::default()
         })
     }
@@ -366,14 +353,8 @@ impl Known {
     /// Page `page` of the file `name` as `head`'s checkpoint holds it (its
     /// patch, else its frame's page), else what a hole reads; `None` where
     /// the monitor does not see the checkpoint.
-    fn checkpointed(
-        &mut self,
-        head: &Head,
-        name: &str,
-        page: u64,
-        base: Option<&Arc<dyn Base>>,
-    ) -> Option<Bytes> {
-        let hole = hole_page(base, page);
+    fn checkpointed(&mut self, head: &Head, name: &str, page: u64) -> Option<Bytes> {
+        let hole = hole_page();
         let Some(checkpoint) = head.checkpoint else {
             return Some(hole);
         };
@@ -384,7 +365,7 @@ impl Known {
         let Some(stored) = stored else {
             return Some(hole);
         };
-        let frame = self.frame(head.frame_pages, stored, base, index)?;
+        let frame = self.frame(head.frame_pages, stored)?;
         let at = ((page % head.frame_pages) * PAGE) as usize;
         let framed = frame.slice(at..at + PAGE as usize);
         match patch {
@@ -393,44 +374,20 @@ impl Known {
         }
     }
 
-    /// Frame `index` of a file with `base`, stored at `at`, decoded; `None`
-    /// if it is not stored or does not decode.
-    fn frame(
-        &mut self,
-        frame_pages: u64,
-        at: Location,
-        base: Option<&Arc<dyn Base>>,
-        index: u64,
-    ) -> Option<Bytes> {
+    /// The frame stored at `at`, decoded; `None` if it is not stored or
+    /// does not decode.
+    fn frame(&mut self, frame_pages: u64, at: Location) -> Option<Bytes> {
         if let Some(frame) = self.frames.get(&at) {
             return frame.clone();
         }
         let size = (frame_pages * PAGE) as usize;
         let frame = self.pack_range(at.pack, at.range()).and_then(|raw| {
-            let prefix = match base {
-                Some(_) => implicit(base, frame_pages, index),
-                None => Vec::new(),
-            };
             let mut image = Vec::with_capacity(size);
-            zstd::decompress(&mut image, &raw, &prefix).ok()?;
+            zstd::decompress(&mut image, &raw, &[]).ok()?;
             (image.len() == size).then(|| Bytes::from(image))
         });
         self.frames.insert(at, frame.clone());
         frame
-    }
-
-    /// The base the file `name` is made with, if the monitor knows it:
-    /// `Some(None)` without one.
-    fn base(&mut self, name: &str, id: Option<u64>) -> Option<Option<Arc<dyn Base>>> {
-        let Some(id) = id else {
-            return Some(None);
-        };
-        let base = self.bases.get(name)?.clone();
-        if base.id() != id {
-            self.violation(format!("{name} is made with base {id}, not {}", base.id()));
-            return None;
-        }
-        Some(Some(base))
     }
 
     /// A new checkpoint's manifest is stored and decodes, and so does every
@@ -441,54 +398,41 @@ impl Known {
             return self.violation(format!("head {v}: its checkpoint's manifest is unreadable"));
         };
         for (name, file) in &manifest.files {
-            let base = self.base(name, file.base);
             for (index, at) in file.frames.iter().enumerate() {
                 let what = format!("frame {index} of {name}");
-                let (Some(at), Some(base)) = (at, &base) else {
+                let Some(at) = at else {
                     continue;
                 };
                 if self.stored(v, *at, &what).is_none() {
                     continue;
                 }
-                if self
-                    .frame(frame_pages, *at, base.as_ref(), index as u64)
-                    .is_none()
-                {
+                if self.frame(frame_pages, *at).is_none() {
                     self.violation(format!("head {v}: {what} does not decode"));
                 }
             }
             for (&page, &at) in &file.patches {
                 let what = format!("patch of page {page} of {name}");
-                let Some(base) = &base else {
-                    continue;
-                };
                 let Some(raw) = self.stored(v, at, &what) else {
                     continue;
                 };
                 let index = page / frame_pages;
                 let frame = (file.frames.get(index as usize).copied().flatten())
-                    .map(|frame| self.frame(frame_pages, frame, base.as_ref(), index));
+                    .map(|frame| self.frame(frame_pages, frame));
                 let reference = match frame {
                     Some(Some(frame)) => {
                         let at = ((page % frame_pages) * PAGE) as usize;
                         frame.slice(at..at + PAGE as usize)
                     }
                     Some(None) => continue,
-                    None => Bytes::copy_from_slice(base_page(base.as_ref(), page)),
+                    None => Bytes::new(),
                 };
                 if decode_page(&raw, &reference).is_err() {
                     self.violation(format!("head {v}: {what} does not decode"));
                 }
             }
         }
-        let records =
-            (manifest.records.iter()).map(|(name, value)| (format!("record {name}"), value));
-        let logs = manifest.logs.iter().flat_map(|(name, log)| {
-            let first = log.first;
-            (log.values.iter().enumerate())
-                .map(move |(i, value)| (format!("entry {} of log {name}", first + i as u64), value))
-        });
-        for (what, value) in records.chain(logs) {
+        for (name, value) in &manifest.records {
+            let what = format!("record {name}");
             let Value::Stored(at) = value else {
                 continue;
             };
@@ -582,13 +526,6 @@ impl<S: KvStore> MonitorKv<S> {
     /// ([`crate::Open::checkpoints`]).
     pub fn packs(self, packs: &MemoryBlobs) -> Self {
         self.known.lock().unwrap().external = Some(packs.clone());
-        self
-    }
-
-    /// Decode the pages and frames of the file `name` against `base`, the
-    /// one it is made with (see [`crate::Base`]).
-    pub fn with_base(self, name: &str, base: Arc<dyn Base>) -> Self {
-        self.known.lock().unwrap().bases.insert(name.into(), base);
         self
     }
 

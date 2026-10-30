@@ -20,20 +20,16 @@ handler, which Restate runs once per key and fences, so a former attempt's
 writes never land after a newer one's. Shared handlers may open the same
 namespace as **readers** beside the owner.
 
-A namespace's state holds three kinds of named values:
+A namespace's state holds two kinds of named values:
 
-| Kind       | What it is                                                              | Used for, say                                   |
-| ---------- | ----------------------------------------------------------------------- | ----------------------------------------------- |
-| **Record** | A whole value, up to 16 MiB, set and read whole                         | A request's effects; a run's progress           |
-| **File**   | A paged file: 4 KiB pages, read and written at random, up to 10 GiB     | The SQL database (the file `db`); a VM's memory |
-| **Log**    | Entries appended at the end and truncated from the start, read by index | A VM's memory turns; anything append-only       |
-
-A file may have a **base**, a golden image the host holds (such as a VM's
-initial memory): its pages are stored as differences from the base's.
+| Kind       | What it is                                                          | Used for, say                         |
+| ---------- | ------------------------------------------------------------------- | ------------------------------------- |
+| **Record** | A whole value, up to 16 MiB, set and read whole                     | A request's effects; a run's progress |
+| **File**   | A paged file: 4 KiB pages, read and written at random, up to 10 GiB | The SQL database (the file `db`)      |
 
 **The state is read, never written in place.** A change goes into a
 **mutation**: an owned value that collects records set, pages written,
-files resized, entries appended and logs truncated, in memory. A **flush**
+and files resized, in memory. A **flush**
 of the mutation makes all of it durable at once, atomically, in one round
 trip to Restate, or none of it; a mutation dropped instead discards it.
 
@@ -109,12 +105,12 @@ Everything below is how those two layers are laid out, written and read.
 ```
 Restate (the object's state)                           S3, if the state has one
 ┌───────────────────────────────────────────────┐     ┌──────────────────────────────┐
-│ v21/head          the commit point: version,  │     │ L1: l1/<v>-<nonce>           │
+│ v22/head          the commit point: version,  │     │ L1: l1/<v>-<nonce>           │
 │                   checkpoints, tail entries   │     │   packs promoted from L0:    │
-│ v21/tail/<v>/<p>  one per flush: its mutation │     │   frames, patches,           │
-│ v21/manifest/...  one per checkpoint: where   │────▶│   large values               │
+│ v22/tail/<v>/<p>  one per flush: its mutation │     │   frames, patches,           │
+│ v22/manifest/...  one per checkpoint: where   │────▶│   large values               │
 │                   every frame and value is    │     │                              │
-│ v21/pack/l0/...   L0: the packs of the        │     └──────────────────────────────┘
+│ v22/pack/l0/...   L0: the packs of the        │     └──────────────────────────────┘
 │                   checkpoints since the last  │
 │                   promotion; all of them      │
 │                   without S3                  │
@@ -123,8 +119,8 @@ Restate (the object's state)                           S3, if the state has one
 
 A paged file is stored as **frames** of 4 pages (16 KiB), each compressed
 with zstd on its own: the unit a read fetches and a checkpoint rewrites.
-The state in memory keeps the tail decoded as an **overlay**, the records,
-logs and pages changed since the checkpoint, and a read looks there first.
+The state in memory keeps the tail decoded as an **overlay**, the records
+and pages changed since the checkpoint, and a read looks there first.
 The rest of the terms are introduced below, each where its piece is.
 
 ## 4. The pieces, and how they change over time
@@ -137,7 +133,7 @@ The rest of the terms are introduced below, each where its piece is.
    compressed on its own, against the page as the state holds it before
    the flush: its **change**. A row update usually changes a few
    bytes of a page, so its page costs about 100–200 bytes, not 4 KiB; and a
-   page written at every flush (a log appended to, a VM's heap) costs each
+   page written at every flush (a chat's last message page, say) costs each
    flush only what that flush changed.
 3. **Put** the tail entry, then the head; **sync**. Restate keeps writes in
    order, and a crash keeps a prefix of them, so the head is never stored
@@ -167,8 +163,6 @@ manifest), so a crash midway leaves only keys no head names.
 One per flush, for the version it makes, cut into parts of 1 MiB if large:
 
 - the records set, with their values;
-- per log changed, the entries appended and where it was truncated (an
-  entry appended and truncated in the same flush is dropped);
 - per file changed, its new size and the pages written, each its change.
 
 So the tail is a log: an entry's pages decode against the state the
@@ -212,7 +206,7 @@ holds it now (the frame and its patches, with the chains over them):
 - **Rebuild it** otherwise, or when a page past the file's end changed:
   compress it again, without patches.
 
-Then the records set and log entries appended since: inline in the
+Then the records set since: inline in the
 manifest if up to 1 KiB, else into the pack. And **compaction**: any older
 pack the new manifest needs less than half of has its live ranges copied,
 as they are, into the new pack, so that pack can go. Ranges of a pack
@@ -261,8 +255,7 @@ One per checkpoint, zstd-compressed, always in Restate, in 64 KiB parts:
 
 - the packs it uses, and the bytes each holds (for compaction);
 - every record: inline, or where its value is;
-- every log: its first index and where each entry is;
-- every file: its size, its base, a location (pack, offset, length) per
+- every file: its size, a location (pack, offset, length) per
   frame, or none for a hole, and its patches.
 
 About 1.7 bytes per frame: 3 KiB for a 100k-row database, 30 KiB for 1M
@@ -283,7 +276,7 @@ compaction moves it.
 A checkpoint has two parts: a manifest that indexes the whole state, and a
 pack of what changed since the checkpoint before.
 
-- **The manifest** names every file, record and log, and gives a location
+- **The manifest** names every file and record, and gives a location
   (pack, offset, length) for every frame, patch and stored value. It
   stands on its own: an open reads this one manifest.
 - **The pack** holds the frames the checkpoint rebuilt, the patches it
@@ -400,8 +393,8 @@ version 5, and `C4` the checkpoint of version 4 (its pack `P4` and manifest
    that what it reads is durable.
 2. Otherwise, **get the checkpoint's manifest and the tail past it**,
    together, and apply the tail to the overlay in memory.
-3. **Get large records and log entries**, and every frame and patch of a
-   file without a base of at most 16 pages, such as a small database
+3. **Get large records**, and every frame and patch of a
+   file of at most 16 pages, such as a small database
    whole, together.
 
 That is at most 3 round trips, whatever the database's size.
@@ -415,7 +408,7 @@ That is at most 3 round trips, whatever the database's size.
 3. its frame: one ranged read of the pack (in Restate, the 64 KiB parts
    it is in, which the cache keeps for the frames beside it; in S3, a
    ranged GET), decompressed in about 25 µs;
-4. a hole: zeros, or the base's page.
+4. a hole: zeros.
 
 A SQL query reads a page per b-tree level it descends, so a cold point
 query is a round trip per level the cache does not hold: 2 to 6.
@@ -525,7 +518,7 @@ database's checkpoint, every 128 flushes, writes about 28 KB of patches
 and a 30 KiB manifest.
 
 A tail entry's page is its change since the flush before, so a page
-written at every flush (a chat's last message page, a log) costs each
+written at every flush (a chat's last message page) costs each
 flush only what that flush wrote: the chat's tail is 851 bytes a flush,
 where compressing against the checkpoint's page put 1,593. Its tail then
 fills more slowly, so it is checkpointed less often and runs longer: more
@@ -612,7 +605,7 @@ reports are in git history (`core/state/docs/` at commit `e015181`).
 | Blobs in S3                      | The same blobs in an object store, the root in Restate, zombies kept apart by claims | Every flush was S3 PUTs: $15 per million one-row updates, over $100 for ten rows             |
 | Tail and checkpoints (v18)       | A tail in Restate, and checkpoints of copy-on-write blobs, in S3 or Restate          | The chunk map, bases, deltas and rebase rules; a cold open of 1M rows took up to 1,331 gets  |
 | Frame packs (v20)                | A tail of plain mutations; checkpoints of frames and patches, with a flat manifest   | Its packs were all in Restate or all in S3: a choice per deployment, not per database's size |
-| Frame packs in tiers (v21, this) | The same, each pack in L0 (Restate) or, once L0 holds 4 MiB, L1 (S3)                 | –                                                                                            |
+| Frame packs in tiers (v22, this) | The same, each pack in L0 (Restate) or, once L0 holds 4 MiB, L1 (S3)                 | –                                                                                            |
 
 Against v18, frame packs halved the bytes a flush puts on large databases
 (a tail page costs what changed since the checkpoint) and brought a cold

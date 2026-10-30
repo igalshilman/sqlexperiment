@@ -44,9 +44,9 @@ ephemeral one.
 
 **Now:** SQL objects set lazy state, so an invocation does not start with
 every tail entry and pack, and a session's first read is the head
-(`v21/head`): a round trip, cached or not.
+(`v22/head`): a round trip, cached or not.
 
-**Then:** with lazy state still on, whitelist `v21/head` (`state::HEAD_KEY`);
+**Then:** with lazy state still on, whitelist `v22/head` (`state::HEAD_KEY`);
 the server ships it with the invocation (best effort, within its
 eager-state size limit), and the open starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be

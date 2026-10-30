@@ -3,10 +3,9 @@
 Transactional state over an asynchronous key/value store, for namespaces with
 one owner at a time: the state of a Restate object without Restate's journal
 (`journalReplay: false`). It keeps named **records** (small whole values),
-paged **files** (4 KiB pages, read and written at random) and **logs**
-(entries appended, and truncated from the start). The state is read; it
-changes only through a **mutation**, an owned value that collects the records
-set, pages written and entries appended, and a **flush** makes everything in the mutation durable at
+and paged **files** (4 KiB pages, read and written at random). The state is
+read; it changes only through a **mutation**, an owned value that collects the
+records set and pages written, and a **flush** makes everything in the mutation durable at
 once, in one round trip. It needs only `get`, `put`, `delete` and `sync` from the backend,
 and a listing of its keys to collect the garbage.
 

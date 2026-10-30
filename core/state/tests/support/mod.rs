@@ -1,15 +1,10 @@
-//! Shared by the simulation tests: a seeded random source, a file base, a
-//! session holding a state's files, and a reference model of its content.
+//! Shared by the simulation tests: a seeded random source, a session holding a state's files, and a reference model of its content.
 #![allow(dead_code)]
 use bytes::Bytes;
 use state::{
-    Base, File, FlushReport, Mutation, PAGE_SIZE, Page, Result, State, kv::KvStore,
-    simulation::Setup,
+    File, FlushReport, Mutation, PAGE_SIZE, Page, Result, State, kv::KvStore, simulation::Setup,
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 /// A deterministic random source (splitmix64).
 pub struct Rng(u64);
@@ -62,39 +57,10 @@ pub fn varied(rng: &mut Rng) -> Page {
     page.into()
 }
 
-/// The base of the file `vm`: a golden image of a few pages.
-pub struct Golden {
-    pages: Vec<Vec<u8>>,
-}
-
-impl Base for Golden {
-    fn id(&self) -> u64 {
-        7
-    }
-    fn page(&self, index: u64) -> Option<&[u8]> {
-        self.pages.get(index as usize).map(Vec::as_slice)
-    }
-}
-
-/// The one base the tests use.
-pub fn golden() -> Arc<Golden> {
-    static GOLDEN: OnceLock<Arc<Golden>> = OnceLock::new();
-    GOLDEN
-        .get_or_init(|| {
-            let pages = (0..6u8)
-                .map(|n| (0..PAGE_SIZE).map(|i| (i as u8 / 3) ^ n).collect())
-                .collect();
-            Arc::new(Golden { pages })
-        })
-        .clone()
-}
-
-/// The paged files: `vm` has the base [`golden`].
-pub const FILES: [&str; 3] = ["db", "aux", "vm"];
+/// The paged files.
+pub const FILES: [&str; 2] = ["db", "aux"];
 /// The records.
 pub const RECORDS: [&str; 3] = ["progress", "outbox", "state"];
-/// The logs.
-pub const LOGS: [&str; 2] = ["turns", "events"];
 
 /// A change to a state (in a mutation) and to its model alike.
 #[derive(Clone, Debug)]
@@ -102,14 +68,10 @@ pub enum Op {
     Set(&'static str, Bytes),
     Write(&'static str, u64, Option<Page>),
     SetLen(&'static str, u64),
-    Append(&'static str, Bytes),
-    /// Drop the log's entries before an index, at most its end as flushed
-    /// (see [`Model::truncation`]).
-    Truncate(&'static str, u64),
 }
 
 impl Op {
-    /// A random change: records and log entries small and over an inline
+    /// A random change: records small and over an inline
     /// budget of a few hundred bytes, pages written, holes, and lengths
     /// shrunk and grown.
     pub fn random(rng: &mut Rng) -> Self {
@@ -120,23 +82,13 @@ impl Op {
             2 => 100 + rng.below(400) as usize,
             _ => 1000 + rng.below(3000) as usize,
         };
-        match rng.below(12) {
+        match rng.below(10) {
             0..=1 => {
                 let len = len(rng);
                 Self::Set(rng.pick(&RECORDS), rng.bytes(len).into())
             }
-            10..=11 => {
-                let len = len(rng);
-                Self::Append(rng.pick(&LOGS), rng.bytes(len).into())
-            }
             2 => Self::SetLen(file, 512 * rng.below(8 * 20)),
             3 => Self::Write(file, rng.below(20), None),
-            4 if file == "vm" => {
-                // A page as its base has it: stored as a hole.
-                let index = rng.below(6);
-                let page = golden().page(index).map(Page::copy_from_slice);
-                Self::Write(file, index, page)
-            }
             _ => Self::Write(file, rng.below(20), Some(varied(rng))),
         }
     }
@@ -149,7 +101,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open the state, and its files (`vm` with its base).
+    /// Open the state, and its files.
     pub async fn open(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
         Self::of(setup.into().open(store).await?)
     }
@@ -162,11 +114,7 @@ impl Session {
     fn of(state: State) -> Result<Self> {
         let mut files = BTreeMap::new();
         for name in FILES {
-            let file = match name {
-                "vm" => state.file_with_base(name, golden())?,
-                _ => state.file(name)?,
-            };
-            files.insert(name, file);
+            files.insert(name, state.file(name)?);
         }
         Ok(Self { state, files })
     }
@@ -181,11 +129,6 @@ impl Session {
             Op::Set(name, value) => mutation.set(&self.state.record(name), value.clone()),
             Op::Write(name, index, image) => mutation.write(self.file(name), *index, image.clone()),
             Op::SetLen(name, len) => mutation.set_len(self.file(name), *len),
-            Op::Append(name, entry) => {
-                mutation.append(&self.state.log(name), entry.clone())?;
-                Ok(())
-            }
-            Op::Truncate(name, before) => mutation.truncate(&self.state.log(name), *before),
         }
     }
 
@@ -199,20 +142,12 @@ impl Session {
     }
 }
 
-/// What a state should hold, as last flushed: its records, its files'
-/// pages, and its logs.
+/// What a state should hold, as last flushed: its records, and its files'
+/// pages.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
     records: BTreeMap<String, Bytes>,
     files: BTreeMap<String, FileModel>,
-    logs: BTreeMap<String, LogModel>,
-}
-
-/// A log's first index and its entries from there.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct LogModel {
-    first: u64,
-    entries: Vec<Bytes>,
 }
 
 /// A file's length and pages; an absent page is a hole.
@@ -244,32 +179,7 @@ impl Model {
                 file.pages.retain(|&index, _| index < kept);
                 file.len = *len;
             }
-            Op::Append(name, entry) => {
-                let log = self.logs.entry(name.to_string()).or_default();
-                log.entries.push(entry.clone());
-            }
-            Op::Truncate(name, before) => {
-                let log = self.logs.entry(name.to_string()).or_default();
-                let dropped = before.saturating_sub(log.first) as usize;
-                log.entries.drain(..dropped.min(log.entries.len()));
-                log.first = log.first.max(*before);
-            }
         }
-    }
-
-    /// A truncation of a random log valid in any mutation of the state
-    /// this model holds: of the log as flushed, up to its end.
-    pub fn truncation(&self, rng: &mut Rng) -> Op {
-        let name = rng.pick(&LOGS);
-        let (first, next) = self.log(name);
-        Op::Truncate(name, first + rng.below(next - first + 1))
-    }
-
-    /// The first index and the next of the log `name`.
-    pub fn log(&self, name: &str) -> (u64, u64) {
-        self.logs.get(name).map_or((0, 0), |log| {
-            (log.first, log.first + log.entries.len() as u64)
-        })
     }
 
     pub fn applied(&self, ops: &[Op]) -> Self {
@@ -286,11 +196,7 @@ impl Model {
         if index * PAGE >= file.len {
             return None;
         }
-        let hole = || match name {
-            "vm" => golden().page(index).map(Page::copy_from_slice),
-            _ => None,
-        };
-        file.pages.get(&index).cloned().or_else(hole)
+        file.pages.get(&index).cloned()
     }
 
     pub fn len(&self, name: &str) -> u64 {
@@ -308,17 +214,6 @@ impl Model {
             let held = session.state.record(name).get();
             if held != self.record(name) {
                 return Ok(Some(format!("record {name}: {} bytes", held.len())));
-            }
-        }
-        for name in LOGS {
-            let log = session.state.log(name);
-            let model = self.logs.get(name).cloned().unwrap_or_default();
-            if (log.first(), log.entries()) != (model.first, model.entries) {
-                let (first, next) = (log.first(), log.next());
-                return Ok(Some(format!(
-                    "log {name}: {first}..{next}, not {:?}",
-                    self.log(name)
-                )));
             }
         }
         for name in FILES {

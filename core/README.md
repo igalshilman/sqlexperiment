@@ -4,10 +4,10 @@ What every SDK here builds on: the storage of a Restate object that runs
 without Restate's journal (`journalReplay: false`). (The Restate SDKs' shared
 core, which runs such a handler since 8.1.0, is used as released.)
 
-| Path                        | What                                                                                                                                                                                                           |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`state/`](state/README.md) | **The state.** Records, paged files and logs over an asynchronous key/value store, changed through a mutation that a flush makes durable atomically, in one round trip, for one owner at a time: a Rust crate. |
-| [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../typescript/packages/sql/README.md) wraps it.                                                     |
+| Path                        | What                                                                                                                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`state/`](state/README.md) | **The state.** Records and paged files over an asynchronous key/value store, changed through a mutation that a flush makes durable atomically, in one round trip, for one owner at a time: a Rust crate. |
+| [`sql/`](sql/README.md)     | **SQL on the state**: SQLite-compatible SQL in the state's file `db`, flushed with it. The [Node.js addon](../typescript/packages/sql/README.md) wraps it.                                               |
 
 ## Layers
 
@@ -23,7 +23,7 @@ SQL      Sql: statements change a private view; Sql::flush(&mut mutation)
          moves what SQL committed into the mutation, as pages of the file `db`
              │
              ▼
-state    records · files · logs, read as last flushed; a Mutation collects
+state    records · files, read as last flushed; a Mutation collects
          changes, and its flush puts a tail entry, then the head: the commit
              │
              ▼

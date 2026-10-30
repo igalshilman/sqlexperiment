@@ -8,7 +8,7 @@
 mod support;
 
 use futures::future::Either;
-use state::{Base, HEAD_KEY, Result, StateOptions, kv::KvStore, simulation::*};
+use state::{HEAD_KEY, Result, StateOptions, kv::KvStore, simulation::*};
 use std::sync::Arc;
 use support::*;
 
@@ -32,8 +32,7 @@ fn options(cache: Option<Namespace>, packs: Option<&MemoryBlobs>) -> Setup {
 }
 
 /// The changes of flush `step`: pages a few bytes apart and pages of random
-/// bytes, records over the inline budget, holes, a shrink, and a page equal
-/// to its base's.
+/// bytes, records over the inline budget, holes, and a shrink.
 fn changes(step: u64) -> Vec<Op> {
     let mut rng = Rng::new(step);
     let image = |rng: &mut Rng| match step % 3 {
@@ -44,15 +43,13 @@ fn changes(step: u64) -> Vec<Op> {
         Op::Set("progress", format!("step {step}").into_bytes().into()),
         Op::Write("db", step % 4, Some(image(&mut rng))),
         Op::Write("aux", 4 + step % 3, Some(image(&mut rng))),
-        Op::Write("vm", step % 6, Some(image(&mut rng))),
+        Op::Write("db", 8 + step % 6, Some(image(&mut rng))),
     ];
     if step % 2 == 1 {
         ops.push(Op::Set("outbox", rng.bytes(600).into()));
     }
     if step % 3 == 2 {
         ops.push(Op::SetLen("aux", 512 * 9));
-        let base = golden().page(1).map(state::Page::copy_from_slice);
-        ops.push(Op::Write("vm", 1, base));
     }
     if step % 4 == 3 {
         ops.push(Op::Write("db", 1, None));
@@ -195,7 +192,7 @@ async fn crash_every_flush(packs: Option<MemoryBlobs>) -> Result<Vec<String>> {
                 if let Some(packs) = &packs {
                     monitor = monitor.packs(packs);
                 }
-                let store = Arc::new(monitor.with_base("vm", golden()));
+                let store = Arc::new(monitor);
                 // The owner's cache saw the failure; reading, it follows
                 // this crash's history as well as any.
                 let reopened = Session::open(store.clone(), options(cache.clone(), packs.as_ref()));

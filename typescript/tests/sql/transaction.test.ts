@@ -10,7 +10,7 @@ import { memoryStore, sqlAttempt } from '../testing.ts';
 type Send = restate.GenericSend<Uint8Array>;
 
 /** The database's head: the commit point of the flush whose effects hold the outbox. */
-const HEAD = 'v21/head';
+const HEAD = 'v22/head';
 let namespaces = 0;
 
 const store = restate.object({

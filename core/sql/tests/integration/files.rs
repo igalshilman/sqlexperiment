@@ -6,56 +6,13 @@ use bytes::Bytes;
 use sql::Sql;
 use state::simulation::Namespace;
 use state::{
-    Base, Result, StateOptions,
+    Result, StateOptions,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, MonitorKv, Operation, fresh_namespace},
 };
 use std::sync::Arc;
 
 fn page(byte: u8) -> Bytes {
     Bytes::from(vec![byte; 4096])
-}
-
-/// A base of `pages` pages of varied bytes, as a VM's golden image is.
-struct Golden {
-    id: u64,
-    bytes: Vec<u8>,
-}
-
-impl Golden {
-    fn new(id: u64, pages: usize) -> Arc<Self> {
-        let mut state = id.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-        let bytes = (0..pages * 4096)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect();
-        Arc::new(Self { id, bytes })
-    }
-
-    /// Its page `n`, with the first byte set to `byte`: a small change.
-    fn changed(&self, n: u64, byte: u8) -> Bytes {
-        let mut page = self.page(n).unwrap().to_vec();
-        page[0] = byte;
-        Bytes::from(page)
-    }
-}
-
-impl Base for Golden {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
-    fn page(&self, index: u64) -> Option<&[u8]> {
-        let at = index as usize * 4096;
-        self.bytes.get(at..at + 4096)
-    }
-}
-
-fn golden() -> Arc<Golden> {
-    Golden::new(7, 8)
 }
 
 fn options(cache: Option<Namespace>) -> Setup {
@@ -74,21 +31,15 @@ fn options(cache: Option<Namespace>) -> Setup {
 }
 
 /// Turn `i`: a row, page `i % 5` of `a` and page `i % 3` of `b` hold `i + 1`
-/// (never zeros, which read as a hole), every seventh turn empties `b`, and
-/// page `i % 4` of `c` (over the golden image) is its golden page with the
-/// first byte `i + 1`.
+/// (never zeros, which read as a hole), as does page `i % 4` of `c`, and
+/// every seventh turn empties `b`.
 async fn turn(db: &mut Db, i: usize) -> Result<()> {
     db.execute("BEGIN").await?;
     db.execute(&format!("INSERT INTO t VALUES({i})")).await?;
     let state = db.state();
     let mutation = db.mutation();
     mutation.write(&state.file("a")?, (i % 5) as u64, Some(page(i as u8 + 1)))?;
-    let c = state.file_with_base("c", golden())?;
-    mutation.write(
-        &c,
-        (i % 4) as u64,
-        Some(golden().changed((i % 4) as u64, i as u8 + 1)),
-    )?;
+    mutation.write(&state.file("c")?, (i % 4) as u64, Some(page(i as u8 + 1)))?;
     let b = state.file("b")?;
     match i % 7 {
         6 => mutation.set_len(&b, 0)?,
@@ -121,10 +72,7 @@ fn expected(name: &str, turns: usize) -> Vec<Option<u8>> {
 
 /// File `name`'s pages as `db` holds them (each one's first byte).
 async fn pages(db: &Sql, name: &str) -> Result<Vec<Option<u8>>> {
-    let file = match name {
-        "c" => db.state().file_with_base(name, golden())?,
-        _ => db.state().file(name)?,
-    };
+    let file = db.state().file(name)?;
     let mut pages = Vec::new();
     for n in 0..file.len() / 4096 {
         pages.push(file.read(n).await?.map(|page| page[0]));
@@ -159,9 +107,10 @@ fn two_files_and_the_tables_survive_a_crash_at_any_write_together() -> Result<()
 
 async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     let cache = cached.then(fresh_namespace);
-    let store = Arc::new(
-        MonitorKv::new(FaultKv::new(MemoryKv::default(), nth as u64)).with_base("c", golden()),
-    );
+    let store = Arc::new(MonitorKv::new(FaultKv::new(
+        MemoryKv::default(),
+        nth as u64,
+    )));
     let mut db = Db::open(store.clone(), options(cache.clone())).await?;
     db.execute("CREATE TABLE t(n INTEGER)").await?;
     let _signal = store.arm(Failpoint {
@@ -188,8 +137,7 @@ async fn crash_case(cached: bool, nth: usize) -> Result<Option<usize>> {
     for kept in 0..=writes {
         let memory = store.inner.inner.fork();
         memory.crash_keeping(kept);
-        let store =
-            Arc::new(MonitorKv::seeded(memory.clone(), memory.values()).with_base("c", golden()));
+        let store = Arc::new(MonitorKv::seeded(memory.clone(), memory.values()));
         let case = format!("sync #{nth}, {kept} of {writes} writes kept, cached={cached}");
         let mut db = Db::open(store.clone(), options(None)).await?;
         let turns = rows(&mut db).await?;
@@ -319,116 +267,6 @@ fn a_files_frames_stay_cached_across_other_writers() -> Result<()> {
         // The new entry, and the checkpointing flush's own, which its
         // checkpoint does not hold.
         assert_eq!((stats.kind("tail").gets, stats.kind("pack").gets), (2, 0));
-        Ok(())
-    })
-}
-
-#[test]
-fn a_file_over_a_base_reads_it_where_it_has_no_page() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
-        let mut db = Db::open(store.clone(), collecting(None)).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        db.mutation().set_len(&file, 8 * 4096)?;
-        assert_eq!(file.read(3).await?, None, "empty until the flush");
-        db.flush().await?;
-        assert_eq!(file.read(3).await?.as_deref(), golden().page(3));
-        db.mutation()
-            .write(&file, 2, Some(golden().changed(2, 1)))?;
-        db.mutation().write(&file, 5, Some(page(9)))?;
-        // A page written back as its base's is a hole again.
-        db.mutation()
-            .write(&file, 6, Some(golden().changed(6, 1)))?;
-        let golden_6 = Bytes::copy_from_slice(golden().page(6).unwrap());
-        db.mutation().write(&file, 6, Some(golden_6))?;
-        db.save().await?;
-
-        let db = Db::open(store.clone(), StateOptions::default()).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        assert_eq!(file.read(2).await?, Some(golden().changed(2, 1)));
-        assert_eq!(file.read(3).await?.as_deref(), golden().page(3));
-        assert_eq!(file.read(5).await?, Some(page(9)));
-        assert_eq!(file.read(6).await?.as_deref(), golden().page(6));
-        assert_eq!(store.violations(), Vec::<String>::new());
-        Ok(())
-    })
-}
-
-#[test]
-fn a_small_change_to_a_base_page_costs_little() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        for n in 1..=2 {
-            let mut db = Db::open(store.clone(), collecting(None)).await?;
-            let file = db.state().file_with_base("m", golden())?;
-            db.mutation()
-                .write(&file, 4, Some(golden().changed(4, n)))?;
-            store.reset_stats();
-            db.save().await?;
-            // The page, against the base's, and the head.
-            let written = store.stats().bytes_written;
-            assert!(written < 300, "{written} bytes written");
-        }
-        let db = Db::open(store.clone(), StateOptions::default()).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        assert_eq!(file.read(4).await?, Some(golden().changed(4, 2)));
-        Ok(())
-    })
-}
-
-#[test]
-fn a_file_opens_only_with_its_base_and_empties_without_it() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        let mut db = Db::open(store.clone(), collecting(None)).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        db.mutation()
-            .write(&file, 1, Some(golden().changed(1, 1)))?;
-        db.save().await?;
-
-        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
-        assert!(db.state().file_with_base("m", Golden::new(8, 8)).is_err());
-        assert!(db.state().file("plain")?.read(0).await?.is_none());
-        let file = db.state().file("m")?;
-        assert!(file.read(1).await.is_err(), "it needs its base");
-        let refused = db.mutation().write(&file, 1, Some(page(1))).is_err();
-        assert!(refused || db.save().await.is_err());
-
-        // Emptied, with its base: once collected, only the packs the head
-        // needs are left.
-        let mut db = Db::open(store.clone(), collecting(None)).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        db.mutation().set_len(&file, 0)?;
-        db.flush().await?;
-        for n in 0..2u8 {
-            let record = db.state().record("n");
-            db.mutation().set(&record, vec![n].into())?;
-            db.flush().await?;
-            db.state().collect_garbage().await?;
-        }
-        assert_eq!(store.packs(), db.state().needed_packs().await?);
-        Ok(())
-    })
-}
-
-#[test]
-fn a_based_file_keeps_its_pages_while_others_save_without_its_base() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MonitorKv::new(MemoryKv::default()).with_base("m", golden()));
-        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
-        let m = db.state().file_with_base("m", golden())?;
-        db.mutation().write(&m, 1, Some(golden().changed(1, 5)))?;
-        db.save().await?;
-        // Saves that never open it leave its pages as they are.
-        for n in 0..3 {
-            let mut db = Db::open(store.clone(), collecting(None)).await?;
-            db.execute(&format!("CREATE TABLE t{n}(n)")).await?;
-            db.save().await?;
-        }
-        let db = Db::open(store.clone(), StateOptions::default()).await?;
-        let file = db.state().file_with_base("m", golden())?;
-        assert_eq!(file.read(1).await?, Some(golden().changed(1, 5)));
-        assert_eq!(store.violations(), Vec::<String>::new());
         Ok(())
     })
 }

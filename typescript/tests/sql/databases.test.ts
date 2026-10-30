@@ -28,8 +28,8 @@ describe("a key's other database", () => {
     const map = new Map<string, Uint8Array>();
     const attempt = sqlAttempt({ map });
     await attempt.end(() => databaseOf(attempt.db, 'library').execute('CREATE TABLE t (x)'));
-    expect([...map.keys()].filter((key) => !key.startsWith('v21/library/'))).toEqual([]);
-    expect(map.has('v21/library/head')).toBe(true);
+    expect([...map.keys()].filter((key) => !key.startsWith('v22/library/'))).toEqual([]);
+    expect(map.has('v22/library/head')).toBe(true);
   });
 
   it('reads in a shared handler, storing nothing', async () => {

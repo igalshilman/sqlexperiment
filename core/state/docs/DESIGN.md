@@ -31,20 +31,11 @@ collection. The encodings are in [FORMAT.md](FORMAT.md).
 - **Round trips dominate.** A flush or open should cost one round trip in
   the steady state.
 
-## Records, logs and the one rule
+## Records and the one rule
 
 **Records** are whole named values: in the manifest up to
 `inline_record_bytes` (1 KiB), and a value of their own in a pack when
 larger, written by the first checkpoint after they change.
-
-**Logs** are named sequences of entries, at the next index: a mutation
-appends to a log and truncates it from its start (`Mutation::append`,
-`Mutation::truncate`), at most 4096 entries held. A flush writes what it
-appends, not the log, and a checkpoint writes each entry once: a log is for
-changes too small to rewrite their whole each time, folded into a record or
-a file now and then and truncated. A truncation applies to the log as the
-flush leaves it, whatever its order among the mutation's appends; an entry
-appended and dropped by one flush is never stored.
 
 **One rule.** A tail entry or a pack is stored before the first head that
 names it, and dropped only once no head that a state may still hold needs
@@ -55,8 +46,7 @@ overwritten, so there is nothing to repair after a crash.
 ## Compression and effects
 
 **Compression.** zstd does the work twice. A frame compresses its 4 pages
-together, so a B-tree page compresses against its neighbours, and against
-its file's base pages. And a page in the tail, or a patch, uses the page as
+together, so a B-tree page compresses against its neighbours. And a page in the tail, or a patch, uses the page as
 the checkpoint holds it as a reference prefix ("patch from"), so a flush
 that changes a few bytes of a page writes about those bytes plus the
 frame's overhead.
@@ -245,8 +235,6 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   and a checkpoint rewrites whole frames, so both write more bytes than a
   delta of what changed would; compaction at half live stores up to twice
   what is live.
-- **Bases.** A file made with a base needs it to rebuild its frames, so it
-  takes no write unless it is opened with that base.
 - **Keys.** Every flush puts at least two keys (a tail entry and the head);
   a namespace holds a key per part of each tail entry kept, a key per 64
   KiB of each manifest kept (two checkpoints'), and a key per 64 KiB of
@@ -268,7 +256,7 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   checks structure and bounds versions, sizes, counts and names, and every
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
-- **Format.** Only v21, with no migration.
+- **Format.** Only v22, with no migration.
 - **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
   differences from the location before, and zstd over the manifest's body;
   the pages are zstd frames of their own. A zero-copy format (FlatBuffers,
@@ -287,7 +275,7 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   a pack a head may need, or of a manifest of a checkpoint not older than
   the previous one. A seeded random campaign over the public API
   (`tests/campaign.rs`; `STATE_SEEDS=<n>` runs more seeds) mixes changes to
-  records, files and logs, random checkpoint thresholds, faults,
+  records and files, random checkpoint thresholds, faults,
   cancellations, crashes, reopens, owners and readers, with packs in
   Restate (even seeds) or promoted at random sizes to an S3 that fails as
   S3 does (odd seeds: uploads lost, done with the response lost, or

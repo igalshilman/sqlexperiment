@@ -67,8 +67,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 // Slow requests: a flush takes several polls.
                 let memory = prepared.fork();
                 let fault = FaultKv::new(memory.clone(), 5);
-                let store =
-                    Arc::new(MonitorKv::seeded(fault, memory.values()).with_base("vm", golden()));
+                let store = Arc::new(MonitorKv::seeded(fault, memory.values()));
                 let cache = cached.then(fresh_namespace);
                 let session = Session::open(store.clone(), options(cache.clone())).await?;
                 if cached {
@@ -162,8 +161,7 @@ fn an_open_cancelled_at_any_poll_leaves_the_cache_usable() -> Result<()> {
         let (memory, mut model) = prepared().await?;
         let seed = memory.values();
         let fault = FaultKv::new(memory, 3);
-        let store: Arc<dyn KvStore> =
-            Arc::new(MonitorKv::seeded(fault, seed).with_base("vm", golden()));
+        let store: Arc<dyn KvStore> = Arc::new(MonitorKv::seeded(fault, seed));
         let cache = fresh_namespace();
         let mut rng = Rng::new(0x09e2);
         for polls in 0.. {

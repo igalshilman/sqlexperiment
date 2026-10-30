@@ -66,7 +66,6 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
         "db".into(),
         FileIndex {
             size: 3 * 16 * PAGE - 512,
-            base: None,
             frames: vec![
                 Some(location(new, 0, 900)),
                 None,
@@ -75,35 +74,18 @@ fn a_manifest_decodes_as_encoded_and_not_truncated() {
             patches: BTreeMap::from([(5, location(new, 900, 40)), (40, location(old, 3, 9))]),
         },
     );
-    manifest.files.insert(
-        "vm".into(),
-        FileIndex {
-            size: 0,
-            base: Some(7),
-            ..FileIndex::default()
-        },
-    );
+    manifest.files.insert("empty".into(), FileIndex::default());
     manifest
         .records
         .insert("small".into(), Value::Inline(Bytes::from_static(b"hi")));
     manifest
         .records
         .insert("large".into(), Value::Stored(location(new, 900, 5000)));
-    manifest.logs.insert(
-        "turns".into(),
-        LogIndex {
-            first: 40,
-            values: vec![
-                Value::Stored(location(old, 12, 4)),
-                Value::Inline(Bytes::new()),
-            ],
-        },
-    );
     manifest.sizes = BTreeMap::from([(old, 1 << 31), (new, 5900)]);
     let bytes = manifest.encode().unwrap();
     assert_eq!(Manifest::decode(&bytes).unwrap(), manifest);
     assert_eq!(manifest.packs(), BTreeSet::from([old, new]));
-    assert_eq!(manifest.locations().count(), 6);
+    assert_eq!(manifest.locations().count(), 5);
     for len in 0..bytes.len() {
         assert!(
             Manifest::decode(&bytes[..len]).is_err(),
@@ -121,19 +103,10 @@ fn a_tail_entry_splits_into_parts_and_reads_back() {
             ("progress".into(), Bytes::from_static(b"step 3")),
             ("outbox".into(), Bytes::from(vec![9; 3 << 20])),
         ],
-        logs: vec![(
-            "turns".into(),
-            LogChange {
-                from: 4,
-                values: vec![Bytes::from_static(b"a"), Bytes::new()],
-                before: 5,
-            },
-        )],
         files: vec![(
             "db".into(),
             FileChange {
                 size: 9 * PAGE,
-                base: Some(3),
                 pages: vec![(0, Some(Bytes::from(vec![1; 100]))), (8, None)],
             },
         )],

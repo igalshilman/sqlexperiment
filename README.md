@@ -154,7 +154,7 @@ Each part is a directory with its README, a workspace of its own; the
 [`Makefile`](Makefile) builds and tests them all.
 
 - [`core/`](core): the storage every SDK builds on: the
-  [`state`](core/state/README.md) (records, paged files and logs, changed
+  [`state`](core/state/README.md) (records and paged files, changed
   through a mutation and flushed atomically, in one round trip) and
   [`sql`](core/sql/README.md) on it; [the layers](core/README.md#layers), from
   Restate's key/value store up to the SDKs.

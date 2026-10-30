@@ -106,12 +106,12 @@ export const sqlOptions = { enableLazyState: true } satisfies restate.ObjectOpti
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its head, tail, manifests and packs in the object's state, `v21/...`; and
+ * journal view (its head, tail, manifests and packs in the object's state, `v22/...`; and
  * the `sync` runs after its writes).
  */
 export const sqlMetadata = {
   'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v21/',
+  'dev.restate.tooling.journal.hidden.name.prefix': 'v22/',
 };
 
 // Marks the handlers made here.

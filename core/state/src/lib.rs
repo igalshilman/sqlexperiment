@@ -1,15 +1,14 @@
-//! Transactional state over an asynchronous key/value store: paged files,
-//! records and logs, changed through a mutation in memory, which a flush
+//! Transactional state over an asynchronous key/value store: paged files
+//! and records, changed through a mutation in memory, which a flush
 //! makes durable at once.
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction or
 //! compare-and-swap; only collecting garbage lists keys. Its [`File`]s are 4 KiB pages read
-//! and written at random, its [`Record`]s whole values, and its [`Log`]s
-//! entries appended and truncated from the start. The state is
+//! and written at random, its [`Record`]s whole values. The state is
 //! read; it changes only through a [`Mutation`] ([`State::mutation`]): the
-//! records set, pages written and entries appended there become durable
+//! records set and pages written there become durable
 //! together at [`Mutation::flush`], and a mutation dropped discards them.
 //!
 //! The state knows nothing of what writes it: the `sql` crate keeps its
@@ -36,10 +35,10 @@
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | A mutation | Records set, pages written and entries appended in it, in memory | No: dropping it discards them |
-//! | Head | `v21/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
-//! | Tail | `v21/tail/<version>/<part>`: the mutation a flush made: records, log entries, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
-//! | Manifests | `v21/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
+//! | A mutation | Records set and pages written in it, in memory | No: dropping it discards them |
+//! | Head | `v22/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
+//! | Tail | `v22/tail/<version>/<part>`: the mutation a flush made: records, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
+//! | Manifests | `v22/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
 //! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
@@ -81,7 +80,7 @@
 //! # Limits
 //!
 //! A file holds at most [`MAX_FILE_BYTES`], a record's value
-//! [`MAX_RECORD_BYTES`] (a log entry too), a log [`MAX_LOG_ENTRIES`], a name
+//! [`MAX_RECORD_BYTES`], a name
 //! [`MAX_NAME_BYTES`]. The backend is assumed
 //! to return what was stored; decoding checks structure and bounds, and
 //! zstd frames carry a checksum. Use a fresh, dedicated namespace; no
@@ -98,9 +97,7 @@ mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub use format::{
-    HEAD_KEY, MAX_FILE_BYTES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_RECORD_BYTES, TAIL_PREFIX,
-};
+pub use format::{HEAD_KEY, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES, TAIL_PREFIX};
 use store::Is;
 pub use store::{Checkpointed, FlushReport};
 
@@ -130,18 +127,6 @@ pub const PAGE_SIZE: usize = 4096;
 /// A page's 4096 bytes.
 pub type Page = Bytes;
 
-/// What a paged file's absent pages hold: a golden image it diverges from (a
-/// VM's memory, say). An absent page, or a hole, of a file with a base reads
-/// as the base's page (zeros past it), and its pages and frames are
-/// compressed against it.
-pub trait Base: Send + Sync {
-    /// Names the base: a file made with one is opened only with it again.
-    /// Below `u64::MAX`.
-    fn id(&self) -> u64;
-    /// Page `index` (4096 bytes); `None` past the base's end.
-    fn page(&self, index: u64) -> Option<&[u8]>;
-}
-
 /// Default [`StateOptions::frame_pages`].
 pub const FRAME_PAGES: u64 = 4;
 
@@ -154,10 +139,10 @@ pub struct StateOptions {
     /// smaller manifest, smaller ones cost a checkpoint less to rewrite. Set
     /// when the namespace is made; its head keeps it.
     pub frame_pages: u64,
-    /// Bytes of a record or log entry a checkpoint's manifest holds; a
+    /// Bytes of a record a checkpoint's manifest holds; a
     /// larger one is a value of its own in the pack.
     pub inline_record_bytes: usize,
-    /// Every frame and patch of a file without a base, of at most this many
+    /// Every frame and patch of a file of at most this many
     /// pages, is fetched at open, alongside the manifest's values.
     pub prefetch_pages: u64,
     /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
@@ -409,15 +394,6 @@ impl State {
         }
     }
 
-    /// The log named `name`: entries appended in a mutation and truncated
-    /// from its start (see [`Log`]).
-    pub fn log(&self, name: &str) -> Log {
-        Log {
-            name: format!("{}{name}", self.prefix).into(),
-            shared: self.shared.clone(),
-        }
-    }
-
     /// The paged file named `name`: 4 KiB pages, read here and written in a
     /// mutation (see [`File`]).
     pub fn file(&self, name: &str) -> Result<File> {
@@ -427,21 +403,8 @@ impl State {
         })
     }
 
-    /// The paged file named `name`, over `base` (see [`Base`]): an absent
-    /// page, or a hole, reads as the base's page, and pages are compressed
-    /// against it. A file made with a base opens only with that one again
-    /// (by [`Base::id`]). [`Self::file`] opens it without its base: it then
-    /// reads nothing, and a flush may only empty it (cut its length to 0).
-    pub fn file_with_base(&self, name: &str, base: Arc<dyn Base>) -> Result<File> {
-        let file = self.file(name)?;
-        let mut snapshot = self.shared.snapshot.lock().unwrap();
-        *snapshot = Arc::new(snapshot.with_base(file.name(), base)?);
-        Ok(file)
-    }
-
     /// The part of the state whose names start with `prefix`, named without
-    /// it: an extension's, say (`scoped("fs/")` makes `manifest` the record
-    /// `fs/manifest`).
+    /// it (`scoped("fs/")` makes `manifest` the record `fs/manifest`).
     pub fn scoped(&self, prefix: &str) -> State {
         State {
             prefix: format!("{}{prefix}", self.prefix).into(),
@@ -508,7 +471,6 @@ impl State {
             shared: self.shared.clone(),
             records: Default::default(),
             files: Default::default(),
-            logs: Default::default(),
             receipts: Vec::new(),
             checkpoint: false,
             taken: false,
@@ -633,8 +595,8 @@ impl IntoFuture for Open {
     }
 }
 
-/// A change to a [`State`]: the records set, pages written and log entries
-/// appended and truncated since [`State::mutation`] made it, in memory, which
+/// A change to a [`State`]: the records set and pages written since
+/// [`State::mutation`] made it, in memory, which
 /// [`Self::flush`] makes durable together, atomically. There is no other way to change the state. A mutation
 /// dropped discards its writes; whoever moved changes into it learns which
 /// happened from its [`Receipt`].
@@ -642,7 +604,6 @@ pub struct Mutation {
     shared: Arc<Shared>,
     records: store::Records,
     files: store::Writes,
-    logs: store::Appends,
     receipts: Vec<Receipt>,
     /// [`Self::checkpoint`]: checkpoint first, however short the tail.
     checkpoint: bool,
@@ -653,7 +614,7 @@ pub struct Mutation {
 impl Mutation {
     /// Whether nothing was set or written.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.files.is_empty() && self.logs.is_empty()
+        self.records.is_empty() && self.files.is_empty()
     }
 
     /// Have [`Self::flush`] checkpoint first, however short the tail, if it
@@ -705,7 +666,7 @@ impl Mutation {
 
     /// Make `file` `len` bytes, a multiple of 512, with this mutation's flush,
     /// whatever its length is then: pages wholly past it become holes, so
-    /// regrowing it reads zeros (or its base's pages). Bytes of a last,
+    /// regrowing it reads zeros. Bytes of a last,
     /// partial page past `len` stay as written.
     pub fn set_len(&mut self, file: &File, len: u64) -> Result<()> {
         if !len.is_multiple_of(512) || len > MAX_FILE_BYTES {
@@ -741,71 +702,19 @@ impl Mutation {
         Ok(())
     }
 
-    /// Append `entry` to `log` with this mutation's flush: its index, one
-    /// past the last entry the log holds or this mutation appended. Refused,
-    /// before the mutation changes, is what no flush could store: an entry
-    /// past [`MAX_RECORD_BYTES`], a log past [`MAX_LOG_ENTRIES`], a name
-    /// past [`MAX_NAME_BYTES`], or the name of a record or a paged file. The
-    /// flush is refused if another appended to the log since: the index
-    /// would no longer hold.
-    pub fn append(&mut self, log: &Log, entry: Bytes) -> Result<u64> {
-        self.of(&log.shared)?;
-        if entry.len() > MAX_RECORD_BYTES {
-            let (len, max) = (entry.len(), MAX_RECORD_BYTES);
-            return Err(format!("{:?}: an entry of {len} bytes exceeds {max}", log.name).into());
-        }
-        self.claim(&log.name, Is::Log)?;
-        let (first, held_next) = log.bounds();
-        let mine = self.logs.get(&*log.name);
-        let next = held_next + mine.map_or(0, |mine| mine.values.len() as u64);
-        let start = mine.map_or(0, |mine| mine.before).max(first);
-        if next + 1 - start > MAX_LOG_ENTRIES {
-            let max = MAX_LOG_ENTRIES;
-            return Err(format!("{:?} would hold more than {max} entries", log.name).into());
-        }
-        let appended = self.logs.entry(log.name.to_string()).or_default();
-        if appended.values.is_empty() {
-            appended.from = held_next;
-        }
-        appended.values.push(entry);
-        Ok(next)
-    }
-
-    /// Drop `log`'s entries before index `before` with this mutation's
-    /// flush, those it appends included: after it, the log starts at
-    /// `before`, or where it started if that is later. Refused is an
-    /// index past the log's end, this mutation's appends included. One that
-    /// drops nothing changes nothing.
-    pub fn truncate(&mut self, log: &Log, before: u64) -> Result<()> {
-        self.of(&log.shared)?;
-        self.claim(&log.name, Is::Log)?;
-        let (first, next) = log.bounds();
-        let mine = self.logs.get(&*log.name);
-        let appended = mine.map_or(0, |mine| mine.values.len() as u64);
-        if before > next + appended {
-            return Err(format!("{:?}: truncating past its end", log.name).into());
-        }
-        if before <= mine.map_or(0, |mine| mine.before).max(first) {
-            return Ok(());
-        }
-        self.logs.entry(log.name.to_string()).or_default().before = before;
-        Ok(())
-    }
-
     /// Refuse `name` as `wanted` if it is another kind, in the state or in
     /// this mutation, or a name no flush could store.
     fn claim(&self, name: &str, wanted: Is) -> Result<()> {
         check_name(name)?;
         let mine = (self.records.contains_key(name).then_some(Is::Record))
-            .or(self.files.contains_key(name).then_some(Is::Paged))
-            .or(self.logs.contains_key(name).then_some(Is::Log));
+            .or(self.files.contains_key(name).then_some(Is::Paged));
         match mine.or(self.shared.snapshot().is(name)) {
             Some(held) if held != wanted => Err(held.refuse(name, wanted).into()),
             _ => Ok(()),
         }
     }
 
-    /// Make every record set, page written and entry appended durable: as
+    /// Make every record set and page written durable: as
     /// a tail entry, then the head, then one sync, in one round trip. Nothing changed: nothing is written. It is refused while another flush of the state
     /// runs, and for writes the state cannot store; a refused flush writes
     /// nothing, and the state goes on. `Ok`
@@ -841,15 +750,11 @@ impl Mutation {
         let snapshot = shared.snapshot();
         // What the writes checked as they were made still holds, unless
         // another mutation flushed since: refused before anything is written.
-        if let Err(error) = (snapshot)
-            .check(&self.files, &self.records, &self.logs)
-            .await
-        {
+        if let Err(error) = (snapshot).check(&self.files, &self.records).await {
             return running.refuse(error.into());
         }
         let mut files = std::mem::take(&mut self.files);
         let mut records = std::mem::take(&mut self.records);
-        let mut logs = std::mem::take(&mut self.logs);
         self.taken = true;
         // Only a flush that writes a head adopts a checkpoint. A failed
         // checkpoint fails nothing: the report says why, and a later flush
@@ -858,7 +763,7 @@ impl Mutation {
         let version = snapshot.version();
         let allowed = shared.backoff.lock().unwrap().allows(version);
         let due = self.checkpoint || (snapshot.due() && allowed);
-        let (staged, failed) = match snapshot.changes(&mut files, &mut records, &mut logs) && due {
+        let (staged, failed) = match snapshot.changes(&mut files, &mut records) && due {
             true => match snapshot.checkpoint().await {
                 Ok(staged) => (Some(staged), None),
                 Err(error) => {
@@ -868,17 +773,14 @@ impl Mutation {
             },
             false => (None, None),
         };
-        let result = snapshot.commit(files, records, logs, staged).await;
+        let result = snapshot.commit(files, records, staged).await;
         running.returned = true;
         let (mut report, after) = result?;
         if report.checkpoint.is_some() {
             shared.backoff(Backoff::succeeded);
         }
         report.checkpoint_failed = failed;
-        {
-            let mut current = shared.snapshot.lock().unwrap();
-            *current = Arc::new(after.keeping_bases(&current));
-        }
+        *shared.snapshot.lock().unwrap() = Arc::new(after);
         running.done = true;
         for receipt in &self.receipts {
             receipt.0.store(FLUSHED, Ordering::SeqCst);
@@ -960,46 +862,6 @@ impl Record {
     }
 }
 
-/// A named log: entries appended in a mutation ([`Mutation::append`]), each
-/// at the next index, and dropped from its start ([`Mutation::truncate`]),
-/// read from the state ([`Self::entries`]). A cheap handle.
-///
-/// A flush puts the entries it appends in its tail entry, and a checkpoint
-/// each once; opening the state reads every entry. A flush costs about what
-/// it appends: what a log is for is changes too small to rewrite their
-/// whole, folded into a record or a file now and then, and truncated.
-#[derive(Clone)]
-pub struct Log {
-    name: Arc<str>,
-    shared: Arc<Shared>,
-}
-
-impl Log {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The index of the first entry the log holds, as last flushed: of the
-    /// next entry if it holds none.
-    pub fn first(&self) -> u64 {
-        self.bounds().0
-    }
-
-    /// The index the next entry appended takes, as last flushed.
-    pub fn next(&self) -> u64 {
-        self.bounds().1
-    }
-
-    /// The entries the log holds, as last flushed, from [`Self::first`].
-    pub fn entries(&self) -> Vec<Bytes> {
-        self.shared.snapshot().log(&self.name).values
-    }
-
-    fn bounds(&self) -> (u64, u64) {
-        self.shared.snapshot().log_bounds(&self.name)
-    }
-}
-
 /// A paged file: 4 KiB pages, read at random from the state and written at
 /// random in a mutation, made durable by its flush with its other files and its
 /// records. An absent page, never written or past the end, reads as `None`
@@ -1047,8 +909,8 @@ impl File {
         self.len() == 0
     }
 
-    /// Page `page` as the state holds it; `None` for zeros (a hole of a file
-    /// without a base, or past its end).
+    /// Page `page` as the state holds it; `None` for zeros (a hole, or past
+    /// its end).
     pub async fn read(&self, page: u64) -> Result<Option<Page>> {
         let snapshot = self.shared.snapshot();
         if page.saturating_mul(PAGE) >= snapshot.file_size(&self.name) {

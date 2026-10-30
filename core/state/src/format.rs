@@ -3,17 +3,16 @@
 //!
 //! | Store   | Key                                            | Holds                                                                               |
 //! | ------- | ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-//! | Restate | `v21/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
-//! | Restate | `v21/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
-//! | Restate | `v21/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
-//! | Restate | `v21/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
+//! | Restate | `v22/head`                                     | The commit point: the version, the checkpoint and the one before, the tail's extent |
+//! | Restate | `v22/tail/<version>/<part>`                    | The mutation the flush of `version` made ([`Entry`]), in parts of up to 1 MiB       |
+//! | Restate | `v22/manifest/<version>-<nonce>/<part>`        | A checkpoint's [`Manifest`], in parts of 64 KiB                                     |
+//! | Restate | `v22/pack/l0/<version>-<nonce>/<part>`         | A pack in L0: a checkpoint's frames and values, in parts of 64 KiB                  |
 //! | S3      | `l1/<version>-<nonce>`                         | A pack in L1: what a checkpoint moved out of L0, with its own frames and values     |
 //!
 //! A file is a row of *frames* of [`crate::StateOptions::frame_pages`]
-//! pages, each a zstd frame of its own (against its file's [`crate::Base`]
-//! pages, if it has one), so that a page is read with one ranged get of its
-//! frame. A checkpoint's manifest says where each frame, large record and
-//! log entry is: in its own pack, or in an older one. It is in Restate
+//! pages, each a zstd frame of its own, so that a page is read with one
+//! ranged get of its frame. A checkpoint's manifest says where each frame
+//! and large record is: in its own pack, or in an older one. It is in Restate
 //! wherever the packs are, so that an open reads it with the tail.
 use crate::{PAGE, zstd};
 use bytes::Bytes;
@@ -26,30 +25,27 @@ use std::{
 /// The head's key: the commit point. An open reads it first, so a host whose
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
-pub const HEAD_KEY: &str = "v21/head";
-pub const TAIL_PREFIX: &str = "v21/tail/";
+pub const HEAD_KEY: &str = "v22/head";
+pub const TAIL_PREFIX: &str = "v22/tail/";
 /// Where L1's packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "l1/";
 /// Where L0's packs are, in Restate ([`crate::blobs::KvBlobs`]).
 pub(crate) const L0_PREFIX: &str = "l0/";
-const HEAD_MAGIC: &[u8; 4] = b"SH21";
-const ENTRY_MAGIC: &[u8; 4] = b"SE21";
-const MANIFEST_MAGIC: &[u8; 4] = b"SM21";
+const HEAD_MAGIC: &[u8; 4] = b"SH22";
+const ENTRY_MAGIC: &[u8; 4] = b"SE22";
+const MANIFEST_MAGIC: &[u8; 4] = b"SM22";
 /// Bytes of a tail entry's part.
 pub(crate) const PART_BYTES: usize = 1 << 20;
 
-/// Bytes of a record's value, or of a log entry.
+/// Bytes of a record's value.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
-/// Entries a log holds: appending past it is refused, until a truncation
-/// makes room.
-pub const MAX_LOG_ENTRIES: u64 = 4096;
 /// Bytes of a record's or file's name.
 pub const MAX_NAME_BYTES: usize = 255;
 /// Bytes of a paged file: 10 GiB.
 pub const MAX_FILE_BYTES: u64 = 10 << 30;
 /// Most pages a frame holds: 1 MiB.
 pub(crate) const MAX_FRAME_PAGES: u64 = 256;
-/// Files, records and logs a state may name.
+/// Files and records a state may name.
 pub(crate) const MAX_NAMES: usize = 1 << 16;
 /// Largest version, far from overflow.
 const MAX_VERSION: u64 = 1 << 62;
@@ -389,22 +385,12 @@ impl Head {
     }
 }
 
-/// What a flush changed in a log: entries appended from index `from`, and
-/// the index below which entries are dropped (those appended included).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct LogChange {
-    pub from: u64,
-    pub values: Vec<Bytes>,
-    pub before: u64,
-}
-
-/// What a flush changed in a paged file: its size after, its base's id (as
-/// it was made), and the pages it wrote, each a zstd frame against the page
+/// What a flush changed in a paged file: its size after, and the pages it
+/// wrote, each a zstd frame against the page
 /// before it (see FORMAT.md), or `None` for a hole.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FileChange {
     pub size: u64,
-    pub base: Option<u64>,
     pub pages: Vec<(u64, Option<Bytes>)>,
 }
 
@@ -412,7 +398,6 @@ pub(crate) struct FileChange {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Entry {
     pub records: Vec<(String, Bytes)>,
-    pub logs: Vec<(String, LogChange)>,
     pub files: Vec<(String, FileChange)>,
 }
 
@@ -426,21 +411,10 @@ impl Entry {
             put_bytes(&mut out, name.as_bytes());
             put_bytes(&mut out, value);
         }
-        put_varint(&mut out, self.logs.len() as u64);
-        for (name, log) in &self.logs {
-            put_bytes(&mut out, name.as_bytes());
-            put_varint(&mut out, log.from);
-            put_varint(&mut out, log.before);
-            put_varint(&mut out, log.values.len() as u64);
-            for value in &log.values {
-                put_bytes(&mut out, value);
-            }
-        }
         put_varint(&mut out, self.files.len() as u64);
         for (name, file) in &self.files {
             put_bytes(&mut out, name.as_bytes());
             put_varint(&mut out, file.size / 512);
-            put_varint(&mut out, file.base.map_or(0, |id| id + 1));
             put_varint(&mut out, file.pages.len() as u64);
             let mut next = 0;
             for (page, frame) in &file.pages {
@@ -489,21 +463,7 @@ impl Entry {
         }
         for _ in 0..r.count()? {
             let name = r.name()?;
-            let (from, before) = (r.bounded(MAX_VERSION)?, r.bounded(MAX_VERSION)?);
-            let values = (0..r.count()?)
-                .map(|_| value(&mut r))
-                .collect::<io::Result<_>>()?;
-            let log = LogChange {
-                from,
-                values,
-                before,
-            };
-            entry.logs.push((name, log));
-        }
-        for _ in 0..r.count()? {
-            let name = r.name()?;
             let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
-            let base = r.varint()?.checked_sub(1);
             let mut pages = Vec::new();
             let mut next = 0u64;
             for _ in 0..r.count()? {
@@ -516,7 +476,7 @@ impl Entry {
                 let frame = (!frame.is_empty()).then(|| bytes.slice_ref(frame));
                 pages.push((page, frame));
             }
-            entry.files.push((name, FileChange { size, base, pages }));
+            entry.files.push((name, FileChange { size, pages }));
         }
         r.end()?;
         Ok(entry)
@@ -537,7 +497,7 @@ impl Location {
     }
 }
 
-/// A record's value, or a log entry, as a manifest keeps it: in the manifest,
+/// A record's value as a manifest keeps it: in the manifest,
 /// or a zstd frame of its own in a pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Value {
@@ -545,32 +505,23 @@ pub(crate) enum Value {
     Stored(Location),
 }
 
-/// A paged file in a checkpoint: its size, its base's id, where each of its
-/// frames is (`None`: its base's pages, or zeros), and its patches: pages
+/// A paged file in a checkpoint: its size, where each of its frames is
+/// (`None`: zeros), and its patches: pages
 /// changed since their frame was written, each a zstd frame against the
 /// page as its frame holds it, by page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileIndex {
     pub size: u64,
-    pub base: Option<u64>,
     pub frames: Vec<Option<Location>>,
     pub patches: BTreeMap<u64, Location>,
 }
 
-/// A log in a checkpoint: the index of its first entry, and its entries.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LogIndex {
-    pub first: u64,
-    pub values: Vec<Value>,
-}
-
-/// A checkpoint's state: every file, record and log, and where what it
+/// A checkpoint's state: every file and record, and where what it
 /// stored is; and the bytes each pack it names stored, for compaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Manifest {
     pub files: BTreeMap<String, FileIndex>,
     pub records: BTreeMap<String, Value>,
-    pub logs: BTreeMap<String, LogIndex>,
     pub sizes: BTreeMap<PackId, u64>,
 }
 
@@ -579,12 +530,10 @@ impl Manifest {
     pub fn locations(&self) -> impl Iterator<Item = &Location> {
         let frames = (self.files.values())
             .flat_map(|file| file.frames.iter().flatten().chain(file.patches.values()));
-        let values = (self.records.values())
-            .chain(self.logs.values().flat_map(|log| &log.values))
-            .filter_map(|value| match value {
-                Value::Stored(at) => Some(at),
-                Value::Inline(_) => None,
-            });
+        let values = (self.records.values()).filter_map(|value| match value {
+            Value::Stored(at) => Some(at),
+            Value::Inline(_) => None,
+        });
         frames.chain(values)
     }
 
@@ -597,12 +546,10 @@ impl Manifest {
                 .flatten()
                 .chain(file.patches.values_mut())
         });
-        let values = (self.records.values_mut())
-            .chain(self.logs.values_mut().flat_map(|log| &mut log.values))
-            .filter_map(|value| match value {
-                Value::Stored(at) => Some(at),
-                Value::Inline(_) => None,
-            });
+        let values = (self.records.values_mut()).filter_map(|value| match value {
+            Value::Stored(at) => Some(at),
+            Value::Inline(_) => None,
+        });
         frames.chain(values)
     }
 
@@ -617,9 +564,7 @@ impl Manifest {
             file.frames.iter_mut().flatten().for_each(&mut relocate);
             file.patches.values_mut().for_each(&mut relocate);
         }
-        let values = (self.records.values_mut())
-            .chain(self.logs.values_mut().flat_map(|log| &mut log.values));
-        for value in values {
+        for value in self.records.values_mut() {
             if let Value::Stored(at) = value {
                 relocate(at);
             }
@@ -673,20 +618,10 @@ impl Manifest {
             put_bytes(&mut body, name.as_bytes());
             value(&mut body, record);
         }
-        put_varint(&mut body, self.logs.len() as u64);
-        for (name, log) in &self.logs {
-            put_bytes(&mut body, name.as_bytes());
-            put_varint(&mut body, log.first);
-            put_varint(&mut body, log.values.len() as u64);
-            for entry in &log.values {
-                value(&mut body, entry);
-            }
-        }
         put_varint(&mut body, self.files.len() as u64);
         for (name, file) in &self.files {
             put_bytes(&mut body, name.as_bytes());
             put_varint(&mut body, file.size / 512);
-            put_varint(&mut body, file.base.map_or(0, |id| id + 1));
             put_varint(&mut body, file.frames.len() as u64);
             for frame in &file.frames {
                 location(&mut body, frame.as_ref());
@@ -754,16 +689,7 @@ impl Manifest {
         }
         for _ in 0..r.count()? {
             let name = r.name()?;
-            let first = r.bounded(MAX_VERSION)?;
-            let values = (0..r.bounded(MAX_LOG_ENTRIES)?)
-                .map(|_| value(&mut r))
-                .collect::<io::Result<_>>()?;
-            manifest.logs.insert(name, LogIndex { first, values });
-        }
-        for _ in 0..r.count()? {
-            let name = r.name()?;
             let size = r.bounded(MAX_FILE_BYTES / 512)? * 512;
-            let base = r.varint()?.checked_sub(1);
             let frames = (0..r.count()?)
                 .map(|_| location(&mut r))
                 .collect::<io::Result<_>>()?;
@@ -779,14 +705,13 @@ impl Manifest {
             }
             let file = FileIndex {
                 size,
-                base,
                 frames,
                 patches,
             };
             manifest.files.insert(name, file);
         }
         r.end()?;
-        let names = manifest.files.len() + manifest.records.len() + manifest.logs.len();
+        let names = manifest.files.len() + manifest.records.len();
         if names > MAX_NAMES {
             return Err(invalid("manifest"));
         }

@@ -8,15 +8,15 @@
 //!
 //! **Checkpoint.** Now and then, a flush first writes the durable state as a
 //! checkpoint: each frame the overlay changed, rebuilt from its frame in the
-//! last checkpoint and the overlay's pages, the records set and the log
-//! entries appended since, into one new pack, and a manifest, in Restate,
+//! last checkpoint and the overlay's pages, and the records set since, into
+//! one new pack, and a manifest, in Restate,
 //! that names those, and every other frame and value where the checkpoints
 //! before put them. The live frames and values of packs mostly dead move into it too
 //! (compaction). The flush's head then names it, and the overlay empties.
 //!
 //! **Open.** Get the head; then, together, the checkpoint's manifest and the
 //! tail entries since it, which the open applies; then, together, the large
-//! records and log entries the manifest stores, and small files' frames. An
+//! records the manifest stores, and small files' frames. An
 //! owner whose cache holds the state of the head it read reads nothing more.
 //!
 //! **Read.** A page in the overlay is decoded from its frame; any other is
@@ -24,12 +24,12 @@
 //! cache keeps under its location: a pack never changes, and its name is
 //! unique.
 use crate::{
-    Base, PAGE, Page, StateOptions,
+    PAGE, Page, StateOptions,
     cache::{self, NamespaceCache},
     format::{
-        Checkpoint, Entry, FileChange, FileIndex, Head, Location, LogChange, LogIndex, MAX_DECODED,
-        MAX_FILE_BYTES, MAX_FRAME_PAGES, MAX_LOG_ENTRIES, MAX_NAME_BYTES, MAX_NAMES,
-        MAX_RECORD_BYTES, Manifest, PackId, Tier, Value, invalid,
+        Checkpoint, Entry, FileChange, FileIndex, Head, Location, MAX_DECODED, MAX_FILE_BYTES,
+        MAX_FRAME_PAGES, MAX_NAME_BYTES, MAX_NAMES, MAX_RECORD_BYTES, Manifest, PackId, Tier,
+        Value, invalid,
     },
     tail::Tiered,
     zstd,
@@ -108,42 +108,11 @@ impl Written {
 /// What a flush writes to paged files, by name.
 pub(crate) type Writes = BTreeMap<String, Written>;
 
-/// A log's entries: the index of the first, and each from there, in order.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Entries {
-    pub first: u64,
-    pub values: Vec<Bytes>,
-}
-
-impl Entries {
-    /// The index the next entry appended gets.
-    pub fn next(&self) -> u64 {
-        self.first + self.values.len() as u64
-    }
-}
-
-/// The logs' entries, by name.
-pub(crate) type Logs = BTreeMap<String, Entries>;
-
-/// What a mutation does to one log: entries appended after its last, and
-/// the index below which entries are dropped (those appended included).
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Appended {
-    pub values: Vec<Bytes>,
-    /// The index the first of `values` took, as the state held the log.
-    pub from: u64,
-    pub before: u64,
-}
-
-/// What a flush does to logs, by name.
-pub(crate) type Appends = BTreeMap<String, Appended>;
-
 /// What a name is: one kind, for good.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Is {
     Record,
     Paged,
-    Log,
 }
 
 impl Is {
@@ -156,7 +125,6 @@ impl Is {
         match self {
             Is::Record => "a record",
             Is::Paged => "a paged file",
-            Is::Log => "a log",
         }
     }
 }
@@ -164,7 +132,7 @@ impl Is {
 /// What a flush wrote.
 #[derive(Clone, Debug, Default)]
 pub struct FlushReport {
-    /// Bytes of its tail entry: the records, log entries and pages it wrote.
+    /// Bytes of its tail entry: the records and pages it wrote.
     pub entry_bytes: usize,
     /// Bytes of the head it put; 0 when nothing changed.
     pub head_bytes: usize,
@@ -187,7 +155,7 @@ pub struct Checkpointed {
     /// Frames it patched instead: each of their pages that differs from
     /// their frame's, written alone.
     pub patched: usize,
-    /// Large records and log entries it wrote.
+    /// Large records it wrote.
     pub values: usize,
     /// Bytes of its pack: none if it stored nothing outside its manifest.
     pub pack_bytes: usize,
@@ -208,12 +176,11 @@ pub(crate) struct Staged {
     pub report: Checkpointed,
 }
 
-/// A paged file as of a head: its size, its base's id, and the pages written
+/// A paged file as of a head: its size, and the pages written
 /// since the checkpoint (its overlay), each the chain of its changes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FileState {
     pub size: u64,
-    pub base: Option<u64>,
     pub pages: BTreeMap<u64, Chain>,
     /// The fewest pages the file had since the checkpoint, if it shrank:
     /// the checkpoint's pages from there on are cut, holes.
@@ -306,7 +273,6 @@ pub(crate) struct Durable {
     pub manifest: Arc<Manifest>,
     pub files: BTreeMap<String, FileState>,
     pub records: Records,
-    pub logs: Logs,
     /// Records set since the checkpoint.
     pub dirty: BTreeSet<String>,
 }
@@ -326,11 +292,7 @@ impl Durable {
         let records = (self.records.iter())
             .map(|(name, value)| name.len() + value.len() + LOCATION)
             .sum::<usize>();
-        let logs = (self.logs.values())
-            .flat_map(|log| &log.values)
-            .map(|value| value.len() + LOCATION)
-            .sum::<usize>();
-        files + pages + records + logs
+        files + pages + records
     }
 
     /// The state of `head` with nothing in it.
@@ -340,7 +302,6 @@ impl Durable {
             manifest: Arc::default(),
             files: BTreeMap::new(),
             records: Records::new(),
-            logs: Logs::new(),
             dirty: BTreeSet::new(),
         }
     }
@@ -359,13 +320,6 @@ impl Durable {
         let records = (manifest.records.iter())
             .map(|(name, record)| Ok((name.clone(), value(record)?)))
             .collect::<io::Result<_>>()?;
-        let logs = (manifest.logs.iter())
-            .map(|(name, log)| {
-                let values = log.values.iter().map(value).collect::<io::Result<_>>()?;
-                let first = log.first;
-                Ok((name.clone(), Entries { first, values }))
-            })
-            .collect::<io::Result<_>>()?;
         let frame_bytes = head.frame_bytes();
         let mut files = BTreeMap::new();
         for (name, file) in &manifest.files {
@@ -374,7 +328,6 @@ impl Durable {
             }
             let state = FileState {
                 size: file.size,
-                base: file.base,
                 ..FileState::default()
             };
             files.insert(name.clone(), state);
@@ -384,10 +337,9 @@ impl Durable {
             manifest,
             files,
             records,
-            logs,
             dirty: BTreeSet::new(),
         };
-        let names = durable.files.len() + durable.records.len() + durable.logs.len();
+        let names = durable.files.len() + durable.records.len();
         match names == durable.names().len() {
             true => Ok(durable),
             false => Err(invalid("manifest: a name of two kinds")),
@@ -398,17 +350,14 @@ impl Durable {
     fn names(&self) -> HashMap<&str, Is> {
         (self.records.keys().map(|name| (name.as_str(), Is::Record)))
             .chain(self.files.keys().map(|name| (name.as_str(), Is::Paged)))
-            .chain(self.logs.keys().map(|name| (name.as_str(), Is::Log)))
             .collect()
     }
 
     pub fn is(&self, name: &str) -> Option<Is> {
         if self.records.contains_key(name) {
             Some(Is::Record)
-        } else if self.files.contains_key(name) {
-            Some(Is::Paged)
         } else {
-            self.logs.contains_key(name).then_some(Is::Log)
+            self.files.contains_key(name).then_some(Is::Paged)
         }
     }
 
@@ -423,39 +372,18 @@ impl Durable {
             self.records.insert(name.clone(), value.clone());
             self.dirty.insert(name.clone());
         }
-        for (name, change) in &entry.logs {
-            kind(self, name, Is::Log)?;
-            let held = self.logs.entry(name.clone()).or_default();
-            let dropped = (change.before.saturating_sub(held.first)).min(held.values.len() as u64);
-            held.values.drain(..dropped as usize);
-            held.first = held.first.max(change.before);
-            if !change.values.is_empty() && change.from != held.next() {
-                return Err(invalid("tail entry: an append out of order"));
-            }
-            held.values.extend(change.values.iter().cloned());
-            if held.values.len() as u64 > MAX_LOG_ENTRIES {
-                return Err(invalid("tail entry: a log too long"));
-            }
-        }
         for (name, change) in &entry.files {
             kind(self, name, Is::Paged)?;
-            let file = self.files.entry(name.clone()).or_insert_with(|| FileState {
-                base: change.base,
-                ..FileState::default()
-            });
-            if file.base != change.base {
-                return Err(invalid("tail entry: a file's base changed"));
-            }
-            file.apply(change);
+            self.files.entry(name.clone()).or_default().apply(change);
         }
-        match self.files.len() + self.records.len() + self.logs.len() <= MAX_NAMES {
+        match self.files.len() + self.records.len() <= MAX_NAMES {
             true => Ok(()),
             false => Err(invalid("tail entry: too many names")),
         }
     }
 
     /// This state, once the checkpoint `staged` of it is named: the same
-    /// files, records and logs, and an empty overlay.
+    /// files and records, and an empty overlay.
     fn rebased(&self, staged: &Staged) -> Self {
         let mut files = self.files.clone();
         for file in files.values_mut() {
@@ -467,44 +395,20 @@ impl Durable {
             manifest: staged.manifest.clone(),
             files,
             records: self.records.clone(),
-            logs: self.logs.clone(),
             dirty: BTreeSet::new(),
         }
     }
 }
 
-/// A record's value, or a log entry, as a pack stores it: a zstd frame.
+/// A record's value as a pack stores it: a zstd frame.
 pub(crate) fn decode_value(frame: &[u8]) -> io::Result<Bytes> {
     zstd::decompress_sized(frame, &[], MAX_RECORD_BYTES).map(Bytes::from)
 }
 
-/// What frame `index` of a file holds where nothing is stored: its `base`'s
-/// pages, or zeros.
-pub(crate) fn implicit(base: Option<&Arc<dyn Base>>, frame_pages: u64, index: u64) -> Vec<u8> {
-    let mut pages = vec![0; (frame_pages * PAGE) as usize];
-    if let Some(base) = base {
-        for (i, page) in pages.chunks_mut(PAGE as usize).enumerate() {
-            if let Some(image) = base.page(index * frame_pages + i as u64) {
-                page.copy_from_slice(image);
-            }
-        }
-    }
-    pages
-}
-
-/// The base's page `page`; nothing without a base.
-pub(crate) fn base_page(base: Option<&Arc<dyn Base>>, page: u64) -> &[u8] {
-    base.and_then(|base| base.page(page)).unwrap_or_default()
-}
-
-/// What page `page` of a file with `base` reads where it is a hole: its
-/// base's page, else zeros.
-pub(crate) fn hole_page(base: Option<&Arc<dyn Base>>, page: u64) -> Page {
+/// What a hole reads as: zeros.
+pub(crate) fn hole_page() -> Page {
     static ZEROS: [u8; PAGE as usize] = [0; PAGE as usize];
-    match base.and_then(|base| base.page(page)) {
-        Some(image) => Page::copy_from_slice(image),
-        None => Page::from_static(&ZEROS),
-    }
+    Page::from_static(&ZEROS)
 }
 
 /// A page, as a tail entry or a patch keeps it: a zstd frame, against
@@ -536,8 +440,6 @@ pub(crate) struct Snapshot {
     /// A reader's: it changes nothing in the cache.
     reader: bool,
     pub(crate) durable: Arc<Durable>,
-    /// The bases files were opened with, by name.
-    bases: BTreeMap<String, Arc<dyn Base>>,
     /// Nothing changed since this owner last saw the namespace.
     pub(crate) unchanged: bool,
     /// Frames decoded, by location: packs never change, so every view of
@@ -585,7 +487,6 @@ impl Snapshot {
             cache: cache.clone(),
             reader,
             durable: Arc::new(Durable::empty(head.clone())),
-            bases: BTreeMap::new(),
             unchanged: false,
             frames: Arc::default(),
             fetching: Arc::default(),
@@ -615,14 +516,12 @@ impl Snapshot {
         let tail = self.tiered.tail(&head, head.checkpointed() + 1);
         let (manifest, entries) = futures::try_join!(manifest, tail)?;
         let values: Vec<Location> = (manifest.records.values())
-            .chain(manifest.logs.values().flat_map(|log| &log.values))
             .filter_map(|value| match value {
                 Value::Stored(at) => Some(*at),
                 Value::Inline(_) => None,
             })
             .collect();
         let small: Vec<&FileIndex> = (manifest.files.values())
-            .filter(|file| file.base.is_none())
             .filter(|file| file.size.div_ceil(PAGE) <= self.options.prefetch_pages)
             .collect();
         let wanted: Vec<Location> = (values.iter().copied())
@@ -637,9 +536,7 @@ impl Snapshot {
         let fetched: HashMap<Location, Bytes> = wanted.into_iter().zip(fetched).collect();
         for file in &small {
             let frames: Vec<Option<Arc<Bytes>>> = (file.frames.iter())
-                .map(|at| {
-                    at.map(|at| self.decode_frame(&fetched[&at], None, head.frame_pages, 0, at))
-                })
+                .map(|at| at.map(|at| self.decode_frame(&fetched[&at], at)))
                 .map(Option::transpose)
                 .collect::<io::Result<_>>()?;
             for (&page, &at) in &file.patches {
@@ -673,16 +570,6 @@ impl Snapshot {
         &self.durable.records
     }
 
-    /// The log `name`'s entries; none if it was never appended to.
-    pub fn log(&self, name: &str) -> Entries {
-        self.durable.logs.get(name).cloned().unwrap_or_default()
-    }
-
-    /// The log `name`'s first index, and the next.
-    pub fn log_bounds(&self, name: &str) -> (u64, u64) {
-        (self.durable.logs.get(name)).map_or((0, 0), |entries| (entries.first, entries.next()))
-    }
-
     pub fn file_size(&self, name: &str) -> u64 {
         self.durable.files.get(name).map_or(0, |file| file.size)
     }
@@ -692,36 +579,21 @@ impl Snapshot {
         self.durable.is(name)
     }
 
-    /// The base the file `name` was opened with: `Err` for a file made with
-    /// one that it was not opened with.
-    fn base_of(&self, name: &str) -> io::Result<Option<&Arc<dyn Base>>> {
-        let made = self.durable.files.get(name).and_then(|file| file.base);
-        match (made, self.bases.get(name)) {
-            (Some(_), None) => Err(io::Error::other(format!(
-                "{name:?} has a base: open it with it"
-            ))),
-            (_, base) => Ok(base),
-        }
-    }
-
-    /// Page `page` of the file `name`; `None` for zeros (a hole of a file
-    /// without a base, or past its end).
+    /// Page `page` of the file `name`; `None` for zeros (a hole, or past its
+    /// end).
     pub async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
         if !self.durable.files.contains_key(name) {
             return Ok(None);
         }
         let image = self.image(name, page).await?;
-        // Zeros where the base has no page read as a hole.
-        let based = (self.base_of(name)?).is_some_and(|base| base.page(page).is_some());
-        Ok((based || image.iter().any(|&byte| byte != 0)).then_some(image))
+        Ok(image.iter().any(|&byte| byte != 0).then_some(image))
     }
 
     /// Page `page` of the file `name` as the state holds it
     /// ([`FileState::image`]): what a read returns, and what a flush
-    /// compresses the page it writes against. A hole reads as its base's
-    /// page, else zeros.
+    /// compresses the page it writes against. A hole reads as zeros.
     async fn image(&self, name: &str, page: u64) -> io::Result<Page> {
-        let hole = hole_page(self.base_of(name)?, page);
+        let hole = hole_page();
         let Some(file) = self.durable.files.get(name) else {
             return Ok(hole);
         };
@@ -732,15 +604,13 @@ impl Snapshot {
         file.image(page, checkpointed, &hole)
     }
 
-    /// Frame `index` of the file `name`, stored at `at`: decoded, or fetched
-    /// and decoded (and kept).
-    async fn frame(&self, name: &str, index: u64, at: Location) -> io::Result<Arc<Bytes>> {
+    /// The frame stored at `at`: decoded, or fetched and decoded (and kept).
+    async fn frame(&self, at: Location) -> io::Result<Arc<Bytes>> {
         if let Some(frame) = self.frames.lock().unwrap().get(&at) {
             return Ok(frame.clone());
         }
-        let base = self.base_of(name)?;
         let raw = self.raw(at).await?;
-        self.decode_frame(&raw, base, self.durable.head.frame_pages, index, at)
+        self.decode_frame(&raw, at)
     }
 
     /// Page `page` of the file `name`, as its patch at `at` holds it:
@@ -779,28 +649,16 @@ impl Snapshot {
         let Some(at) = stored else {
             return Ok(None);
         };
-        let frame = self.frame(name, index, at).await?;
+        let frame = self.frame(at).await?;
         let at = ((page % frame_pages) * PAGE) as usize;
         Ok(Some(frame.slice(at..at + PAGE as usize)))
     }
 
-    /// Decode frame `index` of a file with `base`, as stored at `at`, and
-    /// keep it.
-    fn decode_frame(
-        &self,
-        raw: &[u8],
-        base: Option<&Arc<dyn Base>>,
-        frame_pages: u64,
-        index: u64,
-        at: Location,
-    ) -> io::Result<Arc<Bytes>> {
-        let prefix = match base {
-            Some(_) => implicit(base, frame_pages, index),
-            None => Vec::new(),
-        };
-        let size = (frame_pages * PAGE) as usize;
+    /// Decode a frame, as stored at `at`, and keep it.
+    fn decode_frame(&self, raw: &[u8], at: Location) -> io::Result<Arc<Bytes>> {
+        let size = (self.durable.head.frame_pages * PAGE) as usize;
         let mut image = Vec::with_capacity(size);
-        zstd::decompress(&mut image, raw, &prefix)?;
+        zstd::decompress(&mut image, raw, &[])?;
         if image.len() != size {
             return Err(invalid("frame"));
         }
@@ -954,16 +812,10 @@ impl Snapshot {
     }
 
     /// Refuse what no flush could store, before anything is written.
-    pub(crate) async fn check(
-        &self,
-        writes: &Writes,
-        records: &Records,
-        logs: &Appends,
-    ) -> io::Result<()> {
+    pub(crate) async fn check(&self, writes: &Writes, records: &Records) -> io::Result<()> {
         // Each name is one kind: as stored, and in the mutation.
         let names = (records.keys().map(|name| (name, Is::Record)))
-            .chain(writes.keys().map(|name| (name, Is::Paged)))
-            .chain(logs.keys().map(|name| (name, Is::Log)));
+            .chain(writes.keys().map(|name| (name, Is::Paged)));
         let mut seen: HashMap<&str, Is> = HashMap::new();
         for (name, wanted) in names {
             if name.len() > MAX_NAME_BYTES {
@@ -974,29 +826,10 @@ impl Snapshot {
                 return refuse(held.refuse(name, wanted));
             }
         }
-        for (name, value) in records.iter().chain(
-            logs.iter()
-                .flat_map(|(name, log)| log.values.iter().map(move |value| (name, value))),
-        ) {
+        for (name, value) in records {
             if value.len() > MAX_RECORD_BYTES {
                 let (len, max) = (value.len(), MAX_RECORD_BYTES);
                 return refuse(format!("{name:?}: a value of {len} bytes exceeds {max}"));
-            }
-        }
-        for (name, appended) in logs {
-            let held = self.log(name);
-            if !appended.values.is_empty() && appended.from != held.next() {
-                // The indexes the appends returned would no longer hold.
-                return refuse(format!("{name:?} was appended to since"));
-            }
-            let next = held.next() + appended.values.len() as u64;
-            if appended.before > next {
-                return refuse(format!("{name:?}: truncating past its end"));
-            }
-            if next - appended.before.max(held.first) > MAX_LOG_ENTRIES {
-                return refuse(format!(
-                    "{name:?} would hold more than {MAX_LOG_ENTRIES} entries"
-                ));
             }
         }
         for (name, written) in writes {
@@ -1007,11 +840,6 @@ impl Snapshot {
             if (written.pages.keys()).any(|&page| page >= MAX_FILE_BYTES / PAGE) {
                 return refuse(format!("{name:?}: a page past the largest file"));
             }
-            // A checkpoint rebuilds its frames against its base; an emptied
-            // file has none left.
-            if size > 0 {
-                self.base_of(name)?;
-            }
         }
         // Its tail entry must decode: refused here, before anything is
         // written, is a mutation whose entry could pass the limit (a page
@@ -1020,14 +848,6 @@ impl Snapshot {
         let bound: usize =
             (records.iter())
                 .map(|(name, value)| named(name) + value.len())
-                .chain(logs.iter().map(|(name, log)| {
-                    named(name)
-                        + log
-                            .values
-                            .iter()
-                            .map(|value| value.len() + 16)
-                            .sum::<usize>()
-                }))
                 .chain((writes.iter()).map(|(name, written)| {
                     named(name) + written.pages.len() * (PAGE as usize + 144)
                 }))
@@ -1037,7 +857,7 @@ impl Snapshot {
                 "a mutation of up to {bound} bytes exceeds the {MAX_DECODED} a flush stores"
             ));
         }
-        let new = (records.keys().chain(writes.keys()).chain(logs.keys()))
+        let new = (records.keys().chain(writes.keys()))
             .filter(|name| self.is(name).is_none())
             .count();
         if self.durable.names().len() + new > MAX_NAMES {
@@ -1047,12 +867,7 @@ impl Snapshot {
     }
 
     /// Drop from a mutation what changes nothing; whether anything is left.
-    pub(crate) fn changes(
-        &self,
-        writes: &mut Writes,
-        records: &mut Records,
-        logs: &mut Appends,
-    ) -> bool {
+    pub(crate) fn changes(&self, writes: &mut Writes, records: &mut Records) -> bool {
         records.retain(|name, value| {
             (self.records().get(name)).map_or(!value.is_empty(), |held| held != value)
         });
@@ -1060,10 +875,7 @@ impl Snapshot {
             let current = self.file_size(name);
             !written.pages.is_empty() || written.size_after(current) != current
         });
-        logs.retain(|name, appended| {
-            !appended.values.is_empty() || appended.before > self.log(name).first
-        });
-        !(writes.is_empty() && records.is_empty() && logs.is_empty())
+        !(writes.is_empty() && records.is_empty())
     }
 
     /// Whether the tail is long enough to checkpoint before the next flush.
@@ -1108,23 +920,21 @@ impl Snapshot {
         self.tiered.has_l1() && l0 >= self.options.l0_bytes
     }
 
-    /// Flush `writes`, `records` and `logs`, which [`Self::check`] passed,
+    /// Flush `writes` and `records`, which [`Self::check`] passed,
     /// with a head that names `staged`, a checkpoint of this state, if
     /// given: see the module documentation.
     pub(crate) async fn commit(
         &self,
         mut writes: Writes,
         mut records: Records,
-        mut logs: Appends,
         staged: Option<Staged>,
     ) -> io::Result<(FlushReport, Self)> {
-        if !self.changes(&mut writes, &mut records, &mut logs) {
+        if !self.changes(&mut writes, &mut records) {
             return Ok((FlushReport::default(), self.continued(self.durable.clone())));
         }
         let mut entry = Entry::default();
         for (name, written) in writes {
             let held = self.durable.files.get(&name);
-            let base = self.bases.get(&name);
             let size = written.size_after(held.map_or(0, |file| file.size));
             // A page past the end is a hole.
             let written: Vec<(u64, Option<Page>)> = (written.pages.into_iter())
@@ -1147,31 +957,9 @@ impl Snapshot {
                 };
                 pages.push((page, frame));
             }
-            let made = held.map_or_else(|| base.map(|base| base.id()), |file| file.base);
-            let change = FileChange {
-                size,
-                base: made,
-                pages,
-            };
-            entry.files.push((name, change));
+            entry.files.push((name, FileChange { size, pages }));
         }
         entry.records = records.into_iter().collect();
-        for (name, appended) in logs {
-            let (mut from, mut values) = (appended.from, appended.values);
-            if values.is_empty() {
-                from = self.log(&name).next();
-            }
-            // Appended and truncated at once: never stored.
-            let dropped = (appended.before.saturating_sub(from)).min(values.len() as u64);
-            values.drain(..dropped as usize);
-            from += dropped;
-            let change = LogChange {
-                from,
-                values,
-                before: appended.before,
-            };
-            entry.logs.push((name, change));
-        }
         let parts = entry.encode()?;
         let entry_bytes: usize = parts.iter().map(Bytes::len).sum();
         let mut next = match &staged {
@@ -1225,8 +1013,7 @@ impl Snapshot {
     }
 
     /// Write this state, the head's, as a checkpoint: each frame the overlay
-    /// changed, the records set since the last one, the log entries appended
-    /// since, and the live frames and values of packs mostly dead, into one
+    /// changed, the records set since the last one, and the live frames and values of packs mostly dead, into one
     /// new pack, put, for the next head to name.
     pub(crate) async fn checkpoint(&self) -> io::Result<Staged> {
         let durable = &self.durable;
@@ -1245,7 +1032,6 @@ impl Snapshot {
         let mut manifest = Manifest {
             files: old.files.clone(),
             records: old.records.clone(),
-            logs: BTreeMap::new(),
             sizes: BTreeMap::new(),
         };
         let mut body = Vec::new();
@@ -1281,10 +1067,7 @@ impl Snapshot {
                     .map(|(index, _)| index as u64);
                 dirty.extend(stored.filter(|&index| index < count));
             }
-            let indexed = (manifest.files.entry(name.clone())).or_insert_with(|| FileIndex {
-                base: file.base,
-                ..FileIndex::default()
-            });
+            let indexed = manifest.files.entry(name.clone()).or_default();
             indexed.size = file.size;
             indexed.frames.resize(count as usize, None);
             indexed
@@ -1301,9 +1084,9 @@ impl Snapshot {
         let helds = bounded(
             changed
                 .iter()
-                .map(|(name, _, index, stored, patches)| async move {
+                .map(|(name, _, _, stored, patches)| async move {
                     let frame = match stored {
-                        Some(at) => Some(self.frame(name, *index, *at).await?),
+                        Some(at) => Some(self.frame(*at).await?),
                         None => None,
                     };
                     let patches = patches.iter().map(|&(page, at)| async move {
@@ -1315,8 +1098,7 @@ impl Snapshot {
         .await?;
         for ((name, file, index, stored, kept), (frame, patches)) in changed.into_iter().zip(helds)
         {
-            let base = self.base_of(name)?;
-            let hole = implicit(base, frame_pages, index);
+            let hole = vec![0; frame_bytes as usize];
             let first = index * frame_pages;
             let at =
                 |page: u64| ((page - first) * PAGE) as usize..((page - first + 1) * PAGE) as usize;
@@ -1385,8 +1167,7 @@ impl Snapshot {
                     continue;
                 }
             }
-            let prefix = if base.is_some() { &hole[..] } else { &[] };
-            let whole = zstd::compress(&image, prefix, Bytes::copy_from_slice)?;
+            let whole = zstd::compress(&image, &[], Bytes::copy_from_slice)?;
             let location = put(&mut body, &whole);
             written.push((location, whole, Some(Arc::new(Bytes::from(image)))));
             indexed.frames[index as usize] = Some(location);
@@ -1409,24 +1190,6 @@ impl Snapshot {
                 let value = store(&mut body, value)?;
                 manifest.records.insert(name.clone(), value);
             }
-        }
-        for (name, log) in &durable.logs {
-            let held = old.logs.get(name);
-            let mut values = Vec::with_capacity(log.values.len());
-            for (index, value) in (log.first..).zip(&log.values) {
-                let kept = held.and_then(|held| {
-                    let at = index.checked_sub(held.first)?;
-                    held.values.get(at as usize).cloned()
-                });
-                values.push(match kept {
-                    Some(kept) => kept,
-                    None => store(&mut body, value)?,
-                });
-            }
-            let first = log.first;
-            manifest
-                .logs
-                .insert(name.clone(), LogIndex { first, values });
         }
         let values = written.len() - before;
         // Compaction: what packs of this tier mostly dead still hold moves
@@ -1534,36 +1297,10 @@ impl Snapshot {
             cache: self.cache.clone(),
             reader: self.reader,
             durable,
-            bases: self.bases.clone(),
             unchanged: false,
             frames: self.frames.clone(),
             fetching: self.fetching.clone(),
         }
-    }
-
-    /// This snapshot, with the bases `of` holds that it lacks: those given
-    /// while a flush ran, which its snapshot replaces.
-    pub(crate) fn keeping_bases(mut self, of: &Self) -> Self {
-        for (name, base) in &of.bases {
-            (self.bases.entry(name.clone())).or_insert_with(|| base.clone());
-        }
-        self
-    }
-
-    pub(crate) fn with_base(&self, name: &str, base: Arc<dyn Base>) -> io::Result<Self> {
-        if base.id() == u64::MAX {
-            return refuse("a base's id must be below u64::MAX".into());
-        }
-        if self.is(name).is_some() {
-            let made = self.durable.files.get(name).and_then(|file| file.base);
-            if made != Some(base.id()) {
-                return refuse(format!("{name:?} was made with another base, or none"));
-            }
-        }
-        let mut with = self.continued(self.durable.clone());
-        with.unchanged = self.unchanged;
-        with.bases.insert(name.to_owned(), base);
-        Ok(with)
     }
 }
 

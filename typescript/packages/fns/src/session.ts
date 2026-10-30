@@ -144,8 +144,8 @@ const refusedWrite = () => {
 
 /**
  * The keys of the database `name`, beside the object's own: each of the
- * format's keys (`v21/head`, `v21/tail/...`, `v21/manifest/...`,
- * `v21/pack/...`) as `v21/<name>/head`, under the format's prefix still,
+ * format's keys (`v22/head`, `v22/tail/...`, `v22/manifest/...`,
+ * `v22/pack/...`) as `v22/<name>/head`, under the format's prefix still,
  * which tooling hides.
  */
 const beside = (name: string) => (key: string) => {

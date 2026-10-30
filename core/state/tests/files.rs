@@ -49,46 +49,6 @@ fn shrinking_twice_in_a_mutation_leaves_no_page_behind() -> Result<()> {
     })
 }
 
-/// The base of the file `vm`: zeros.
-struct Zeros;
-
-impl state::Base for Zeros {
-    fn id(&self) -> u64 {
-        1
-    }
-    fn page(&self, _: u64) -> Option<&[u8]> {
-        Some(&[0; 4096])
-    }
-}
-
-/// A file with a base decodes its pages only once opened with it, and
-/// reads what was flushed through later flushes of other files.
-#[test]
-fn a_based_file_reads_its_pages_once_opened_with_its_base() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        for n in [1, 2] {
-            let state = State::open(store.clone()).await?;
-            let mut mutation = state.mutation();
-            mutation.write(
-                &state.file_with_base("vm", Arc::new(Zeros))?,
-                1,
-                Some(page(n)),
-            )?;
-            mutation.flush().await?;
-        }
-        let state = State::open(store.clone()).await?;
-        assert!(state.file("vm")?.read(1).await.is_err(), "without its base");
-        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
-        assert_eq!(byte(&vm, 1).await?, Some(2));
-        let mut mutation = state.mutation();
-        mutation.write(&state.file("db")?, 0, Some(page(9)))?;
-        mutation.flush().await?;
-        assert_eq!(byte(&vm, 1).await?, Some(2), "after another flush");
-        Ok(())
-    })
-}
-
 /// A cold sequential read of 1500 pages (as many frames), all in the tail:
 /// every page reads as written, decoded from the tail the open fetched,
 /// without a round trip per page.
@@ -128,58 +88,18 @@ fn a_refused_flush_leaves_the_state_usable() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
+        // Written as a file, while another mutation made the name a record.
         let mut mutation = state.mutation();
-        mutation.write(
-            &state.file_with_base("vm", Arc::new(Zeros))?,
-            0,
-            Some(page(1)),
-        )?;
-        mutation.flush().await?;
-        let state = State::open(store).await?;
-        let mut mutation = state.mutation();
-        mutation.write(&state.file("vm")?, 1, None)?;
+        mutation.write(&state.file("x")?, 0, Some(page(1)))?;
+        let mut other = state.mutation();
+        other.set(&state.record("x"), "a record".into())?;
+        other.flush().await?;
         let error = mutation.flush().await.unwrap_err().to_string();
-        assert!(error.contains("open it with it"), "{error}");
+        assert!(error.contains("is a record"), "{error}");
         assert!(state.is_usable());
         let mut mutation = state.mutation();
         mutation.write(&state.file("db")?, 0, Some(page(2)))?;
         mutation.flush().await?;
-        Ok(())
-    })
-}
-
-/// A file with a base, opened without it, can still be emptied (as a new
-/// run of another image empties the last one's memory); the checkpoints
-/// after need no base.
-#[test]
-fn a_based_file_is_emptied_without_its_base() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        let state = State::open(store.clone()).await?;
-        let mut mutation = state.mutation();
-        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
-        for n in 0..8 {
-            mutation.write(&vm, n, Some(page(n as u8 + 1)))?;
-        }
-        mutation.checkpoint();
-        mutation.flush().await?;
-        let state = State::open(store.clone()).await?;
-        let mut mutation = state.mutation();
-        mutation.set_len(&state.file("vm")?, 0)?;
-        mutation.flush().await?;
-        let mut mutation = state.mutation();
-        mutation.set(&state.record("run"), "next".into())?;
-        mutation.checkpoint();
-        let report = mutation.flush().await?;
-        assert_eq!(report.checkpoint_failed, None);
-        assert!(report.checkpoint.is_some());
-        let state = State::open(store).await?;
-        let vm = state.file_with_base("vm", Arc::new(Zeros))?;
-        assert_eq!(vm.len(), 0);
-        let mut mutation = state.mutation();
-        mutation.write(&vm, 1, Some(page(7)))?;
-        mutation.flush().await?;
-        assert_eq!(byte(&vm, 1).await?, Some(7));
         Ok(())
     })
 }
@@ -431,53 +351,6 @@ fn the_chain_starts_over_at_a_checkpoint() -> Result<()> {
         }
         assert_eq!(checkpoints, 3);
         assert_eq!(contents(&file, 6).await?, image);
-        Ok(())
-    })
-}
-
-/// The base of the file `vm` in [`a_based_page_chains_over_its_base`]:
-/// pages that do not compress.
-struct Noise(Vec<u8>);
-
-impl state::Base for Noise {
-    fn id(&self) -> u64 {
-        2
-    }
-    fn page(&self, n: u64) -> Option<&[u8]> {
-        self.0.get(n as usize * 4096..(n as usize + 1) * 4096)
-    }
-}
-
-/// A page of a file with a base chains over its base's page, and over it
-/// again once a hole made it its base's page.
-#[test]
-fn a_based_page_chains_over_its_base() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        // Two pages: the file holds them once page 1 is written.
-        let base = Arc::new(Noise(noise(9, 2)));
-        let state = State::open(store.clone()).options(tail_only()).await?;
-        let vm = state.file_with_base("vm", base.clone())?;
-        let mut image = base.0.clone();
-        for round in 0..6 {
-            let before = image.clone();
-            if round == 3 {
-                // A hole: page 1 reads its base's page again.
-                let mut mutation = state.mutation();
-                mutation.write(&vm, 1, None)?;
-                mutation.flush().await?;
-                image[4096..8192].copy_from_slice(&base.0[4096..8192]);
-                continue;
-            }
-            let at = 4096 + round * 131;
-            image[at..at + 8].fill(round as u8 + 1);
-            let report = flush_changes(&state, &vm, &image, &before).await?;
-            assert!(report.entry_bytes < 200, "round {round}: {report:?}");
-            let reopened = State::open(store.clone()).options(tail_only()).await?;
-            let vm = reopened.file_with_base("vm", base.clone())?;
-            assert_eq!(contents(&vm, 2).await?, image, "round {round}");
-        }
-        assert_eq!(contents(&vm, 2).await?, image);
         Ok(())
     })
 }

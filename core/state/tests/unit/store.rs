@@ -50,11 +50,7 @@ fn a_file_cut_builds_on_holes_past_the_cut() -> io::Result<()> {
         size: 8 * PAGE,
         ..FileState::default()
     };
-    let changed = |size, pages: Vec<(u64, Option<Bytes>)>| FileChange {
-        size,
-        base: None,
-        pages,
-    };
+    let changed = |size, pages: Vec<(u64, Option<Bytes>)>| FileChange { size, pages };
     file.apply(&changed(
         8 * PAGE,
         vec![(6, change(&page(6), &checkpointed))],
