@@ -253,7 +253,7 @@ SQL drives every promise it awaits with one loop of its own,
 invocation's `promisesExecutor.doProgress`, and at the attempt's end gives it
 back. That is the SDK's internals, as of 1.17.4: the package pins that
 version, and refuses to run a handler on an SDK without them.
-[`tests/sql/selector.test.ts`](../../tests/sql/selector.test.ts) tests the
+[`tests/sql/selector.test.ts`](../tests/sql/selector.test.ts) tests the
 selector against a fake VM and the SDK's single-waiter channel.
 
 - **One await point.** The loop asks the server about every awaited promise
@@ -279,19 +279,19 @@ const counter = restate.object({
 });
 ```
 
-[`tests/concurrency.ts`](../../tests/concurrency.ts) tests all of this against
+[`tests/concurrency.ts`](../tests/concurrency.ts) tests all of this against
 a real server.
 
 ## The examples
 
-The smallest is [`examples/basic/notes.ts`](../../examples/basic/notes.ts): plain SQL
-with `ctx.db`. The ledger and the shop are in [`tests/sql/`](../../tests/sql),
+The smallest is [`examples/basic/notes.ts`](../examples/basic/notes.ts): plain SQL
+with `ctx.db`. The ledger and the shop are in [`tests/sql/`](../tests/sql),
 where the tests use them. Each runs alone (`node sql/shop.ts` from
-[`tests/`](../../tests)), or together with the others (`pnpm serve` there, or
+[`tests/`](../tests)), or together with the others (`pnpm serve` there, or
 `node serve.ts ledger shop` for some, on port 9080, or `PORT`):
 
-- [`ledger.ts`](../../tests/sql/ledger.ts): accounts and transfers, deduped by transfer id.
-- [`shop.ts`](../../tests/sql/shop.ts): a Warehouse object per SKU and an Orders object per
+- [`ledger.ts`](../tests/sql/ledger.ts): accounts and transfers, deduped by transfer id.
+- [`shop.ts`](../tests/sql/shop.ts): a Warehouse object per SKU and an Orders object per
   order, each with its own database, over RPC. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.
@@ -300,8 +300,8 @@ where the tests use them. Each runs alone (`node sql/shop.ts` from
 storage in the object's database.
 
 ```sh
-make js   # from the repository root: the addon, pnpm install
-cd tests && pnpm serve
+pnpm install && pnpm build   # from the repository root: the workspace and the addon
+pnpm --filter tests serve
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
 restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
@@ -310,7 +310,7 @@ curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
 ```
 
 Both run through crashes against a real server: see
-[the crash test](../../tests/crash.ts) (`make crash-test`). 200 sequential ledger
+[the crash test](../tests/crash.ts) (`pnpm --filter tests crash`). 200 sequential ledger
 transfers take 18.8 ms each on one local node.
 
 ## Caveats
@@ -362,10 +362,10 @@ since a suspension is a restart.
 
 ## Tests
 
-The library's own: [`tests/sql`](../../tests/sql) (sessions, transactions
+The library's own: [`tests/sql`](../tests/sql) (sessions, transactions
 and their sends, readers, SQL errors) without a server, and
-[`tests/concurrency.ts`](../../tests/concurrency.ts) and
-[`tests/crash.ts`](../../tests/crash.ts) against one. `restate-fns/internal`
+[`tests/concurrency.ts`](../tests/concurrency.ts) and
+[`tests/crash.ts`](../tests/crash.ts) against one. `restate-fns/internal`
 has what the tests take apart: an attempt's session over a context of their
 own (`SqlAttempt`, `withSql`), and the store's fault injection
 (`setStoreWrapper`).

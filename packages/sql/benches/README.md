@@ -6,8 +6,8 @@ Restate and checkpoints in packs, and require the crate's `bench`
 feature. They count logical KV operations and bytes in MemoryKv; they do
 not model a real remote backend.
 
-Against a real Restate server, `make sql-bench` from the repository's root runs
-[the end-to-end benchmark](../../../tests/sql/bench.ts): see
+Against a real Restate server, `pnpm --filter tests bench` from the repository's root runs
+[the end-to-end benchmark](../../tests/sql/bench.ts): see
 [RESTATE_RESULTS.md](RESTATE_RESULTS.md) (measured on the log format, v15,
 before copy-on-write).
 
@@ -27,13 +27,13 @@ The positional argument is the repeat count; the default is three. Cargo's
 
 ## Targets
 
-| Target            | Coverage                                                                                                                                                                                                                                                                                                                                      | Evidence                                                      |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Target            | Coverage                                                                                                                                                                                                                                                                                                                                      | Evidence                                                       |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `flush_costs`     | Requests, bytes and round trips per flush (its share of checkpoints and collections included), stored size and cold reads, by workload, up to 1M rows; `S3=1` keeps packs in S3 and prices them; `FRAME_PAGES`, `INLINE_BYTES`, `CHECKPOINT_ENTRIES`, `CHECKPOINT_BYTES` set the options, `WORKLOAD` and `FLUSHES` pick and age the databases | [ARCHITECTURE.md](../src/state/docs/ARCHITECTURE.md#6-numbers) |
 | `read_latency`    | Uncached reads, each on a fresh open: the open, then a point read by key or index or a range of 100 rows, twice; Restate and S3 on one virtual clock (`RESTATE_MS`, `S3_MS`): milliseconds and round trips per store                                                                                                                          | [ARCHITECTURE.md](../src/state/docs/ARCHITECTURE.md#6-numbers) |
-| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                                                                                                                                                                                                 | `results/amplification.csv`                                   |
-| `small_databases` | Tiny databases, index counts, save grouping and a larger control; tail and head bytes written                                                                                                                                                                                                                                                 | `results/small_databases.csv`                                 |
-| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                                                                                                                                                                                              | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)        |
+| `amplification`   | PK/range/index/scan reads, mutations, rollback, recovery; four database sizes                                                                                                                                                                                                                                                                 | `results/amplification.csv`                                    |
+| `small_databases` | Tiny databases, index counts, save grouping and a larger control; tail and head bytes written                                                                                                                                                                                                                                                 | `results/small_databases.csv`                                  |
+| `cache_cpu`       | Process-wide memory and disk cache by memory size: misses, round trips, allocations and CPU time                                                                                                                                                                                                                                              | [CACHE_RESULTS.md](CACHE_RESULTS.md) (log format, v15)         |
 
 All SQL result checks remain active in release builds. Successful writes are
 reopened and verified.

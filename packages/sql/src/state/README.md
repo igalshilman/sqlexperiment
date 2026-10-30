@@ -73,11 +73,11 @@ writes since the last sync.
 
 ## Layout
 
-| Path                                        | What                                                        |
-| ------------------------------------------- | ----------------------------------------------------------- |
-| `mod.rs` and the files beside it, `tests/` | The module and its tests                                    |
-| `simulation/`                               | In-memory stores, fault injection and a latency simulator   |
-| [`docs/`](docs)                             | Architecture, design, storage format                        |
+| Path                                       | What                                                      |
+| ------------------------------------------ | --------------------------------------------------------- |
+| `mod.rs` and the files beside it, `tests/` | The module and its tests                                  |
+| `simulation/`                              | In-memory stores, fault injection and a latency simulator |
+| [`docs/`](docs)                            | Architecture, design, storage format                      |
 
 ## Build and test
 

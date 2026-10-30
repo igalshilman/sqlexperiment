@@ -19,7 +19,7 @@ once, and each tool call is made once.
 ## Start here
 
 A chat agent with a tool, the whole of
-[`examples/basic/chat.ts`](../../examples/basic/chat.ts):
+[`examples/basic/chat.ts`](../examples/basic/chat.ts):
 
 ```ts
 import { serve, tool } from 'restate-agents';
@@ -38,7 +38,7 @@ const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 await serve(assistant);
 ```
 
-Run it, from [`examples/`](../../examples/README.md), after `make js` at the
+Run it, from [`packages/examples/`](../examples/README.md), after `pnpm install && pnpm build` at the
 repository's root ([Build your own](#build-your-own)):
 
 ```sh
@@ -323,7 +323,7 @@ with their outputs.
 `restate-agents/client` also has the types of what the handlers answer
 (`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
 your own with its handlers `H`.
-[`examples/ui`](../../examples/ui/app.ts) is a chat page on it: the
+[`examples/ui`](../examples/ui/app.ts) is a chat page on it: the
 conversation as the agent works, its approvals, steering and Stop.
 
 ## Tools
@@ -413,7 +413,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 A wait ends with its agent's invocation: a cancelled one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
-[`examples/intermediate/support.ts`](../../examples/intermediate/support.ts).
+[`examples/intermediate/support.ts`](../examples/intermediate/support.ts).
 
 ## Structured answers
 
@@ -489,7 +489,7 @@ The agent's message says where it comes from, with the body as JSON:
 The handler's metadata says what it is, for the admin API and the UI:
 `restate-agents.kind` (`webhook`), `.routes` (`triage`), `.auth`
 (`hmac-sha256:linear-signature`) and `.idempotency-header`. See
-[`examples/advanced/factory`](../../examples/advanced/factory/README.md).
+[`examples/advanced/factory`](../examples/advanced/factory/README.md).
 
 ## Models
 
@@ -518,7 +518,7 @@ the caller waits.
 `agent()` is an object with `chat` and `messages`. For more, make the
 object yourself, with `object()`, and the framework's handlers beside your
 own: here, an assistant whose tools keep facts in its own table
-([`examples/basic/memory.ts`](../../examples/basic/memory.ts)):
+([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
 import { handlers } from 'restate-fns';
@@ -557,7 +557,7 @@ is empty or its own.
 
 **Options for each invocation.** `chat` takes options, or a function of the
 invocation's context that gives them: each user's model and persona from
-the object's database, say ([`examples/intermediate/harness.ts`](../../examples/intermediate/harness.ts)):
+the object's database, say ([`examples/intermediate/harness.ts`](../examples/intermediate/harness.ts)):
 
 ```ts
 chat: pi.chat(async (ctx) => ({ model: (await settingsOf(ctx)).model, tools: [clock] })),
@@ -591,11 +591,11 @@ message being answered.
 
 `restate-agents` is not published: it runs on
 [`restate-fns`](../sql/README.md) (SQL in virtual objects) and the Node.js
-addon, which this repository builds. Build it once, at the repository's root, with `make js`:
-it needs Rust (for the Node.js addon), Node 24 or later, and pnpm; `nix develop` has them all (see
+addon, which this repository builds. Build it once, at the repository's root, with `pnpm install && pnpm build`:
+it needs Rust (for the Node.js addon), Node 24 or later, and pnpm (see
 [Build and test](../../README.md#build-and-test)).
 
-Then the quickest start is a file in [`examples/`](../../examples/README.md),
+Then the quickest start is a file in [`packages/examples/`](../examples/README.md),
 whose package has `restate-agents`, the SDK and zod. Or a package of your own
 in the pnpm workspace: a directory listed in
 [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), with

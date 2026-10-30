@@ -8,7 +8,10 @@
   "scripts": {
     "build": "cargo build --release && node copy-addon.mjs release",
     "build:debug": "cargo build && node copy-addon.mjs debug",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:rust": "cargo test --locked --release",
+    "lint": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo clippy --locked --all-targets --features bench,object-store -- -D warnings",
+    "format": "cargo fmt"
   },
   "engines": {
     "node": ">=20"

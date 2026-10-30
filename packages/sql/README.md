@@ -3,7 +3,7 @@
 SQL over a key/value store implemented in JavaScript: a native addon
 ([napi-rs](https://napi.rs)) around [SQL on the state](#inside-the-layers), for the Restate TypeScript
 SDK, where the store is an object's state: [`restate-fns`](../fns/README.md)
-builds `ctx.db` on it, and [`examples`](../../examples) has the
+builds `ctx.db` on it, and [`examples`](../examples) has the
 examples.
 
 ```js
@@ -129,7 +129,7 @@ bindings, around `sql::binding::Session`.
 ## Build and test
 
 ```sh
-npm run build      # release build, copied to sql.node (or `make addon`)
+npm run build      # release build, copied to sql.node (or `pnpm build`)
 npm run build:debug
 npm test           # node:test, against an in-memory store
 cargo test --release   # the state and SQL: their API, crashes and fault campaigns

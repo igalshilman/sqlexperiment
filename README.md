@@ -15,7 +15,7 @@ Two layers, the second on the first:
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
 kept in the object's state: no database to run. `restate-fns` is the Restate SDK with
-that in its objects ([`examples/basic/notes.ts`](examples/basic/notes.ts)):
+that in its objects ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
 import * as restate from 'restate-fns';
@@ -55,7 +55,7 @@ An agent is an object with SQL: its conversation is in its own database, so
 a crash, or a manager who takes a day, changes nothing. This one's tools are
 Restate itself: it looks an order up with a service, waits for a manager's
 approval, and refunds with a workflow
-([`examples/intermediate/support.ts`](examples/intermediate/support.ts)):
+([`examples/intermediate/support.ts`](packages/examples/intermediate/support.ts)):
 
 ```ts
 const support = pi.agent({
@@ -85,14 +85,14 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 
 The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
 or the DeepSeek Harness: see [`restate-agents`](packages/integrations/README.md)
-and [the examples](examples/README.md).
+and [the examples](packages/examples/README.md).
 
 ### Tools of its own
 
 A tool is a function with the object's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
 conversation, and a handler of yours serves that table, for a profile page
-say ([`examples/basic/memory.ts`](examples/basic/memory.ts)):
+say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
 
 ```ts
 import { handlers } from 'restate-fns';
@@ -150,24 +150,24 @@ curl localhost:8080/assistant/alice/facts
 
 ## Where things are
 
-The repository is one pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml));
-each part is a directory with its README, and the [`Makefile`](Makefile)
-builds and tests them all.
+A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
+packages, each with its README:
 
-- [`packages/sql/`](packages/sql/README.md): the Node.js addon, `restate-sql`:
+- [`packages/sql`](packages/sql/README.md): `restate-sql`, the Node.js addon:
   one Rust crate with the storage inside, the [`state`](packages/sql/src/state/README.md)
   (records and paged files, changed through a mutation and flushed atomically,
   in one round trip) and [`sql`](packages/sql/src/sql/README.md) on it;
   [the layers](packages/sql/README.md#inside-the-layers), from Restate's
   key/value store up to `ctx.db`.
-- [`packages/fns/`](packages/fns/README.md): `restate-fns`, SQL in virtual
+- [`packages/fns`](packages/fns/README.md): `restate-fns`, SQL in virtual
   objects (`ctx.db`, `ctx.transaction`) on the published SDK.
-- [`packages/integrations/`](packages/integrations/README.md): `restate-agents`,
+- [`packages/integrations`](packages/integrations/README.md): `restate-agents`,
   pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
-- [`examples/`](examples/README.md): the examples, each a small file you run with node.
-- [`tests/`](tests/README.md): the agents on scripted models, the storage
-  conformance suites, SQL in objects, and the crash and concurrency tests
-  against a real Restate server.
+- [`packages/examples`](packages/examples/README.md): the examples, each a
+  small file you run with node.
+- [`packages/tests`](packages/tests/README.md): the agents on scripted models,
+  the storage conformance suites, SQL in objects, and the crash and
+  concurrency tests against a real Restate server.
 
 ## Requirements
 
@@ -183,23 +183,26 @@ docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-g
 
 ## Build and test
 
-With [Nix](https://nixos.org) (flakes), `nix develop` gives a shell with every
-tool below, on macOS and Linux ([`flake.nix`](flake.nix)):
+Node 24 or later (the examples and tests are TypeScript that node runs as it
+is, and OpenCode needs 24), pnpm, and Rust for the addon:
 
 ```sh
-nix develop       # or `direnv allow`, with use flake in .envrc
-make              # build everything: the addon (with the state and SQL inside) and the pnpm workspace
-make test         # every test that needs no Restate server
-make test-ts T=langgraph   # the TypeScript tests (vitest in tests/), optionally filtered
-make tools-test         # Restate's own agent tools, against a Restate server
-make crash-test         # the integrations and SQL objects through crashes, against a Restate server
-make concurrency-test   # the context without journal replay, against a Restate server
-make help
+pnpm install
+pnpm build        # the addon, with the state and SQL inside
+pnpm test         # every test that needs no Restate server: the addon, its Rust, and vitest
+pnpm lint         # tsc, oxlint, oxfmt --check, rustfmt and clippy
+pnpm format
 ```
 
-Without Nix: besides Rust, the Node.js parts need node 24 or later (the
-examples and tests are TypeScript that node runs as it is, and OpenCode needs 24) and pnpm, which installs the workspace (`make js`).
+The tests are the `tests` package; `pnpm --filter tests <script>` runs one:
 
-The tests against a Restate server download its 1.8.0 release on first use
-(see the [`Makefile`](Makefile): `RESTATE_VERSION`,
-`RESTATE_FROM`, `RESTATE_IMAGE`, `RESTATE_SERVER`).
+```sh
+pnpm --filter tests test langgraph   # vitest, filtered
+pnpm --filter tests crash            # the integrations and SQL objects through crashes
+pnpm --filter tests concurrency      # the context without journal replay
+pnpm --filter tests tools            # Restate's own agent tools
+pnpm --filter tests bench            # SQL in objects: latency, throughput and stored bytes
+```
+
+The last four run against a Restate server: the 1.8.0 release that
+`@restatedev/restate-server` installs, or the binary `RESTATE_SERVER` names.

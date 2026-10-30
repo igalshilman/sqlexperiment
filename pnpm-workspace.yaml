@@ -1,11 +1,11 @@
 packages:
   - packages/*
-  - tests
-  - examples
 # Dependencies whose install scripts run (npm ran them all).
 allowBuilds:
   '@google/genai': true
   '@parcel/watcher': true
+  # restate-server's usage analytics: not run.
+  '@scarf/scarf': false
   esbuild: true
   protobufjs: true
   tree-sitter-bash: true

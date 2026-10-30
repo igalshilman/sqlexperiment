@@ -8,7 +8,7 @@
   idiomatic code; short, but never cramped.
 - Decide yourself; ask the owner only critical questions.
 - Examples use real models (an API key); scripted models are for tests only
-  (tests/fakes).
+  (packages/tests/fakes).
 - Commit in small steps, and open frequent PRs so the owner can follow the
   changes; merge them yourself once the checks pass (no real users yet).
 - [FUTURE.md](FUTURE.md) lists work waiting on something outside this

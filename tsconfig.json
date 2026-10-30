@@ -19,6 +19,7 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["packages/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["**/node_modules"]
+  "include": ["packages/**/*.ts"],
+  // The examples have their own (packages/examples/tsconfig.json).
+  "exclude": ["**/node_modules", "packages/examples"]
 }

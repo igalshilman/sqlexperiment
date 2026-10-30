@@ -86,25 +86,25 @@ it, and leaves the model to decide what to do about it. So:
 ## Run
 
 ```sh
-cd examples && DEEPSEEK_API_KEY=… node deepseek.ts
-cd examples && MODEL=openai/gpt-6-sol OPENAI_API_KEY=… node deepseek.ts   # on GPT
+cd packages/examples && DEEPSEEK_API_KEY=… node deepseek.ts
+cd packages/examples && MODEL=openai/gpt-6-sol OPENAI_API_KEY=… node deepseek.ts   # on GPT
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
+[Run an example](../../../examples/README.md#run-an-example).
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/deepseek.ts`](../../../../tests/fakes/deepseek.ts),
+The tests run on a scripted model, [`tests/fakes/deepseek.ts`](../../../tests/fakes/deepseek.ts),
 which makes a fresh tool call id for every call, as a model does
-(`make test-ts T=deepseek`, from the repository root):
+(`pnpm --filter tests test deepseek`, from the repository root):
 
-- [`tests/agents/deepseek.test.ts`](../../../../tests/agents/deepseek.test.ts):
+- [`tests/agents/deepseek.test.ts`](../../../tests/agents/deepseek.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; and
   `messages`. Without the checkpoint policy four of its tests fail, and with
   a transfer tool that ignores `retryOf` three do.
-- [`tests/agents/deepseek.ts`](../../../../tests/agents/deepseek.ts): the
+- [`tests/agents/deepseek.ts`](../../../tests/agents/deepseek.ts): the
   bank agent, whose `transfer` uses `retryOf`, or its own call id, as the
-  transfer id, through crashes in [the crash test](../../../../tests/crash.ts)
-  (`make crash-test`): every message moves money exactly once.
+  transfer id, through crashes in [the crash test](../../../tests/crash.ts)
+  (`pnpm --filter tests crash`): every message moves money exactly once.

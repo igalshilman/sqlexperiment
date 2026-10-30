@@ -57,29 +57,29 @@ step it stored.
 ## Run
 
 ```sh
-cd examples && OPENAI_API_KEY=… node langgraph.ts
+cd packages/examples && OPENAI_API_KEY=… node langgraph.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
+[Run an example](../../../examples/README.md#run-an-example).
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/langgraph.ts`](../../../../tests/fakes/langgraph.ts)
-(`make test-ts T=langgraph`, from the repository root):
+The tests run on a scripted model, [`tests/fakes/langgraph.ts`](../../../tests/fakes/langgraph.ts)
+(`pnpm --filter tests test langgraph`, from the repository root):
 
-- [`tests/storage/langgraph.test.ts`](../../../../tests/storage/langgraph.test.ts):
+- [`tests/storage/langgraph.test.ts`](../../../tests/storage/langgraph.test.ts):
   LangGraph's checkpointer conformance suite
   (`@langchain/langgraph-checkpoint-validation`, 718 tests);
-  [`langgraph-fork.test.ts`](../../../../tests/storage/langgraph-fork.test.ts),
+  [`langgraph-fork.test.ts`](../../../tests/storage/langgraph-fork.test.ts),
   a forked thread; and
-  [`langgraph-upgrade.test.ts`](../../../../tests/storage/langgraph-upgrade.test.ts),
+  [`langgraph-upgrade.test.ts`](../../../tests/storage/langgraph-upgrade.test.ts),
   a thread of an earlier version of the checkpointer.
-- [`tests/agents/langgraph.test.ts`](../../../../tests/agents/langgraph.test.ts):
+- [`tests/agents/langgraph.test.ts`](../../../tests/agents/langgraph.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; the
   system prompt; and `messages`. With `durability: 'async'`, or `ToolNode`'s
   default error handling, it fails.
-- [`tests/agents/langgraph.ts`](../../../../tests/agents/langgraph.ts): the
-  bank agent, through crashes in [the crash test](../../../../tests/crash.ts)
-  (`make crash-test`): every message moves money exactly once.
+- [`tests/agents/langgraph.ts`](../../../tests/agents/langgraph.ts): the
+  bank agent, through crashes in [the crash test](../../../tests/crash.ts)
+  (`pnpm --filter tests crash`): every message moves money exactly once.

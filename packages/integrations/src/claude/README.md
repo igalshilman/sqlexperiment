@@ -63,22 +63,22 @@ again from the start, with the stored messages.
 ## Run
 
 ```sh
-cd examples && ANTHROPIC_API_KEY=… node claude.ts
+cd packages/examples && ANTHROPIC_API_KEY=… node claude.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
+[Run an example](../../../examples/README.md#run-an-example).
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/claude.ts`](../../../../tests/fakes/claude.ts)
-(`make test-ts T=claude`, from the repository root):
+The tests run on a scripted model, [`tests/fakes/claude.ts`](../../../tests/fakes/claude.ts)
+(`pnpm --filter tests test claude`, from the repository root):
 
-- [`tests/agents/claude.test.ts`](../../../../tests/agents/claude.test.ts):
+- [`tests/agents/claude.test.ts`](../../../tests/agents/claude.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or at
   any of its state requests, and abandon it, keeping what it committed; and
   `messages`.
-- [`tests/agents/claude.ts`](../../../../tests/agents/claude.ts): the bank
-  agent, whose tools move money in the [ledger](../../../../tests/sql/ledger.ts),
-  through crashes in [the crash test](../../../../tests/crash.ts)
-  (`make crash-test`): every message moves money exactly once.
+- [`tests/agents/claude.ts`](../../../tests/agents/claude.ts): the bank
+  agent, whose tools move money in the [ledger](../../../tests/sql/ledger.ts),
+  through crashes in [the crash test](../../../tests/crash.ts)
+  (`pnpm --filter tests crash`): every message moves money exactly once.

@@ -58,12 +58,12 @@ transaction open, with the transaction calls behind their `transaction()`.
 
 ## Layout
 
-| Path                                    | What                                                                                     |
-| --------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `mod.rs`, `io.rs`, `binding.rs`         | `Sql`, the adapter (`io`) from the engine's files to the state, and the addon's session |
-| `tests/`                                | SQL, and the state's storage, crash and cache campaigns under SQL workloads             |
-| [`examples/`](../../examples)           | `lookup`: a small database, opened and queried                                           |
-| [`benches/`](../../benches/README.md)   | Benchmarks of SQL workloads on the state, and their results                              |
+| Path                                  | What                                                                                    |
+| ------------------------------------- | --------------------------------------------------------------------------------------- |
+| `mod.rs`, `io.rs`, `binding.rs`       | `Sql`, the adapter (`io`) from the engine's files to the state, and the addon's session |
+| `tests/`                              | SQL, and the state's storage, crash and cache campaigns under SQL workloads             |
+| [`examples/`](../../examples)         | `lookup`: a small database, opened and queried                                          |
+| [`benches/`](../../benches/README.md) | Benchmarks of SQL workloads on the state, and their results                             |
 
 ## Build and test
 

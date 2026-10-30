@@ -50,7 +50,7 @@ handlers: {
 
 A conversation goes on with the model of each invocation: a `model` (or
 MODEL) changed since it started is the model of its next turn.
-[`examples/intermediate/harness.ts`](../../../../examples/intermediate/harness.ts) keeps each user's
+[`examples/intermediate/harness.ts`](../../../examples/intermediate/harness.ts) keeps each user's
 model and persona in the object's database.
 
 ## Through crashes
@@ -75,29 +75,29 @@ told it was interrupted).
 ## Run
 
 ```sh
-cd examples && OPENAI_API_KEY=… node chat.ts
+cd packages/examples && OPENAI_API_KEY=… node chat.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
-[`examples/basic/chat.ts`](../../../../examples/basic/chat.ts) is a chat agent with a
-tool, and [`examples/intermediate/coding.ts`](../../../../examples/intermediate/coding.ts) a pi
+[Run an example](../../../examples/README.md#run-an-example).
+[`examples/basic/chat.ts`](../../../examples/basic/chat.ts) is a chat agent with a
+tool, and [`examples/intermediate/coding.ts`](../../../examples/intermediate/coding.ts) a pi
 coordinator that hands coding tasks to OpenCode coders.
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/pi.ts`](../../../../tests/fakes/pi.ts),
-which needs no key (`make test-ts T=pi`, from the repository root):
+The tests run on a scripted model, [`tests/fakes/pi.ts`](../../../tests/fakes/pi.ts),
+which needs no key (`pnpm --filter tests test pi`, from the repository root):
 
-- [`tests/storage/pi.test.ts`](../../../../tests/storage/pi.test.ts):
+- [`tests/storage/pi.test.ts`](../../../tests/storage/pi.test.ts):
   pi-durable's storage conformance suite on the object's database;
-  [`pi-workspace.test.ts`](../../../../tests/storage/pi-workspace.test.ts),
+  [`pi-workspace.test.ts`](../../../tests/storage/pi-workspace.test.ts),
   `withPi` with a workspace.
-- [`tests/agents/pi-bank.test.ts`](../../../../tests/agents/pi-bank.test.ts):
+- [`tests/agents/pi-bank.test.ts`](../../../tests/agents/pi-bank.test.ts):
   the bank agent, with crashes at any of a message's state requests.
-- [`tests/agents/pi.test.ts`](../../../../tests/agents/pi.test.ts): the chat,
+- [`tests/agents/pi.test.ts`](../../../tests/agents/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
-- [`tests/agents/pi.ts`](../../../../tests/agents/pi.ts): the bank agent,
-  whose tools move money in the [ledger](../../../../tests/sql/ledger.ts)
+- [`tests/agents/pi.ts`](../../../tests/agents/pi.ts): the bank agent,
+  whose tools move money in the [ledger](../../../tests/sql/ledger.ts)
   with the tool call id as the transfer id, through crashes in
-  [the crash test](../../../../tests/crash.ts) (`make crash-test`).
+  [the crash test](../../../tests/crash.ts) (`pnpm --filter tests crash`).

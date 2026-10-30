@@ -17,7 +17,7 @@ it: see [Tokens](#tokens).
 
 A UI polled `status` and `messages` once a second, whether or not anything
 changed (it now follows: see
-[`examples/ui`](../../../examples/ui/app.ts)).
+[`examples/ui`](../../examples/ui/app.ts)).
 
 And a reader saw a running turn's progress late. Measured against
 restate-server, with a handler that writes a row every 100 ms and a shared
@@ -74,7 +74,7 @@ The same, on what we have:
    and the status), from a cursor, until its signal aborts: a loop of
    `sync`s (below). A network failure retries, a window's retry keeps its
    idempotency key.
-   [`examples/ui`](../../../examples/ui/app.ts) uses it instead of polling.
+   [`examples/ui`](../../examples/ui/app.ts) uses it instead of polling.
 
 What a client then does:
 

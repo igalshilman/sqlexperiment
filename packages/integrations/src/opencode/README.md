@@ -28,7 +28,7 @@ await serve(coder);
 | `tools`     | `tool()`s and Restate's tools of `restate-agents`, or OpenCode tools of your own (`OpenCodeTool`)                                                                                                                                                      |
 | `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                                                                         |
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools` |
-| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/intermediate/review.ts`](../../../../examples/intermediate/review.ts))                                            |
+| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/intermediate/review.ts`](../../../examples/intermediate/review.ts))                                                                        |
 
 For an object of your own, `opencode.chat(options)` and
 `opencode.messages()` are the handlers; `options` may be a function of the
@@ -97,28 +97,28 @@ turn starts, and resumes every claimed turn when it boots.
 ## Run
 
 ```sh
-cd examples && OPENAI_API_KEY=… node opencode.ts
+cd packages/examples && OPENAI_API_KEY=… node opencode.ts
 ```
 
 With a Restate server, and the agent registered with it: see
-[Run an example](../../../../examples/README.md#run-an-example).
-[`examples/intermediate/coding.ts`](../../../../examples/intermediate/coding.ts) has OpenCode coders,
+[Run an example](../../../examples/README.md#run-an-example).
+[`examples/intermediate/coding.ts`](../../../examples/intermediate/coding.ts) has OpenCode coders,
 each with a workspace, under a pi coordinator.
 
 ## Tests
 
-The tests run on a scripted model, [`tests/fakes/opencode.ts`](../../../../tests/fakes/opencode.ts),
+The tests run on a scripted model, [`tests/fakes/opencode.ts`](../../../tests/fakes/opencode.ts),
 an AI SDK language model that OpenCode calls through a plugin's `language`
-hook, and makes a fresh tool call id for every call (`make test-ts T=opencode`,
+hook, and makes a fresh tool call id for every call (`pnpm --filter tests test opencode`,
 from the repository root):
 
-- [`tests/storage/opencode.test.ts`](../../../../tests/storage/opencode.test.ts):
+- [`tests/storage/opencode.test.ts`](../../../tests/storage/opencode.test.ts):
   the Effect `SqlClient` of `db.ts`.
-- [`tests/agents/opencode.test.ts`](../../../../tests/agents/opencode.test.ts):
+- [`tests/agents/opencode.test.ts`](../../../tests/agents/opencode.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; the
   system prompt; and `messages`. With a transfer tool that ignores `retryOf`,
   four of its tests fail.
-- [`tests/agents/opencode.ts`](../../../../tests/agents/opencode.ts): the
-  bank agent, through crashes in [the crash test](../../../../tests/crash.ts)
-  (`make crash-test`): every message moves money exactly once.
+- [`tests/agents/opencode.ts`](../../../tests/agents/opencode.ts): the
+  bank agent, through crashes in [the crash test](../../../tests/crash.ts)
+  (`pnpm --filter tests crash`): every message moves money exactly once.
