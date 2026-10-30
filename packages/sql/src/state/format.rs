@@ -538,7 +538,7 @@ impl Manifest {
     }
 
     /// Every location it names, to change.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub fn locations_mut(&mut self) -> impl Iterator<Item = &mut Location> {
         let frames = (self.files.values_mut()).flat_map(|file| {
             file.frames

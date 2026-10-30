@@ -1,5 +1,5 @@
 //! Opt-in in-memory simulation, fault injection and measurement support.
-//! Enabled by the `simulation` Cargo feature; excluded from the default library.
+//! In tests, and with the `bench` Cargo feature; excluded from the addon.
 mod blobs;
 mod fault;
 mod latency;

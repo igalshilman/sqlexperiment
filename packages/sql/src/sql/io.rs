@@ -199,7 +199,7 @@ struct Private {
     /// has not flushed yet: read after the dirty ones, ahead of the file,
     /// which does not hold them until then.
     flushed: BTreeMap<u64, Option<Page>>,
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     written: [u64; 2],
 }
 
@@ -269,7 +269,7 @@ pub struct KvIo {
     /// the error is unknown.
     failed: AtomicBool,
     /// The state of [`Self::mount`], which [`Self::publish`] flushes.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     state: Mutex<Option<crate::state::State>>,
     #[cfg(test)]
     fault: Mutex<Option<test_faults::Fault>>,
@@ -290,7 +290,7 @@ impl KvIo {
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
             failed: AtomicBool::default(),
-            #[cfg(any(test, feature = "simulation"))]
+            #[cfg(any(test, feature = "bench"))]
             state: Mutex::new(None),
             #[cfg(test)]
             fault: Mutex::new(None),
@@ -298,13 +298,13 @@ impl KvIo {
     }
 
     /// Open the namespace's state, and an adapter over its file `db`.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub async fn mount(store: Arc<dyn crate::state::kv::KvStore>) -> io::Result<Arc<Self>> {
         Self::mount_with_options(store, crate::state::StateOptions::default()).await
     }
 
     /// [`Self::mount`] with explicit state options.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub async fn mount_with_options(
         store: Arc<dyn crate::state::kv::KvStore>,
         options: crate::state::StateOptions,
@@ -318,7 +318,7 @@ impl KvIo {
     }
 
     /// Flush the private pages, in one mutation of the state of [`Self::mount`].
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub async fn publish(&self) -> io::Result<crate::state::FlushReport> {
         let state = self.state.lock().unwrap().clone();
         let state = state.ok_or_else(|| invalid("not mounted"))?;
@@ -385,7 +385,7 @@ impl KvIo {
     }
 
     /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub fn stats(&self) -> crate::sql::IoStats {
         let private = self.private.lock().unwrap();
         crate::sql::IoStats {
@@ -532,7 +532,7 @@ impl KvIo {
         if total != 0 {
             let mut private = self.private.lock().unwrap();
             private.sizes[file] = private.sizes[file].max(end);
-            #[cfg(any(test, feature = "simulation"))]
+            #[cfg(any(test, feature = "bench"))]
             {
                 private.written[file] += total as u64;
             }
@@ -662,7 +662,7 @@ impl KvIo {
             if completion.finished() {
                 return Ok(0);
             }
-            #[cfg(any(test, feature = "simulation"))]
+            #[cfg(any(test, feature = "bench"))]
             crate::sql::yield_now().await;
             #[cfg(test)]
             let fault_operation = self.fault_operation();

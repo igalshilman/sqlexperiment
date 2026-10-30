@@ -85,12 +85,12 @@
 //! to return what was stored; decoding checks structure and bounds, and
 //! zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. The simulated stores
-//! ([`simulation`]) are in tests, and with the crate's `simulation` feature.
+//! ([`simulation`]) are in tests, and with the crate's `bench` feature.
 pub mod blobs;
 mod cache;
 mod format;
 pub mod kv;
-#[cfg(any(test, feature = "simulation"))]
+#[cfg(any(test, feature = "bench"))]
 pub mod simulation;
 mod store;
 mod tail;
@@ -517,7 +517,7 @@ impl State {
 
     /// The packs the head's checkpoints need: those its checkpoint and the
     /// one before name. Others are garbage.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub async fn needed_packs(&self) -> Result<std::collections::BTreeSet<String>> {
         let head = self.shared.snapshot().head().clone();
         let needed = self.shared.tail.needed(&head).await?;
@@ -526,7 +526,7 @@ impl State {
 
     /// The manifests the head names, by name: its checkpoint's and the one
     /// before's. Others are garbage.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub fn needed_manifests(&self) -> std::collections::BTreeSet<String> {
         let head = self.shared.snapshot().head().clone();
         (head.checkpoint.iter().chain(&head.previous))

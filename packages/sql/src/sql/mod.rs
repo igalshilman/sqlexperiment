@@ -84,9 +84,8 @@
 //!
 //! # Features
 //!
-//! The crate's `simulation` feature (always on in tests) turns on the state's
-//! in-memory store, fault injection and latency simulator, and the I/O stats
-//! here.
+//! In tests, and with the crate's `bench` feature: the state's in-memory
+//! store, fault injection and latency simulator, and the I/O stats here.
 pub mod binding;
 pub mod io;
 
@@ -142,7 +141,7 @@ impl Default for SqlOptions {
 }
 
 /// Local engine traffic, distinct from durable backend traffic.
-#[cfg(any(test, feature = "simulation"))]
+#[cfg(any(test, feature = "bench"))]
 #[derive(Clone, Copy, Debug)]
 pub struct IoStats {
     pub database_bytes_written: u64,
@@ -278,7 +277,7 @@ pub(crate) async fn yield_now() {
 
 impl Sql {
     /// Local engine I/O only, useful for separating WAL traffic from backend writes.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub fn io_stats(&self) -> IoStats {
         self.io.stats()
     }
@@ -348,7 +347,7 @@ impl Sql {
     }
 
     /// Whether this session continued a previous session's engine.
-    #[cfg(any(test, feature = "simulation"))]
+    #[cfg(any(test, feature = "bench"))]
     pub fn reused_engine(&self) -> bool {
         self.reused
     }

@@ -15,10 +15,9 @@ bench = false
 
 [features]
 default = []
-# The fault-injecting stores, the monitor and the latency simulator (always in tests).
-simulation = []
-# The storage, public for the benchmarks; no addon then.
-bench = ["simulation"]
+# The storage, public for the benchmarks, with its fault-injecting stores, the
+# monitor and the latency simulator (those always in tests); no addon then.
+bench = []
 # Blobs in an object store (S3, GCS, Azure, a directory): `state::blobs::ObjectStoreBlobs`.
 # Enable the backend on `object_store` itself (its feature `aws` for S3).
 object-store = ["dep:object_store"]
