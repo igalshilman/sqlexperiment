@@ -57,7 +57,7 @@ step it stored.
 ## Run
 
 ```sh
-cd packages/examples && OPENAI_API_KEY=… node langgraph.ts
+cd packages/examples && OPENAI_API_KEY=… node basic/langgraph.ts
 ```
 
 With a Restate server, and the agent registered with it: see

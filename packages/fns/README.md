@@ -287,8 +287,9 @@ a real server.
 The smallest is [`examples/basic/notes.ts`](../examples/basic/notes.ts): plain SQL
 with `ctx.db`. The ledger and the shop are in [`tests/sql/`](../tests/sql),
 where the tests use them. Each runs alone (`node sql/shop.ts` from
-[`tests/`](../tests)), or together with the others (`pnpm serve` there, or
-`node serve.ts ledger shop` for some, on port 9080, or `PORT`):
+[`packages/tests/`](../tests)), or together with the others
+(`pnpm --filter tests serve`, or `node serve.ts ledger shop` there for some,
+on port 9080, or `PORT`):
 
 - [`ledger.ts`](../tests/sql/ledger.ts): accounts and transfers, deduped by transfer id.
 - [`shop.ts`](../tests/sql/shop.ts): a Warehouse object per SKU and an Orders object per
@@ -301,9 +302,9 @@ storage in the object's database.
 
 ```sh
 pnpm install && pnpm build   # from the repository root: the workspace and the addon
-pnpm --filter tests serve
-docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway ghcr.io/restatedev/restate:1.8.0   # Restate (see the repository's README, Requirements), in another terminal
-restate deployments register http://host.docker.internal:9080   # as the server's container sees this host
+pnpm --filter tests serve                                            # the objects, on port 9080
+npx @restatedev/restate-server                                       # Restate, in another terminal
+npx @restatedev/restate deployments register http://localhost:9080
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
 curl localhost:8080/Warehouse/apple/restock --json '{"id": "first", "qty": 10}'   # without stock, an order is rejected
 curl localhost:8080/Orders/o1/place --json '{"sku": "apple", "qty": 2}'
@@ -317,8 +318,8 @@ transfers take 18.8 ms each on one local node.
 
 - **Every read is journaled with its value.** A state read appends the value
   to the invocation's journal, so reading pages costs log writes, and the
-  page cache matters more than it does elsewhere. `restate.sqlOptions` sets journal
-  retention to zero so completed journals are not kept.
+  page cache matters more than it does elsewhere. A completed invocation's
+  journal, those reads included, is kept for Restate's default retention.
 - **The journal grows across attempts.** Skipped entries stay; each attempt
   appends its own.
 - **A suspension is a restart.** Resuming means running from the start, so

@@ -163,8 +163,9 @@ each event, which `webhook()`'s `message` leaves out.
 
 From [`packages/examples/`](../..), after `pnpm install && pnpm build` at the repository
 root, each in a terminal of its own, with a key for each agent's model:
-OpenAI's for triage and the planner (GPT Sol) and the reviewer (GPT Astra),
-all in OpenAI's fast mode, and Anthropic's for the coders (Claude Sonnet):
+OpenAI's for triage (GPT-6 Sol), the planner (GPT-6.1 Sol) and the reviewer
+(GPT-6 Astra), all in OpenAI's fast mode, and Anthropic's for the coders
+(Claude Sonnet):
 
 ```sh
 node advanced/factory/linear.ts                    # Linear (a stand-in), on port 3333
@@ -273,7 +274,7 @@ factory on Linear and GitHub, as above; Restate registers it at port 9080.
 It holds no secrets (`.dockerignore` keeps every `.env` out): give them to it.
 
 ```sh
-docker run -p 9080:9080 -v factory:/data --env-file examples/.env \
+docker run -p 9080:9080 -v factory:/data --env-file packages/examples/.env \
   ghcr.io/igalshilman/sqlexperiment/factory
 ```
 

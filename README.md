@@ -206,3 +206,5 @@ pnpm --filter tests bench            # SQL in objects: latency, throughput and s
 
 The last four run against a Restate server: the 1.8.0 release that
 `@restatedev/restate-server` installs, or the binary `RESTATE_SERVER` names.
+
+To run an example, see [Run an example](packages/examples/README.md#run-an-example).

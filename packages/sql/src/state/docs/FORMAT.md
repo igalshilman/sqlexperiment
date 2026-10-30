@@ -1,8 +1,8 @@
 # Storage format
 
 Only this format (v22) is implemented. Use a dedicated namespace. Keys,
-encodings and bounds live in `src/format.rs`; there is no migration or
-format discovery. Storage is assumed reliable (a value reads back as
+encodings and bounds live in [`format.rs`](../format.rs); there is no
+migration or format discovery. Storage is assumed reliable (a value reads back as
 written); every zstd frame carries a checksum, and decoding checks
 structure and the bounds below.
 

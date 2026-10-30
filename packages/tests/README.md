@@ -21,3 +21,12 @@ tests, and `node --import ./fakes/fakes.ts` for processes.
   server (`pnpm --filter tests tools`).
 - [`concurrency.ts`](concurrency.ts): the context without journal replay,
   against a real Restate server (`pnpm --filter tests concurrency`).
+- [`sql/bench.ts`](sql/bench.ts): SQL in objects against a real Restate
+  server: latency, throughput and stored bytes, for databases up to 100 MB
+  (`pnpm --filter tests bench`; results in
+  [RESTATE_RESULTS.md](../sql/benches/RESTATE_RESULTS.md)).
+
+`pnpm --filter tests test` runs the vitest suites (add a filter, such as
+`langgraph`), with no Restate server. The others start one: the release that
+`@restatedev/restate-server` installs ([`restate-server.ts`](restate-server.ts)),
+or the binary `RESTATE_SERVER` names.

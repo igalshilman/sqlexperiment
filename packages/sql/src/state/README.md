@@ -4,22 +4,25 @@ Transactional state over an asynchronous key/value store, for namespaces with
 one owner at a time: the state of a Restate object without Restate's journal
 (`journalReplay: false`). It keeps named **records** (small whole values),
 and paged **files** (4 KiB pages, read and written at random). The state is
-read; it changes only through a **mutation**, an owned value that collects the
-records set and pages written, and a **flush** makes everything in the mutation durable at
-once, in one round trip. It needs only `get`, `put`, `delete` and `sync` from the backend,
-and a listing of its keys to collect the garbage.
+read; it changes only through a **mutation**, an owned value that collects
+the records set and pages written, and a **flush** makes everything in the
+mutation durable at once, in one round trip. It needs only `get`, `put`,
+`delete` and `sync` from the backend, and a listing of its keys to collect
+the garbage. It is a private module of the addon's crate: its API is for
+[SQL](../sql/README.md) and the [bindings](../node.rs).
 
 The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
 database in the file `db` and moves what it committed into a mutation before
 the host flushes it, and the host adds records of its own beside it.
 Coordinating them is the host's: see [the layers](../../README.md#inside-the-layers).
 
-## Use
+## API
 
-Implement `kv::KvStore` over your store, then:
+A host implements `kv::KvStore` over its store (the addon, over the
+JavaScript one), then:
 
 ```rust,ignore
-use state::{PageCache, PageCacheConfig, State};
+use crate::state::{PageCache, PageCacheConfig, State};
 
 // Once per process: 256 MiB of pages in memory, 8 GiB in a temporary file.
 let cache = PageCache::open(PageCacheConfig::new(256 << 20, 8 << 30)).await?;

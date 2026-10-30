@@ -75,7 +75,7 @@ told it was interrupted).
 ## Run
 
 ```sh
-cd packages/examples && OPENAI_API_KEY=… node chat.ts
+cd packages/examples && OPENAI_API_KEY=… node basic/chat.ts
 ```
 
 With a Restate server, and the agent registered with it: see

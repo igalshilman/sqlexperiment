@@ -97,7 +97,7 @@ turn starts, and resumes every claimed turn when it boots.
 ## Run
 
 ```sh
-cd packages/examples && OPENAI_API_KEY=… node opencode.ts
+cd packages/examples && OPENAI_API_KEY=… node basic/opencode.ts
 ```
 
 With a Restate server, and the agent registered with it: see

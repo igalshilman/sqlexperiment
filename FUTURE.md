@@ -10,9 +10,9 @@ SDK release that exposes its ephemeral get.
 
 **Now:** the SQL store of `restate-fns` reads the object's state with
 regular, journaled gets (`objectStore` in `packages/fns/src/session.ts`:
-`ctx.get`). Restate 1.8.0, the release the tests run (`@restatedev/restate-server` in
-`packages/tests`), negotiates
-protocol v7 at most.
+`ctx.get`). Restate 1.8.0, the release the tests run
+(`@restatedev/restate-server` in `packages/tests`), negotiates protocol v7
+at most.
 
 **Then:** read with v8's ephemeral get, which leaves the read out of the
 journal. A handler without journal replay never reads its journal back, so
@@ -33,15 +33,16 @@ nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
 1.8.2-dev) has v8, behind that variable, for local benchmarks.
 
 **To switch:** once both releases are out, update `@restatedev/restate-server`
-in `packages/tests` to the server's (with `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`
-where the tests start it, unless it enables v8 by default), and switch the read above to the
+in `packages/tests` to the server's (with
+`RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` where the tests start it,
+unless it enables v8 by default), and switch the read above to the
 ephemeral one.
 
 ## The head with the invocation (eager state keys)
 
-**Waits on:** SDK releases whose service options set
-`eagerStateKeysWhitelist` (the TypeScript SDK 1.17.4 has no such option). Restate has it since 1.8.0
-([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
+**Waits on:** a TypeScript SDK release whose service options set
+`eagerStateKeysWhitelist` (1.17.4 has no such option). Restate has it since
+1.8.0 ([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
 
 **Now:** SQL objects set lazy state, so an invocation does not start with
 every tail entry and pack, and a session's first read is the head

@@ -1,10 +1,10 @@
-# Node.js addon
+# restate-sql: the Node.js addon
 
-SQL over a key/value store implemented in JavaScript: a native addon
-([napi-rs](https://napi.rs)) around [SQL on the state](#inside-the-layers), for the Restate TypeScript
+SQLite-compatible SQL over a key/value store implemented in JavaScript: a
+native addon ([napi-rs](https://napi.rs)) with the storage inside it, the
+[state and SQL on it](#inside-the-layers). It is for the Restate TypeScript
 SDK, where the store is an object's state: [`restate-fns`](../fns/README.md)
-builds `ctx.db` on it, and [`examples`](../examples) has the
-examples.
+builds `ctx.db` on it.
 
 ```js
 const { open } = require('restate-sql');
@@ -49,9 +49,9 @@ the body. A COMMIT that fails rolls back. An SQL error leaves the session
 usable (`isUsable()`); a storage error ends it.
 
 A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
-puts them in the same tail entry, as the record `effects`, so they are stored exactly when the
-transaction is, even if it changes nothing, and stay until a later
-transaction commits others. `effects()` returns them. The SDK keeps a
+puts them in the same tail entry, as the record `effects`, so they are
+stored exactly when the transaction is, even if it changes nothing, and stay
+until a later transaction commits others. `effects()` returns them. The SDK keeps a
 transaction's sends there, its outbox, and makes them once it commits.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
@@ -120,26 +120,31 @@ pairs `Sql::flush` with the mutation's flush after each call that leaves no
 SQL transaction open. In the same mutation it sets the record `effects`: the
 sends committed with the rows, an outbox, opaque to the storage.
 
-The crate is one Rust crate, the addon, with two private modules: `state`
-([`src/state`](src/state/README.md): its [architecture](src/state/docs/ARCHITECTURE.md),
-[design](src/state/docs/DESIGN.md) and [format](src/state/docs/FORMAT.md)) and
-`sql` on it ([`src/sql`](src/sql/README.md)). `src/node.rs` is the napi
+All of it is one Rust crate, the addon. The state and SQL are private
+modules of it: `state` ([`src/state`](src/state/README.md): its
+[architecture](src/state/docs/ARCHITECTURE.md), [design](src/state/docs/DESIGN.md)
+and [format](src/state/docs/FORMAT.md)), and `sql` on it
+([`src/sql`](src/sql/README.md)). [`src/node.rs`](src/node.rs) is the napi
 bindings, around `sql::binding::Session`.
 
 ## Build and test
 
+From this directory; at the repository's root, `pnpm build` builds the addon,
+and `pnpm test` runs both its tests with the rest:
+
 ```sh
-npm run build      # release build, copied to sql.node (or `pnpm build`)
-npm run build:debug
-npm test           # node:test, against an in-memory store
-cargo test --release   # the state and SQL: their API, crashes and fault campaigns
-cargo bench --features bench   # the benchmarks (benches/README.md)
+pnpm build                      # release build, copied to sql.node
+pnpm build:debug
+pnpm test                       # node:test, against an in-memory store
+pnpm test:rust                  # cargo test: the state and SQL, their API, crashes and fault campaigns
+pnpm lint                       # rustfmt, and clippy with and without the crate's features
+cargo bench --features bench    # the benchmarks (benches/README.md)
 cargo run --release --features bench --example lookup
 ```
 
-`npm test` covers SQL and value round trips, SQL errors and rollback, a write the
-store rejects, and lost writes: for every position of a request that loses its
-writes (its `sync` failing, or the session closed first), the owner and a
-reader with no cached state read exactly the stored rows. `cargo test` runs
+`pnpm test` covers SQL and value round trips, SQL errors and rollback, a write
+the store rejects, and lost writes: for every position of a request that
+loses its writes (its `sync` failing, or the session closed first), the owner
+and a reader with no cached state read exactly the stored rows. `pnpm test:rust` runs
 the state's and SQL's own tests, in the crate (`src/state/tests`,
 `src/sql/tests`), with the simulated stores.

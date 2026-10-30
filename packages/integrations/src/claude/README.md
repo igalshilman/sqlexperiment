@@ -63,7 +63,7 @@ again from the start, with the stored messages.
 ## Run
 
 ```sh
-cd packages/examples && ANTHROPIC_API_KEY=… node claude.ts
+cd packages/examples && ANTHROPIC_API_KEY=… node basic/claude.ts
 ```
 
 With a Restate server, and the agent registered with it: see

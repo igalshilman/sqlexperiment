@@ -86,8 +86,8 @@ it, and leaves the model to decide what to do about it. So:
 ## Run
 
 ```sh
-cd packages/examples && DEEPSEEK_API_KEY=… node deepseek.ts
-cd packages/examples && MODEL=openai/gpt-6-sol OPENAI_API_KEY=… node deepseek.ts   # on GPT
+cd packages/examples && DEEPSEEK_API_KEY=… node basic/deepseek.ts
+cd packages/examples && MODEL=openai/gpt-6-sol OPENAI_API_KEY=… node basic/deepseek.ts   # on GPT
 ```
 
 With a Restate server, and the agent registered with it: see

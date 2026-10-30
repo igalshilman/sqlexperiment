@@ -834,7 +834,7 @@ impl Receipt {
 }
 
 /// A named whole value, replaced whole: the host's state beside its files
-/// (a run's progress, an outbox), flushed with them. Read from the state
+/// (a request's outbox, say), flushed with them. Read from the state
 /// ([`Self::get`]), set in a mutation ([`Mutation::set`]). A cheap handle.
 ///
 /// A flush puts the value in its tail entry; a checkpoint keeps one of up

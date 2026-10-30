@@ -38,11 +38,12 @@ const assistant = pi.agent({ name: 'assistant', tools: [weather] });
 await serve(assistant);
 ```
 
-Run it, from [`packages/examples/`](../examples/README.md), after `pnpm install && pnpm build` at the
-repository's root ([Build your own](#build-your-own)):
+Run it, from [`packages/examples/`](../examples/README.md), after
+`pnpm install && pnpm build` at the repository's root
+([Build your own](#build-your-own)):
 
 ```sh
-OPENAI_API_KEY=… node chat.ts                                                # the agent, on port 9080
+OPENAI_API_KEY=… node basic/chat.ts                                          # the agent, on port 9080
 npx @restatedev/restate-server  # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080           # tell Restate where the agent is
 curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
@@ -590,15 +591,16 @@ message being answered.
 ## Build your own
 
 `restate-agents` is not published: it runs on
-[`restate-fns`](../sql/README.md) (SQL in virtual objects) and the Node.js
-addon, which this repository builds. Build it once, at the repository's root, with `pnpm install && pnpm build`:
-it needs Rust (for the Node.js addon), Node 24 or later, and pnpm (see
+[`restate-fns`](../fns/README.md) (SQL in virtual objects) and the Node.js
+addon ([`restate-sql`](../sql/README.md)), which this repository builds.
+Build them once, at the repository's root, with `pnpm install && pnpm build`:
+it needs Rust (for the addon), Node 24 or later, and pnpm (see
 [Build and test](../../README.md#build-and-test)).
 
 Then the quickest start is a file in [`packages/examples/`](../examples/README.md),
 whose package has `restate-agents`, the SDK and zod. Or a package of your own
-in the pnpm workspace: a directory listed in
-[`pnpm-workspace.yaml`](../../pnpm-workspace.yaml), with
+in the pnpm workspace: a directory under `packages/`
+([`pnpm-workspace.yaml`](../../pnpm-workspace.yaml)), with
 
 ```json
 {

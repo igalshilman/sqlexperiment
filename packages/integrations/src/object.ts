@@ -268,8 +268,7 @@ type With<H> = typeof BUILT_IN & (H extends { messages: unknown } ? typeof FOLLO
  * OpenCode's tables are in a database of their own.
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
- * `options: { journalRetention: { hours: 1 } }` to look at journals in the
- * UI, or `options: { retryPolicy: ... }`.
+ * `options: { retryPolicy: ... }`.
  */
 export const object = <P extends string, H extends Record<string, Handler>>(
   definition: Definition<P> & {

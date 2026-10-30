@@ -245,8 +245,7 @@ const isHandler = (value: object) =>
  * `schema: ['CREATE TABLE notes (text TEXT NOT NULL)']`.
  *
  * `options` and `metadata` add to (or replace) {@link sqlOptions} and
- * {@link sqlMetadata}, such as `options: { journalRetention: { hours: 1 } }`
- * to look at journals in the UI.
+ * {@link sqlMetadata}, such as `options: { retryPolicy: ... }`.
  */
 export function object<P extends string, H extends Record<string, unknown>>(definition: {
   name: P;

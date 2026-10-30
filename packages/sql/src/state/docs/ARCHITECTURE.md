@@ -1,7 +1,7 @@
 # Architecture
 
-How the state works, from the top down: the data model a user of the crate
-sees, the state as a sequence of mutations, how that sequence is stored
+How the state works, from the top down: the data model SQL and the bindings
+see, the state as a sequence of mutations, how that sequence is stored
 (the head, the tail, checkpoints, manifests and packs), and how each of
 those changes over time, with packs in two tiers: L0 in Restate and, once
 a database outgrows it, L1 in S3. It ends with what changes when there is
@@ -22,10 +22,10 @@ namespace as **readers** beside the owner.
 
 A namespace's state holds two kinds of named values:
 
-| Kind       | What it is                                                          | Used for, say                         |
-| ---------- | ------------------------------------------------------------------- | ------------------------------------- |
-| **Record** | A whole value, up to 16 MiB, set and read whole                     | A request's effects; a run's progress |
-| **File**   | A paged file: 4 KiB pages, read and written at random, up to 10 GiB | The SQL database (the file `db`)      |
+| Kind       | What it is                                                          | Used for, say                    |
+| ---------- | ------------------------------------------------------------------- | -------------------------------- |
+| **Record** | A whole value, up to 16 MiB, set and read whole                     | A request's effects (its sends)  |
+| **File**   | A paged file: 4 KiB pages, read and written at random, up to 10 GiB | The SQL database (the file `db`) |
 
 **The state is read, never written in place.** A change goes into a
 **mutation**: an owned value that collects records set, pages written,
@@ -51,13 +51,12 @@ What the state guarantees:
 - **Snapshots for readers.** A reader sees the state as of the flush it
   opened on, however many flushes the owner makes meanwhile.
 
-**SQL on top.** The [SQL crate](../../sql/README.md) runs a
+**SQL on top.** The [SQL module](../../sql/README.md) runs a
 SQLite-compatible engine on the file `db`. Its statements change a private
 view; at a flush, it moves the pages its transactions committed into the
 mutation, beside whatever else the host puts there (the effects of the
 request, say), so the database and the effects become durable together.
-The language bindings flush after every call that leaves no SQL transaction
-open.
+The addon flushes after every call that leaves no SQL transaction open.
 
 ## 2. The state over time: a sequence of mutations
 

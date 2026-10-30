@@ -3,10 +3,10 @@
 Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
 namespace is all the object keeps, and the state is how it reaches the store:
-the host flushes a mutation (records, paged files and the SQL's file `db`, in one
-put) when it chooses, after each SQL transaction as SQLite does, or once per
-turn of everything that takes part. The sections on SQL describe the `sql`
-crate, which keeps its engine's state private until it flushes into a mutation.
+the host flushes a mutation (records, paged files and the SQL's file `db`, in
+one put) when it chooses: the addon, after each SQL transaction, as SQLite
+does. The sections on SQL describe the `sql` module, which keeps its
+engine's state private until it flushes into a mutation.
 
 This doc holds the rules [ARCHITECTURE.md](ARCHITECTURE.md) leaves out;
 read that first, for the layout, flush, checkpoint, open and garbage
@@ -119,7 +119,7 @@ too. With the cache, a reader reads the ranges the owner cached.
 
 ## Engine integration
 
-How the [`sql`](../../sql/README.md) crate runs the SQL engine on the state.
+How the [`sql`](../../sql/README.md) module runs the SQL engine on the state.
 The engine sees two virtual files, the database and its WAL file (SQLite's
 own), served by `KvIo`:
 
@@ -257,7 +257,7 @@ Measurements: [ARCHITECTURE.md](ARCHITECTURE.md#6-numbers),
   zstd frame carries a checksum, which also catches a page decoded against
   the wrong reference.
 - **Format.** Only v22, with no migration.
-- **Encoding.** Hand-written (`src/format.rs`): LEB128 varints, offsets as
+- **Encoding.** Hand-written (`format.rs`): LEB128 varints, offsets as
   differences from the location before, and zstd over the manifest's body;
   the pages are zstd frames of their own. A zero-copy format (FlatBuffers,
   Cap'n Proto, rkyv) would save the decode, but nothing here is read
