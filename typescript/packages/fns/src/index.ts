@@ -98,12 +98,11 @@ export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, '
 
 /**
  * The options `object` sets: lazy state, so an invocation does not start by
- * loading every page; and no journal kept after an invocation completes,
- * since it holds every page it read.
+ * loading every page. Journals are kept as Restate's default keeps them.
  *
  * TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
  */
-export const sqlOptions = { enableLazyState: true, journalRetention: 0 } satisfies restate.ObjectOptions;
+export const sqlOptions = { enableLazyState: true } satisfies restate.ObjectOptions;
 
 /**
  * The metadata `object` sets: Restate's UI hides the database from the

@@ -38,7 +38,7 @@ with the same storage, page cache and pending sends:
 - `restate_fns` is the SDK (`from restate import *`), with a `VirtualObject`,
   `ObjectContext` and `ObjectSharedContext` of its own. Its `VirtualObject`
   takes the options of the SDK's and adds `restate.sql_options`
-  (`enable_lazy_state=True`, `journal_retention=timedelta(0)`). Its handlers
+  (`enable_lazy_state=True`). Its handlers
   have `ctx.db`, and run with the SDK's explicit recovery
   (`restate._preview.explicit_recovery`); one with
   `journal_replay=True` is the SDK's own, with no `ctx.db` (its context is
