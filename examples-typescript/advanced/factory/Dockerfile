@@ -43,6 +43,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 git ca-
 COPY --from=deps /app /app
 WORKDIR /app/examples-typescript
 COPY examples-typescript/advanced/factory/*.ts advanced/factory/
+# Node's compile cache, made here: the modules the endpoint loads as it starts
+# (restate-agents, OpenCode's and pi's, many files) come compiled already, a
+# quarter less of their loading on a new container, such as a coder's sandbox.
+# Every module but env.ts, which asks Linear and GitHub as it loads.
+ENV NODE_COMPILE_CACHE=/app/.node-compile-cache
+RUN node --input-type=module -e "for (const m of ['restate-agents', 'restate-agents/opencode', 'restate-agents/pi', \
+  './advanced/factory/answers.ts', './advanced/factory/github.ts', './advanced/factory/mcp.ts', \
+  './advanced/factory/prompts.ts', './advanced/factory/signatures.ts', './advanced/factory/workspace.ts']) await import(m)"
 ENV PORT=9080
 # The coders' clones of the project: a volume keeps them across restarts.
 ENV WORKSPACE=/data/workspace
