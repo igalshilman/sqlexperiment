@@ -48,12 +48,17 @@ export interface Stopped {
   stopped: string | null;
 }
 
-/** A call of the companion's of `ctx`, with a key of the request and `step`: a restarted view joins the same call. */
-const companion = (ctx: restate.ViewContext, step: string) =>
-  ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: `${ctx.request.id}:${step}` });
+/**
+ * A call of the companion's of `ctx`; with `step`, a change, keyed by the
+ * request and `step`: a restarted view joins the same call. A read has no
+ * key: asked again, it answers again, and Restate keeps nothing of it.
+ */
+const companion = (ctx: restate.ViewContext, step?: string) =>
+  ctx.rpc(signals, signalsOf(ctx), step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
 
 /**
- * Views that wait up to a minute on the companion (`watch`, `sync`): Restate
+ * Views that wait on the companion (`watch`, `sync`, up to a minute) or on
+ * the object (`clear`): Restate
  * suspends one that waits past its inactivity timeout, which restarts it,
  * so it is longer than the wait.
  */
@@ -72,8 +77,8 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
 const BUILT_IN = {
   signal: async (ctx: restate.ViewContext, signal: Signal): Promise<Resolved> =>
     companion(ctx, 'signal').resolve(signal),
-  pending: async (ctx: restate.ViewContext): Promise<Waiting[]> => companion(ctx, 'pending').pending(),
-  status: async (ctx: restate.ViewContext): Promise<Status> => companion(ctx, 'status').status(),
+  pending: async (ctx: restate.ViewContext): Promise<Waiting[]> => companion(ctx).pending(),
+  status: async (ctx: restate.ViewContext): Promise<Status> => companion(ctx).status(),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
   stop: async (ctx: restate.ViewContext): Promise<Stopped> => companion(ctx, 'stop').stop(),
   /**
@@ -89,8 +94,7 @@ const BUILT_IN = {
       companion(ctx, 'steer').steer({ agent: agentOf(ctx), text }),
   },
   /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
-  notifications: async (ctx: restate.ViewContext): Promise<Notifications> =>
-    companion(ctx, 'notifications').notifications(),
+  notifications: async (ctx: restate.ViewContext): Promise<Notifications> => companion(ctx).notifications(),
   /**
    * The revision, once there is one newer than `revision`, or at the timeout (50 s by
    * default, at most 60 s), whichever comes first: a client then reads what
@@ -122,15 +126,19 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
    * A message sent before it is answered first, then forgotten too; one sent
    * after starts anew.
    */
-  clear: async (ctx: restate.ViewContext): Promise<Stopped> => {
-    const stopped = await companion(ctx, 'clear').stop();
-    await ctx.rpc({
-      service: ctx.request.target.service,
-      key: ctx.key,
-      handler: 'erase',
-      idempotencyKey: `${ctx.request.id}:erase`,
-    });
-    return stopped;
+  clear: {
+    // `erase` waits for the messages sent before it.
+    ...WAITS,
+    handler: async (ctx: restate.ViewContext): Promise<Stopped> => {
+      const stopped = await companion(ctx, 'clear').stop();
+      await ctx.rpc({
+        service: ctx.request.target.service,
+        key: ctx.key,
+        handler: 'erase',
+        idempotencyKey: `${ctx.request.id}:erase`,
+      });
+      return stopped;
+    },
   },
   sync: {
     ...WAITS,
@@ -141,8 +149,8 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
       if (revision !== undefined) await companion(ctx, 'watch').watch({ revision, timeoutSeconds });
       // The revision first: a change after it shows in the next sync. Then
       // what the object does, and its conversation, as they are now.
-      const now = await companion(ctx, 'notifications').notifications();
-      const status = await companion(ctx, 'status').status();
+      const now = await companion(ctx).notifications();
+      const status = await companion(ctx).status();
       return { revision: now.revision, status, ...(await messages(ctx, { cursor, limit })) };
     },
   },
