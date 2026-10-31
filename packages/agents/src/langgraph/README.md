@@ -71,16 +71,14 @@ The tests run on a scripted model, [`test/fakes/langgraph.ts`](../../test/fakes/
 
 - [`test/storage/langgraph.test.ts`](../../test/storage/langgraph.test.ts):
   LangGraph's checkpointer conformance suite
-  (`@langchain/langgraph-checkpoint-validation`, 718 tests);
+  (`@langchain/langgraph-checkpoint-validation`, 718 tests); and
   [`langgraph-fork.test.ts`](../../test/storage/langgraph-fork.test.ts),
-  a forked thread; and
-  [`langgraph-upgrade.test.ts`](../../test/storage/langgraph-upgrade.test.ts),
-  a thread of an earlier version of the checkpointer.
+  a forked thread.
 - [`test/langgraph.test.ts`](../../test/langgraph.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
   at any of its state requests; the
-  system prompt; and `messages`. With `durability: 'async'`, or `ToolNode`'s
-  default error handling, it fails.
+  system prompt; arguments that do not fit a tool; and `messages`. With
+  `durability: 'async'`, it fails.
 - [`test/langgraph.ts`](../../test/langgraph.ts): the
   bank agent, through crashes in [the crash test](../../../e2e/crash.ts)
   (`pnpm --filter e2e crash`): every message moves money exactly once.
