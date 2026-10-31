@@ -86,7 +86,9 @@ enum Ending {
 }
 
 impl Ending {
-    /// Whether it leaves its engine to the next session.
+    /// Whether it leaves its engine to the next session: a call dropped at
+    /// its first poll ran nothing, as it yields before a statement it has
+    /// not run before.
     fn parks(self) -> bool {
         matches!(
             self,
@@ -94,6 +96,8 @@ impl Ending {
                 | Ending::RolledBackSavepoint
                 | Ending::ErrorMidString
                 | Ending::FailedInsert
+                | Ending::CancelledRead(1)
+                | Ending::CancelledWrite(1)
         )
     }
 
@@ -142,9 +146,11 @@ impl Ending {
                 assert!(db.execute(sql).await.is_err());
             }
         }
+        // A cancelled call ends the session, even one that ran nothing.
+        let cancelled = matches!(self, Ending::CancelledRead(_) | Ending::CancelledWrite(_));
         assert_eq!(
             db.is_usable(),
-            self.parks() || matches!(self, Ending::OpenTransaction),
+            !cancelled && (self.parks() || matches!(self, Ending::OpenTransaction)),
             "{self:?}"
         );
         Ok(())

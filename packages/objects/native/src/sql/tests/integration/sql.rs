@@ -268,3 +268,80 @@ fn auto_vacuum_is_refused() -> Result<()> {
         Ok(())
     })
 }
+
+/// A statement run again is prepared once and kept, and reads the schema as
+/// it is now: a column added since shows, named.
+#[test]
+fn a_statement_run_again_reads_the_schema_as_it_is_now() -> Result<()> {
+    use crate::sql::Value;
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let db = Db::open(store, StateOptions::default()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        db.execute("INSERT INTO t VALUES (1)").await?;
+        let select = "SELECT * FROM t WHERE id = ?";
+        let (columns, _) = db
+            .query_columns(select, Some(vec![Value::from_i64(1)]))
+            .await?;
+        assert_eq!(columns, ["id"]);
+        db.execute("ALTER TABLE t ADD COLUMN name TEXT DEFAULT 'one'")
+            .await?;
+        let (columns, rows) = db
+            .query_columns(select, Some(vec![Value::from_i64(1)]))
+            .await?;
+        assert_eq!(columns, ["id", "name"]);
+        assert_eq!(rows[0][1].to_string(), "one");
+        Ok(())
+    })
+}
+
+/// Statements kept for their next run hold no read: commits after them
+/// checkpoint the engine's WAL fully, and the database reopens with them.
+#[test]
+fn statements_kept_for_their_next_run_hold_no_read() -> Result<()> {
+    use crate::sql::Value;
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let db = Db::open(store.clone(), StateOptions::default()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        for i in 0..20 {
+            db.execute_with("INSERT INTO t VALUES (?, 0)", [Value::from_i64(i)])
+                .await?;
+            db.query_with("SELECT n FROM t WHERE id = ?", [Value::from_i64(i)])
+                .await?;
+            db.query("SELECT count(*) FROM t").await?;
+        }
+        db.save().await?;
+        let db = Db::open(store, StateOptions::default()).await?;
+        assert_eq!(
+            db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
+            Some(20)
+        );
+        Ok(())
+    })
+}
+
+/// A statement run again that fails is an SQL error, as the first run's:
+/// the session goes on, and the statement runs again after it. Values of
+/// the wrong count are refused before it runs.
+#[test]
+fn a_statement_run_again_fails_as_its_first_run() -> Result<()> {
+    use crate::sql::Value;
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let db = Db::open(store, StateOptions::default()).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)").await?;
+        let insert = "INSERT INTO t VALUES (?)";
+        db.execute_with(insert, [Value::from_i64(1)]).await?;
+        assert!(db.execute_with(insert, [Value::from_i64(1)]).await.is_err());
+        assert!(db.execute_with(insert, []).await.is_err());
+        assert!(db.is_usable());
+        db.execute_with(insert, [Value::from_i64(2)]).await?;
+        assert_eq!(
+            db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
+            Some(2)
+        );
+        Ok(())
+    })
+}

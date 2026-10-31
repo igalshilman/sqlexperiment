@@ -107,7 +107,7 @@ use crate::yield_now;
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::{Future, IntoFuture},
     pin::Pin,
     sync::{
@@ -192,7 +192,27 @@ struct Engine {
     /// the next one makes durable with the SQL; a reader keeps them, as it
     /// keeps its SQL.
     records: BTreeMap<String, Bytes>,
+    /// The statements of this session's SQL, by its text, each reset and run
+    /// again: preparing one costs more than running it. See [`Prepared`].
+    statements: HashMap<String, Prepared>,
 }
+
+/// A statement prepared from a call's SQL, a single statement, and whether
+/// it ran quickly last time. A call yields before it runs a statement that
+/// did not, or that it prepares, which may run long: so a host that polls a
+/// call once on a thread of its own (the Node.js addon, on JavaScript's)
+/// runs only quick statements there, and the others in the runtime.
+struct Prepared {
+    statement: turso_core::Statement,
+    quick: bool,
+}
+
+/// How long a statement may run to count as quick.
+const QUICK: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// The most statements a session keeps prepared: it prepares others each
+/// time it runs them.
+const MAX_STATEMENTS: usize = 256;
 
 /// An idle engine and its adapter at a flushed state, kept in the owner's
 /// [`crate::state::PageCache`] so the next session can skip opening an engine. Only the
@@ -635,6 +655,7 @@ impl Engine {
             schema_bytes: warm.as_ref().map(|warm| warm.schema_bytes),
             schema_changed: false,
             records: BTreeMap::new(),
+            statements: HashMap::new(),
         };
         let database = match warm {
             Some(warm) => warm.database,
@@ -659,6 +680,12 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Close the connection, with the statements, which hold it.
+    fn disconnect(&mut self) {
+        self.statements.clear();
+        drop(self.connection.take());
+    }
+
     /// Leave an idle engine at a flushed state to the owner cache, and
     /// whether it did. Only an engine at the owner's latest acknowledged
     /// flush qualifies: one that an overlapping session left behind holds an
@@ -673,7 +700,7 @@ impl Engine {
         if !self.is_usable() || self.in_transaction() || !self.io.is_clean() {
             return false;
         }
-        drop(self.connection.take());
+        self.disconnect();
         // Closing the connection must leave nothing behind.
         if !self.io.is_clean() {
             return false;
@@ -727,6 +754,11 @@ impl Engine {
     /// [`Refused`] error. Any other failure ends the state, and the engine
     /// with it.
     async fn commit(&mut self) -> Result<()> {
+        if self.io.has_changes() || !self.records.is_empty() {
+            // Compressing the pages and storing them may take long: see
+            // [`Prepared`].
+            yield_now().await;
+        }
         let mut mutation = self.state.mutation();
         for (name, value) in &self.records {
             mutation.set_record(name, value.clone())?;
@@ -808,6 +840,13 @@ impl Engine {
         sql: &str,
         mut params: Option<Vec<Value>>,
     ) -> Result<(Vec<String>, Rows)> {
+        if let Some(prepared) = self.statements.remove(sql) {
+            if !prepared.quick {
+                yield_now().await;
+            }
+            return self.run_prepared(sql, prepared.statement, params).await;
+        }
+        yield_now().await;
         let mut remaining = sql;
         let mut rows = None;
         loop {
@@ -815,7 +854,7 @@ impl Engine {
                 return Err(ENDED.into());
             }
             self.poisoned = true; // cancellation/error requires discarding the session
-            let connection = self.connection.as_ref().unwrap();
+            let connection = Arc::clone(self.connection.as_ref().unwrap());
             let prepared = match connection.consume_stmt(remaining) {
                 Ok(prepared) => prepared,
                 // A parse or name error: nothing ran.
@@ -830,6 +869,11 @@ impl Engine {
                 break;
             };
             remaining = &remaining[end..];
+            let only = rows.is_none()
+                && (params.is_some()
+                    || remaining
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == ';')
+                        .is_empty());
             if let Some(values) = params.take() {
                 // Refused before anything runs, so the session stays usable.
                 match connection.consume_stmt(remaining) {
@@ -867,7 +911,10 @@ impl Engine {
             let columns = (0..statement.num_columns())
                 .map(|i| statement.get_column_name(i).into_owned())
                 .collect();
-            let failure = match query_engine(&self.io, statement, limit).await {
+            let started = std::time::Instant::now();
+            let ran = query_engine(&self.io, &mut statement, limit).await;
+            let quick = started.elapsed() < QUICK;
+            let failure = match ran {
                 Ok(result) => {
                     rows = Some((columns, result));
                     None
@@ -884,8 +931,68 @@ impl Engine {
             if let Some(error) = failure {
                 return Err(error.into());
             }
+            if only {
+                self.keep(sql, statement, quick);
+            }
         }
         rows.ok_or_else(|| "the SQL contains no statements".into())
+    }
+
+    /// Run `statement`, prepared from `sql` before, again with `params`.
+    async fn run_prepared(
+        &mut self,
+        sql: &str,
+        mut statement: turso_core::Statement,
+        params: Option<Vec<Value>>,
+    ) -> Result<(Vec<String>, Rows)> {
+        if !self.is_usable() {
+            return Err(ENDED.into());
+        }
+        statement.clear_bindings();
+        if let Some(values) = params {
+            if values.len() != statement.parameters_count() {
+                return Err(format!(
+                    "the statement has {} parameters, {} values given",
+                    statement.parameters_count(),
+                    values.len()
+                )
+                .into());
+            }
+            for (index, value) in (1..).zip(values) {
+                statement.bind_at(std::num::NonZero::new(index).unwrap(), value)?;
+            }
+        }
+        self.poisoned = true;
+        let started = std::time::Instant::now();
+        let ran = query_engine(&self.io, &mut statement, self.max_result_bytes).await;
+        let quick = started.elapsed() < QUICK;
+        // Named as it ran: a schema changed since its last run prepares it anew.
+        let columns = (0..statement.num_columns())
+            .map(|i| statement.get_column_name(i).into_owned())
+            .collect();
+        if self.in_body && self.connection.as_ref().unwrap().get_auto_commit() {
+            return Err(Refused::boxed(BODY_ENDED));
+        }
+        let rows = match ran {
+            Ok(rows) => rows,
+            Err(Failure::Sql(error)) => {
+                self.poisoned = false;
+                return Err(error.into());
+            }
+            Err(Failure::Fatal(error)) => return Err(error),
+        };
+        self.poisoned = false;
+        self.keep(sql, statement, quick);
+        Ok((columns, rows))
+    }
+
+    /// Keep `statement`, of `sql`, which ran to its end, for the next call of
+    /// it, reset: a statement left mid-way holds the version it read, which
+    /// a checkpoint would wait for.
+    fn keep(&mut self, sql: &str, mut statement: turso_core::Statement, quick: bool) {
+        if self.statements.len() < MAX_STATEMENTS && statement.reset().is_ok() {
+            (self.statements).insert(sql.to_owned(), Prepared { statement, quick });
+        }
     }
 
     /// Run one statement of this crate's own, outside the transaction rules.
@@ -894,8 +1001,8 @@ impl Engine {
             return Err(ENDED.into());
         }
         self.poisoned = true;
-        let statement = self.connection.as_ref().unwrap().prepare(sql)?;
-        let rows = match query_engine(&self.io, statement, usize::MAX).await {
+        let mut statement = self.connection.as_ref().unwrap().prepare(sql)?;
+        let rows = match query_engine(&self.io, &mut statement, usize::MAX).await {
             Ok(rows) => rows,
             Err(Failure::Sql(error)) => return Err(error.into()),
             Err(Failure::Fatal(error)) => return Err(error),
@@ -932,7 +1039,7 @@ impl Drop for Engine {
         // leaves itself for the next session.
         if !self.park() {
             self.io.shutdown();
-            drop(self.connection.take());
+            self.disconnect();
         }
     }
 }
@@ -1045,7 +1152,7 @@ impl Drop for Running<'_> {
 /// most `max_bytes` of them.
 async fn query_engine(
     io: &KvIo,
-    mut statement: turso_core::Statement,
+    statement: &mut turso_core::Statement,
     max_bytes: usize,
 ) -> std::result::Result<Rows, Failure> {
     let mut running = Running {
