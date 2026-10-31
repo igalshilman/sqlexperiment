@@ -123,6 +123,13 @@ test('calls: typed, with options with the target; and literal', async () => {
     },
   });
   const ctx = fakeContext({ map: new Map(), service: 'caller', id: 'c1', calls, answer: () => 5 });
+  // A client is no thenable: awaited, it is itself, and calls nothing.
+  const awaited = restate.sessionObject({
+    name: 'awaited',
+    handlers: { client: async (c) => typeof (await Promise.resolve(c.rpc(account, 'bob'))).balance },
+  });
+  assert.equal(await invoke(awaited, 'client', fakeContext({ map: new Map(), service: 'awaited', calls })), 'function');
+  assert.deepEqual(calls, []);
   assert.deepEqual(await invoke(caller, 'call', ctx), [5, 5]);
   assert.deepEqual(calls, [
     { service: 'account', method: 'balance', key: 'bob', parameter: undefined, idempotencyKey: 'c1:balance' },
@@ -268,6 +275,7 @@ const resettable = restate.sessionObject({
   handlers: {
     fill: async (ctx) => {
       await LIBRARY.ensure(ctx.db);
+      await ctx.db.execute('CREATE TABLE IF NOT EXISTS sqliteusers (v TEXT)'); // a name LIKE 'sqlite_%' matches
       await ctx.db.execute("INSERT INTO items VALUES ('a'), ('b')");
       await ctx.db.execute("INSERT INTO restate_library VALUES ('x')");
       await ctx.db.execute('CREATE TABLE extra (v TEXT)');
@@ -287,6 +295,7 @@ const resettable = restate.sessionObject({
       }),
   },
   views: {
+    sqliteNamed: async (ctx) => ctx.db.query("SELECT name FROM sqlite_schema WHERE name = 'sqliteusers'"),
     state: async (ctx) => ({
       items: await ctx.db.get<{ n: number }>('SELECT n FROM counted'),
       starts: await ctx.db.query('SELECT at FROM starts'),
@@ -305,7 +314,13 @@ test('reset empties the database in a transaction, with the schemas applied agai
     items: { n: 2 },
     starts: [{ at: 0 }, { at: 0 }],
     library: [{ v: 'x' }],
-    tables: [{ name: 'extra' }, { name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+    tables: [
+      { name: 'extra' },
+      { name: 'items' },
+      { name: 'restate_library' },
+      { name: 'sqliteusers' },
+      { name: 'starts' },
+    ],
   });
 
   const sends: Made[] = [];
@@ -316,6 +331,7 @@ test('reset empties the database in a transaction, with the schemas applied agai
     library: [],
     tables: [{ name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
   });
+  assert.deepEqual(await invoke(resettable, 'sqliteNamed', ctx()), []);
   assert.deepEqual(
     sends.map(({ method, key }) => [method, key]),
     [['fill', 'other']],
@@ -327,6 +343,12 @@ test('reset empties the database in a transaction, with the schemas applied agai
     items: { n: 2 },
     starts: [{ at: 7 }, { at: 0 }, { at: 0 }],
     library: [{ v: 'x' }],
-    tables: [{ name: 'extra' }, { name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+    tables: [
+      { name: 'extra' },
+      { name: 'items' },
+      { name: 'restate_library' },
+      { name: 'sqliteusers' },
+      { name: 'starts' },
+    ],
   });
 });

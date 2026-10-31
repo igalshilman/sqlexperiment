@@ -74,8 +74,9 @@ export type SendClient<D> = {
 /**
  * Calls: `ctx.rpc(service)` or `ctx.rpc(object, key)` for a typed client, with
  * the options of its calls last; or `ctx.rpc({ service, key, handler, input })`
- * for a target known only at run time. An object or a workflow needs its key,
- * a service has none: the call fails at once otherwise.
+ * for a target known only at run time. A typed client of an object or a
+ * workflow needs its key, and one of a service has none: it fails at once
+ * otherwise. A literal target names no kind: its `key` is the caller's to give.
  */
 export interface Rpc {
   <D extends Definition>(target: D, options?: CallOptions): Client<D>;
@@ -121,7 +122,9 @@ function proxy(call: (method: string, input: unknown) => unknown): never {
   return new Proxy(
     {},
     {
-      get: (_, method) => (typeof method === 'string' ? (input?: unknown) => call(method, input) : undefined),
+      // Not a thenable: `await ctx.rpc(def, key)` gives the client, not a call of `then`.
+      get: (_, method) =>
+        typeof method === 'string' && method !== 'then' ? (input?: unknown) => call(method, input) : undefined,
     },
   ) as never;
 }

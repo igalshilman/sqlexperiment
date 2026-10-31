@@ -213,21 +213,19 @@ describe('the sends of a transaction', () => {
     expect(sets.at(-1)).toBe(HEAD);
   });
 
-  it('leaves out of the outbox the sends made before a commit', async () => {
+  it('empties the outbox as soon as the sends are made, before the handler ends', async () => {
     const o = object();
     const a = o.attempt();
-    await a.end(async () => {
-      await transfer(a);
-      const first = await o.outbox();
-      expect(first).toHaveLength(2);
-      // The first's sends are made after its commit, and before the second's:
-      // Restate stores them whenever it stores that commit, which drops them.
-      await transfer(a);
-      const second = await o.outbox();
-      expect(second).toHaveLength(2);
-      expect(second).not.toContain(first[0]);
-    });
+    // A suspension after the transaction: the attempt ends there, and its end stores nothing.
+    await transfer(a);
+    a.abort();
+    // Made, then emptied by a commit after them: an attempt that resumes the
+    // long wait makes them no more.
+    expect(a.sent).toHaveLength(2);
     expect(await o.outbox()).toEqual([]);
+    const next = o.attempt();
+    await next.end(() => next.db.values('SELECT 1'));
+    expect(next.sent).toEqual([]);
   });
 
   it("keeps a send's delay and its own idempotency key", async () => {

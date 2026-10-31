@@ -447,7 +447,14 @@ export class Attempt {
         return result;
       }),
     );
-    if (outgoing !== undefined) this.make(outgoing);
+    if (outgoing !== undefined) {
+      this.make(outgoing);
+      // Emptied at once, by a commit after the sends, which Restate stores
+      // before it: left in the outbox until the handler's end, they would be
+      // made again by an attempt that resumes a long wait (an approval), past
+      // the idempotency retention that drops a repeat.
+      await this.call((db) => this.flush(db));
+    }
     return value;
   }
 

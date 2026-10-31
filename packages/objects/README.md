@@ -157,15 +157,18 @@ storage). Once the commit is done the session makes them, each with an
 idempotency key of the transaction, `transaction/<id>/<index>` (or the
 send's own key), with a random id of the transaction. Restate keeps an
 attempt's commands in the order they were made, so a send is stored
-whenever a commit made after it is: the next transaction's commit leaves
-this attempt's sends out of the outbox, and the handler's end empties it
-with a commit of its own. An exclusive attempt opens its database as it
-starts, and makes again the sends the outbox still holds, with the same
-keys, and with what remains of their delays; Restate drops a send whose key
-it has seen. So each send of a committed transaction is made once, even when
-a new attempt never uses the database, and a send of a transaction rolled
-back or lost is not made. A transaction without sends costs nothing more; a
-handler whose transactions sent costs one more commit at its end. A send has
+whenever a commit made after it is: right after making them, the
+transaction empties the outbox with a commit of its own, before
+`transaction()` resolves. So an attempt that suspends later (a wait for an
+approval, say) leaves nothing to make again when it resumes, days later and
+past the retention of their keys. An attempt that ends between the two
+commits leaves them in the outbox: the next exclusive attempt opens its
+database as it starts, and makes them again, with the same keys and what
+remains of their delays; Restate drops a send whose key it has seen. So each
+send of a committed transaction is made once, even when a new attempt never
+uses the database, and a send of a transaction rolled back or lost is not
+made. A transaction without sends costs nothing more; one with sends costs
+one more commit. A send has
 no invocation id. Make calls before a transaction, with an idempotency key
 of their own, and record their outcome in it, as the shop's `Orders` does;
 its `expire` is a send of `tx`.

@@ -107,7 +107,7 @@ const behind = (applied: Applied, schemas: readonly Schema[]) =>
  */
 export async function dropAll(tx: ConnectionTransaction, schemas: readonly Schema[]) {
   const made = await tx.query<{ type: string; name: string }>(
-    "SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+    "SELECT type, name FROM sqlite_schema WHERE substr(name, 1, 7) != 'sqlite_'",
   );
   // A trigger or view may name a table; an index goes with its table.
   for (const type of ['trigger', 'view', 'table']) {
