@@ -64,10 +64,11 @@ Restate, wherever it is.
 ## Choose a framework
 
 The same agent runs on each of them: `agent({ name, ...options })`, with
-the handlers `chat` (a message in, the answer out) and `messages` (the
-conversation so far), `status` (what it is doing), `stop` and `steer` (the
-message it answers), `clear` (forget it all), `sync`, `notifications` and
-`watch` (to follow it), and `signal` and `pending` ([Signals](#signals)).
+the handler `chat` (a message in, the answer out), and the views
+`messages` (the conversation so far), `status` (what it is doing), `stop`
+and `steer` (the message it answers), `clear` (forget it all), `sync`,
+`notifications` and `watch` (to follow it), and `signal` and `pending`
+([Signals](#signals)).
 
 | Import                                                | Framework                       | Choose it when                                                                                |
 | ----------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -505,8 +506,9 @@ next step (as `steer`); else as a message of its own (as `chat`). A turn
 that ends, or is stopped, before it takes it answers it after: a delivery is
 never dropped, as a steer to a stopped turn is.
 
-The same delivery is yours from any handler, for events of other kinds (a
-queue, a schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
+The same delivery is yours from any handler (a session object's, or a
+service's or workflow's of the SDK), for events of other kinds (a queue, a
+schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
 Every `object()` and `agent()` knows its companion, `companionOf(agent, key)`
 (its `signals` object and key), so whoever holds an agent can reach it.
 
@@ -553,7 +555,6 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-session-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

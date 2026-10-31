@@ -100,7 +100,6 @@ conversation, and a handler of yours serves that table, for a profile page
 say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-session-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

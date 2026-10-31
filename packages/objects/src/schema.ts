@@ -1,11 +1,11 @@
 // The schema of an object's databases: each key's database is made by the
-// same steps, in order, applied once per key, where its first handler opens
-// it. A database keeps how far each schema got in its record `schema` (beside
+// same steps, in order, applied once per key, as its first exclusive attempt
+// opens it. A database keeps how far each schema got in its record `schema` (beside
 // its tables, in none of them), committed with the steps, so a step
 // added later (a column, an index) runs on each key's database once, as that
 // key is next opened:
 //
-//   const notes = restate.object({
+//   const notes = restate.sessionObject({
 //     name: 'notes',
 //     schema: ['CREATE TABLE notes (text TEXT NOT NULL)', 'ALTER TABLE notes ADD COLUMN at TEXT'],
 //     handlers: { ... },
@@ -15,8 +15,8 @@
 // data, say). Steps are never changed or removed once they ran: a change is
 // a step of its own.
 //
-// A shared handler applies the steps its key's database lacks in its own
-// session, which stores nothing, then reads: a key never written reads as
+// A view applies the steps its key's database lacks in its own session,
+// which stores nothing, then reads: a key never written reads as
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
 // they use them, in any object: internal, from restate-session-objects/internal.

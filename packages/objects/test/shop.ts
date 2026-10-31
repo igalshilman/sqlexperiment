@@ -6,16 +6,16 @@
 // - Each handler dedupes on a stable id it is given (the order id, a restock
 //   id), so running it twice changes nothing the second time.
 // - Each call has an idempotency key made from the request id
-//   (`ctx.request().id`, the same on every attempt of an invocation) and
+//   (`ctx.request.id`, the same on every attempt of an invocation) and
 //   what the call is for. So a retried attempt reaches the invocation the
 //   first one started (and gets its result) instead of starting another.
 //   Without a key, each attempt's call would be a new one.
 // - The `expire` message is a send of the transaction that stores the order
-//   (`tx` of `ctx.transaction`): it is made once the order commits, exactly
+//   (`tx` of `ctx.db.transaction`): it is made once the order commits, exactly
 //   once, so it needs no key of its own.
 // - A call is made outside any transaction: an `Orders` handler reads the
 //   order, calls the warehouse, then records the outcome. Only the `db` and
-//   `tx` of `ctx.transaction` are part of a transaction; a call made inside
+//   `tx` of `ctx.db.transaction` are part of a transaction; a call made inside
 //   its body would be made whether or not it commits, and would hold the
 //   transaction open while it waits. The handler is exclusive, so nothing
 //   changes the order between the read and the write.

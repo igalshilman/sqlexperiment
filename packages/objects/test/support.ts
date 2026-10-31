@@ -1,5 +1,5 @@
 // Test support: an object's state in memory, and an attempt of a handler over
-// it, with restate-session-objects's own `ctx.db` and `ctx.transaction`, through crashes
+// it, with restate-session-objects's own `ctx.db`, through crashes
 // and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-session-objects';
@@ -67,7 +67,7 @@ export interface AttemptOptions {
 }
 
 /**
- * `ctx.db` and `ctx.transaction` of an attempt, restate-session-objects's own, over
+ * `ctx.db` of an attempt, restate-session-objects's own, over
  * `map`, and `end`, which runs the handler and ends the attempt's session
  * as an object's handler does. Each attempt is a database of its own in this
  * process (a namespace of its own), so that one a crash abandoned does not

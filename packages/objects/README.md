@@ -36,7 +36,8 @@ whose state is a SQL database per key:
 
 - **`handlers`** run one at a time per key, each with a `SessionContext`;
 - **`views`** run beside them, at any time, each with a `ViewContext`: they
-  read the database as committed at their first read, and write nothing.
+  read the database as committed at their first read, and write nothing
+  (a write fails: the database is query-only).
 
 A name is a handler or a view, not both. Each is a function, or
 `{ handler, ...options }` with the SDK's handler options (`input`, `output`,
@@ -93,7 +94,8 @@ over the object's state, with the process's page cache.
 - Each statement outside a transaction is its own commit; one that changes
   nothing writes nothing. `ctx.db.transaction(tx => ...)` commits several
   as one: when its body resolves, or rolls back when it rejects. Each commit
-  is one round trip, so writes grouped in a transaction cost one.
+  is one round trip, so writes grouped in a transaction cost one (one more
+  if it sends: see the outbox, below).
 - Calls run one at a time, in call order; a transaction's statements too,
   even awaited together. A transaction holds `ctx.db` until it ends: a call
   to `ctx.db` from inside its body is refused (use its `tx`).
@@ -112,8 +114,8 @@ handler's own errors are as in any handler.
 
 **The schema.** `schema` is the steps that make each key's database, in
 order: statements, or async functions of the transaction (to move data).
-They are applied once per key, in one transaction, by the first handler of
-the key to use its database. How far each database got is a record beside
+They are applied once per key, in one transaction, by the first attempt
+of a handler of the key, which opens its database as it starts. How far each database got is a record beside
 its tables, committed with the steps, so a step added later (a column, an
 index) runs on each key's database once. A step never changes once it ran:
 a change is a step of its own. A view of a key never written reads empty
@@ -164,7 +166,7 @@ approval, say) leaves nothing to make again when it resumes, days later and
 past the retention of their keys. An attempt that ends between the two
 commits leaves them in the outbox: the next exclusive attempt opens its
 database as it starts, and makes them again, with the same keys and what
-remains of their delays; Restate drops a send whose key it has seen. So each
+remains of their delays, counted from the commit; Restate drops a send whose key it has seen. So each
 send of a committed transaction is made once, even when a new attempt never
 uses the database, and a send of a transaction rolled back or lost is not
 made. A transaction without sends costs nothing more; one with sends costs
@@ -347,7 +349,8 @@ while the agent works, say). It opens as of its first read, and reads that
 snapshot throughout, whatever the handlers commit meanwhile; only a view
 that outlives 16 of their commits fails, and Restate retries it
 ([the reader](native/src/state/docs/DESIGN.md#readers)). Its `db` has no
-`execute` or `transaction`, and its context no `send`.
+`execute` or `transaction`, and its context no `send`; a write through
+`query` fails, as its session is query-only.
 
 ```ts
 views: {

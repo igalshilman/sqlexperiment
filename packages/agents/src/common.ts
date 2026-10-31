@@ -270,9 +270,10 @@ export const aborted = (signal: AbortSignal) =>
  *   curl localhost:8080/assistant/alice/chat --json '"Hi"'
  *
  * While it answers, the object's `status` says so (its {@link Turn}). Its
- * invocation's cancellation (Restate's, explicit: `ctx.cancellation()`)
- * aborts {@link cancellationOf} its context, whenever it comes, and cancels
- * the calls its tools made (`cancelPreviousCalls()`): the agent's `prompt`
+ * invocation's cancellation (Restate's, explicit: `cancelled(ctx)` of
+ * restate-session-objects/internal) aborts {@link cancellationOf} its
+ * context, whenever it comes, and cancels the calls its tools made
+ * (`cancelCalls(ctx)`): the agent's `prompt`
  * ends the turn, and the handler fails with a `restate.CancelledError`.
  *
  * Messages steered to it (`steer`) go to the agent's conversation at its next
