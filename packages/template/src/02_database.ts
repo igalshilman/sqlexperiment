@@ -13,11 +13,11 @@
  */
 import * as restate from 'restate-objects';
 
-const greeter = restate.object({
+const greeter = restate.sessionObject({
   name: 'greeter',
   schema: ['CREATE TABLE greetings (at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'],
   handlers: {
-    greet: async (ctx: restate.ObjectContext) => {
+    greet: async (ctx) => {
       await ctx.db.execute('INSERT INTO greetings DEFAULT VALUES');
       const greetings = await ctx.db.query('SELECT at FROM greetings'); // rows, each an object by column name
       return `Hello, ${ctx.key}! (greeting ${greetings.length})`;

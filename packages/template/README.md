@@ -5,14 +5,14 @@ agents. Each file builds on the ones before it, and runs on its own.
 
 | Lesson                                       | Concept                                                   |
 | -------------------------------------------- | --------------------------------------------------------- |
-| [`01_greeter.ts`](src/01_greeter.ts)         | A virtual object: handlers, called by key                 |
+| [`01_greeter.ts`](src/01_greeter.ts)         | A virtual object: `restate.sessionObject`, called by key  |
 | [`02_database.ts`](src/02_database.ts)       | A SQLite database per key: `ctx.db`, `schema`             |
-| [`03_shared.ts`](src/03_shared.ts)           | Shared handlers: reading beside the writer                |
+| [`03_views.ts`](src/03_views.ts)             | Views: reading beside the writer                          |
 | [`04_schema.ts`](src/04_schema.ts)           | A schema that grows: a step per change                    |
-| [`05_transaction.ts`](src/05_transaction.ts) | All or nothing: `ctx.transaction`                         |
+| [`05_transaction.ts`](src/05_transaction.ts) | All or nothing: `ctx.db.transaction`                      |
 | [`06_retries.ts`](src/06_retries.ts)         | Retries run the handler again: an id makes it change once |
 | [`07_calls.ts`](src/07_calls.ts)             | Calling another object, with an idempotency key           |
-| [`08_sends.ts`](src/08_sends.ts)             | Sends that commit with the rows: `tx`                     |
+| [`08_sends.ts`](src/08_sends.ts)             | Sends that commit with the rows: `tx.send`                |
 | [`09_prompt.ts`](src/09_prompt.ts)           | A model in a handler: `pi.prompt`, answered once          |
 | [`10_agent.ts`](src/10_agent.ts)             | An agent: a conversation per key                          |
 | [`11_tool.ts`](src/11_tool.ts)               | A tool the model calls                                    |

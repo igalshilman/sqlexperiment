@@ -1,7 +1,7 @@
 /**
  * 05 · All or nothing: transactions
  *
- * Each statement on `ctx.db` commits on its own. `ctx.transaction` commits
+ * Each statement on `ctx.db` commits on its own. `ctx.db.transaction` commits
  * several as one: all of them once its body returns, or none if it throws (an
  * SQL error, such as a failed CHECK, throws).
  *
@@ -12,7 +12,7 @@
  */
 import * as restate from 'restate-objects';
 
-const wallet = restate.object({
+const wallet = restate.sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE balance (amount INTEGER NOT NULL CHECK (amount >= 0))',
@@ -21,19 +21,20 @@ const wallet = restate.object({
   ],
   handlers: {
     /** Change the balance by `change` (negative to spend), and record the change: both, or neither. */
-    add: (ctx: restate.ObjectContext, change: number) =>
-      ctx.transaction(async ({ db }) => {
-        await db.execute('INSERT INTO history (change) VALUES (?)', [change]);
+    add: (ctx, change: number) =>
+      ctx.db.transaction(async (tx) => {
+        await tx.execute('INSERT INTO history (change) VALUES (?)', [change]);
         // Below zero, this throws, and the insert above rolls back with it.
-        await db.execute('UPDATE balance SET amount = amount + ?', [change]);
-        const balance = await db.get<{ amount: number }>('SELECT amount FROM balance');
+        await tx.execute('UPDATE balance SET amount = amount + ?', [change]);
+        const balance = await tx.get<{ amount: number }>('SELECT amount FROM balance');
         return balance?.amount;
       }),
-
-    history: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
+  },
+  views: {
+    history: async (ctx) => {
       const rows = await ctx.db.query<{ change: number }>('SELECT change FROM history ORDER BY rowid');
       return rows.map(({ change }) => change);
-    }),
+    },
   },
 });
 

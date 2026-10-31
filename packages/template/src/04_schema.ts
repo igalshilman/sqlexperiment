@@ -11,21 +11,20 @@
  */
 import * as restate from 'restate-objects';
 
-const greeter = restate.object({
+const greeter = restate.sessionObject({
   name: 'greeter',
   schema: [
     'CREATE TABLE greetings (at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)', // 02's
     'ALTER TABLE greetings ADD COLUMN mood TEXT', // new: runs once on each key's database
   ],
   handlers: {
-    greet: async (ctx: restate.ObjectContext, mood: string) => {
+    greet: async (ctx, mood: string) => {
       await ctx.db.execute('INSERT INTO greetings (mood) VALUES (?)', [mood]);
       return `Hello, ${ctx.key}! You look ${mood}.`;
     },
-
-    history: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
-      ctx.db.query<{ at: string; mood: string }>('SELECT at, mood FROM greetings ORDER BY rowid'),
-    ),
+  },
+  views: {
+    history: async (ctx) => ctx.db.query<{ at: string; mood: string }>('SELECT at, mood FROM greetings ORDER BY rowid'),
   },
 });
 

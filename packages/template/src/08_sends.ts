@@ -2,7 +2,7 @@
  * 08 · Sends that commit with the rows
  *
  * A send is a call that does not wait for its answer. A send made in a
- * transaction, with its `tx`, is part of it: Restate makes it once the
+ * transaction, with its `tx.send`, is part of it: Restate makes it once the
  * transaction commits, and never if it rolls back. Here, the money leaves
  * alice's account and is sent to bob's together, or not at all.
  *
@@ -14,34 +14,35 @@
  */
 import * as restate from 'restate-objects';
 
-const balanceOf = async (db: restate.DatabaseWriter) =>
+const balanceOf = async (db: restate.DatabaseReader) =>
   (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
 
-const account = restate.object({
+const account = restate.sessionObject({
   name: 'account',
   schema: ['CREATE TABLE entries (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)'],
   handlers: {
     /** Add `amount`, once per `id` (06). */
-    deposit: async (ctx: restate.ObjectContext, { id, amount }: { id: string; amount: number }) => {
+    deposit: async (ctx, { id, amount }: { id: string; amount: number }) => {
       await ctx.db.execute('INSERT OR IGNORE INTO entries (id, amount) VALUES (?, ?)', [id, amount]);
       return balanceOf(ctx.db);
     },
 
     /** Move `amount` to the account `to`, once per transfer (06). */
-    transfer: (ctx: restate.ObjectContext, { to, amount }: { to: string; amount: number }) =>
-      ctx.transaction(async ({ db, tx }) => {
-        const id = ctx.request().id; // the transfer's id: the same on every attempt
+    transfer: (ctx, { to, amount }: { to: string; amount: number }) =>
+      ctx.db.transaction(async (tx) => {
+        const id = ctx.request.id; // the transfer's id: the same on every attempt
         // A retry finds the transfer committed, and its send made: it moves nothing.
-        const done = await db.get('SELECT 1 FROM entries WHERE id = ?', [id]);
+        const done = await tx.get('SELECT 1 FROM entries WHERE id = ?', [id]);
         if (done === undefined) {
-          if ((await balanceOf(db)) < amount) throw new restate.TerminalError('Insufficient funds');
-          await db.execute('INSERT INTO entries (id, amount) VALUES (?, ?)', [id, -amount]);
-          tx.objectSendClient(account, to).deposit({ id, amount }); // made once this commits
+          if ((await balanceOf(tx)) < amount) throw new restate.TerminalError('Insufficient funds');
+          await tx.execute('INSERT INTO entries (id, amount) VALUES (?, ?)', [id, -amount]);
+          tx.send(account, to).deposit({ id, amount }); // made once this commits
         }
-        return balanceOf(db);
+        return balanceOf(tx);
       }),
-
-    balance: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => balanceOf(ctx.db)),
+  },
+  views: {
+    balance: async (ctx) => balanceOf(ctx.db),
   },
 });
 

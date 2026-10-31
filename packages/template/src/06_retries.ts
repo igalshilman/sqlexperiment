@@ -17,17 +17,17 @@ import * as restate from 'restate-objects';
 const failed = new Set<string>();
 
 /** Fail the first attempt of each invocation, as a crash would: Restate retries it. */
-function failFirstAttempt(ctx: restate.ObjectContext) {
-  if (failed.has(ctx.request().id)) return;
-  failed.add(ctx.request().id);
+function failFirstAttempt(ctx: restate.SessionContext) {
+  if (failed.has(ctx.request.id)) return;
+  failed.add(ctx.request.id);
   throw new Error('A crash, after the deposit committed');
 }
 
-const savings = restate.object({
+const savings = restate.sessionObject({
   name: 'savings',
   schema: ['CREATE TABLE deposits (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)'],
   handlers: {
-    deposit: async (ctx: restate.ObjectContext, { id, amount }: { id: string; amount: number }) => {
+    deposit: async (ctx, { id, amount }: { id: string; amount: number }) => {
       // The second time, the deposit's id is there already: OR IGNORE skips it.
       await ctx.db.execute('INSERT OR IGNORE INTO deposits (id, amount) VALUES (?, ?)', [id, amount]);
       failFirstAttempt(ctx);

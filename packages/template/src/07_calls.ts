@@ -15,12 +15,12 @@
  */
 import * as restate from 'restate-objects';
 
-const nickname = restate.object({
+const nickname = restate.sessionObject({
   name: 'nickname',
   schema: ['CREATE TABLE owner (user TEXT NOT NULL)'],
   handlers: {
     /** The nickname's owner: `user`, unless someone claimed it first. */
-    claim: async (ctx: restate.ObjectContext, user: string) => {
+    claim: async (ctx, user: string) => {
       await ctx.db.execute('INSERT INTO owner (user) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM owner)', [user]);
       const owner = await ctx.db.get<{ user: string }>('SELECT user FROM owner');
       return owner!.user; // the insert above made sure there is one
@@ -28,14 +28,13 @@ const nickname = restate.object({
   },
 });
 
-const user = restate.object({
+const user = restate.sessionObject({
   name: 'user',
   schema: ['CREATE TABLE nicknames (nickname TEXT NOT NULL)'],
   handlers: {
-    rename: async (ctx: restate.ObjectContext, name: string) => {
-      const owner = await ctx
-        .objectClient(nickname, name)
-        .claim(ctx.key, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:claim` }));
+    rename: async (ctx, name: string) => {
+      // A retry must not claim twice: the key is the same on every attempt.
+      const owner = await ctx.rpc(nickname, name, { idempotencyKey: `${ctx.request.id}:claim` }).claim(ctx.key);
       if (owner !== ctx.key) throw new restate.TerminalError(`${name} is ${owner}'s`);
       await ctx.db.execute('INSERT INTO nicknames (nickname) VALUES (?)', [name]);
       return `${ctx.key} is now ${name}`;

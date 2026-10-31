@@ -10,20 +10,21 @@
  */
 import * as restate from 'restate-objects';
 
-const notes = restate.object({
+const notes = restate.sessionObject({
   name: 'notes',
   // The schema of each key's database: its steps, applied once per key (a step added later runs then).
   schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
-    add: async (ctx: restate.ObjectContext, note: string) => {
+    add: async (ctx, note: string) => {
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
-
-    /** Shared: it reads while `add` writes; a key with no notes yet has none. */
-    list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
+  },
+  views: {
+    /** A view: it reads while `add` writes; a key with no notes yet has none. */
+    list: async (ctx) => {
       const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
       return rows.map(({ text }) => text);
-    }),
+    },
   },
 });
 
