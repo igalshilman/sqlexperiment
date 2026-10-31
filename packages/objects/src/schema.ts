@@ -20,8 +20,8 @@
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
 // they use them, in any object: internal, from restate-objects/internal.
-import type { Database } from './database.ts';
-import type { SqlDatabase, SqlSession } from './session.ts';
+import type { Database, SqlDatabase, Transaction } from './database.ts';
+import type { SqlSession } from './session.ts';
 
 /** The database's record of how many steps of the schema `name` it has. */
 const recordOf = (name: string) => `schema/${name}`;
@@ -68,7 +68,7 @@ export async function apply(db: Database, schemas: readonly Schema[]) {
   await db.transaction(async (tx) => {
     // Again, now that the transaction holds the session: a call before it
     // may have applied them.
-    for (const { schema, done } of await behind(db, schemas)) {
+    for (const { schema, done } of await behind(tx, schemas)) {
       for (const step of schema.steps.slice(done)) {
         await (typeof step === 'string' ? tx.execute(step) : step(tx));
       }
@@ -78,7 +78,7 @@ export async function apply(db: Database, schemas: readonly Schema[]) {
 }
 
 /** The schemas `db` lacks steps of, with how many it has. */
-async function behind(db: Database, schemas: readonly Schema[]) {
+async function behind(db: Database | Transaction, schemas: readonly Schema[]) {
   const applied = await Promise.all(
     schemas.map(async (schema) => {
       const record = await db.record(recordOf(schema.name));

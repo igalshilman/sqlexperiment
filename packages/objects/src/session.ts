@@ -9,21 +9,20 @@ import { randomUUID } from 'node:crypto';
 import type * as restate from '@restatedev/restate-sdk';
 import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
-import { open, type Database, type SqlParam, type SqlValue, type Store, type Transaction } from './database.ts';
+import {
+  open,
+  type Database,
+  type SqlDatabase,
+  type SqlParam,
+  type SqlQueryResult,
+  type SqlValue,
+  type Store,
+  type Transaction,
+} from './database.ts';
 import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 
-export type { SqlParam, SqlValue };
-
-/** SQL: the object's database, or one transaction of it. */
-export interface SqlDatabase {
-  /** Run SQL and return its rows; parameters bind to a single statement. */
-  query(sql: string, params?: SqlParam[]): Promise<SqlValue[][]>;
-  /** {@link query}, with the column names of the statement whose rows these are. */
-  queryColumns(sql: string, params?: SqlParam[]): Promise<{ columns: string[]; rows: SqlValue[][] }>;
-  /** Run SQL (one or more statements), discarding rows. */
-  execute(sql: string, params?: SqlParam[]): Promise<void>;
-}
+export type { SqlDatabase, SqlParam, SqlQueryResult, SqlValue };
 
 /**
  * The object's database, `ctx.db`, for the whole handler: each statement
@@ -417,7 +416,7 @@ export class SqlAttempt {
         }
         // The outbox as committed, but the sends stored since, and this
         // transaction's: unchanged, it is not written again.
-        const outbox = await this.#unstored(db);
+        const outbox = await this.#unstored(handle);
         if (sends.length > 0) {
           outgoing = { id: randomUUID(), sends };
           outbox.push(outgoing);
@@ -446,7 +445,7 @@ export class SqlAttempt {
   }
 
   /** The outbox as committed, but the transactions this attempt made the sends of: a commit made after them stores them first. */
-  async #unstored(db: Database): Promise<Outgoing[]> {
+  async #unstored(db: Database | Transaction): Promise<Outgoing[]> {
     return decodeOutbox(await db.record(OUTBOX)).filter(({ id }) => !this.#made.has(id));
   }
 

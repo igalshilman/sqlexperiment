@@ -287,7 +287,7 @@ test('a call running meanwhile does not make the session look unusable', async (
     await assert.rejects(
       db.transaction(async (tx) => {
         await tx.execute('INSERT INTO t VALUES(1)');
-        for (let j = 0; j < 4; j++) void db.record('outbox');
+        for (let j = 0; j < 4; j++) void tx.record('outbox');
         throw new Error('no');
       }),
       /no/,
@@ -306,7 +306,7 @@ test('a call running meanwhile does not make the session look unusable', async (
 });
 
 /** A session's record `name`, as text. */
-const text = async (session: Database, name = 'outbox') => new TextDecoder().decode(await session.record(name));
+const text = async (db: Database | Transaction, name = 'outbox') => new TextDecoder().decode(await db.record(name));
 
 const bytes = (value: string) => new TextEncoder().encode(value);
 
@@ -317,14 +317,19 @@ test('records commit with their transaction, and only then', async () => {
   await db.execute('CREATE TABLE t(id INTEGER)');
   assert.equal(await text(db), '');
   // Even with a transaction that changes nothing; two records at once.
-  let inside: string | undefined;
+  // Inside, the transaction reads its own records; the session waits for it.
+  let before: string | undefined;
+  let after: string | undefined;
   await db.transaction(async (tx) => {
     await tx.query('SELECT * FROM t');
+    before = await text(tx);
     tx.setRecord('outbox', bytes('sends 1'));
     tx.setRecord('schema', bytes('1'));
-    inside = await text(db);
+    after = await text(tx);
+    await assert.rejects(text(db), /use the transaction handle/);
   });
-  assert.equal(inside, '');
+  assert.equal(before, '');
+  assert.equal(after, 'sends 1');
   assert.equal(await text(db), 'sends 1');
   assert.equal(await text(db, 'schema'), '1');
   // A rollback commits none; nor does a commit without records change them.
