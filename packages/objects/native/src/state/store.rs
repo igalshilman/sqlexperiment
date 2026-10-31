@@ -860,7 +860,9 @@ impl Snapshot {
             .filter(|name| self.is(name).is_none())
             .count();
         if self.durable.names().len() + new > MAX_NAMES {
-            return refuse("too many files".into());
+            return refuse(format!(
+                "a state holds at most {MAX_NAMES} files and records"
+            ));
         }
         Ok(())
     }

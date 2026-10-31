@@ -263,10 +263,10 @@ class SqlErrors {
 
 // A transaction's sends commit with it, in the database's record `outbox`
 // (beside its tables, in none of them), which holds each committed
-// transaction's sends until they are stored. They are made once the transaction commits; a later open
-// makes again those still in the outbox, with the same idempotency keys
-// (`transaction/<id>/<index>`, with a random id of the transaction), so
-// making them again is dropped. Restate keeps an attempt's commands in the
+// transaction's sends until they are stored. They are made once the
+// transaction commits; a later open makes again those still in the outbox,
+// with the same idempotency keys (`transaction/<id>/<index>`, with a random
+// id of the transaction), so making them again is dropped. Restate keeps an attempt's commands in the
 // order they were made, so a send made before a commit is stored whenever the
 // commit is: the next commit leaves the sends this attempt made out of the
 // outbox, and so does the end of the attempt.

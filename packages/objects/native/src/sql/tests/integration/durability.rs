@@ -392,7 +392,8 @@ fn an_overlapping_reader_keeps_its_view() -> Result<()> {
 }
 
 /// Two sessions of one owner that both write: the second flush would replace
-/// the head the first wrote, so it is refused.
+/// the head the first wrote, so it is refused, and so are the records set
+/// with it.
 #[test]
 fn a_second_concurrent_writer_is_refused() -> Result<()> {
     futures::executor::block_on(async {
@@ -406,10 +407,13 @@ fn a_second_concurrent_writer_is_refused() -> Result<()> {
         let first = Db::open(store.clone(), opts()).await?;
         let second = Db::open(store.clone(), opts()).await?;
         first.execute("INSERT INTO t VALUES(1, 0)").await?;
-        let refused = second.execute("INSERT INTO t VALUES(2, 0)").await;
+        second.begin().await?;
+        second.execute("INSERT INTO t VALUES(2, 0)").await?;
+        let refused = second.commit_with("sends".into()).await;
         assert!(refused.unwrap_err().to_string().contains("another state"));
         let db = Db::open(store.clone(), opts()).await?;
         assert_eq!(count(&db).await?, 1);
+        assert_eq!(db.outbox(), "");
         Ok(())
     })
 }
