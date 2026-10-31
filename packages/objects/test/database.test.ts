@@ -161,6 +161,30 @@ test('a write the store rejects is reported by the next sync', async () => {
   await db.close();
 });
 
+test('a store of a class has its methods called on it', async () => {
+  class MapStore implements Store {
+    private readonly values = new Map<string, Uint8Array>();
+    async get(key: string) {
+      return this.values.get(key);
+    }
+    set(key: string, value: Uint8Array) {
+      this.values.set(key, Uint8Array.from(value));
+    }
+    clear(key: string) {
+      this.values.delete(key);
+    }
+    async sync() {}
+    async keys() {
+      return [...this.values.keys()];
+    }
+  }
+  const db = await open(fresh(), new MapStore());
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  await db.execute('INSERT INTO t VALUES (1)');
+  assert.deepEqual(await db.query('SELECT id FROM t'), [[1]]);
+  await db.save();
+});
+
 test('a transaction holds the session: other calls wait until it ends', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');

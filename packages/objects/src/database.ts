@@ -1,7 +1,7 @@
 // A key's database, through the addon (`native/`): SQLite-compatible SQL,
 // kept in the object's state. The addon reads and writes the state through a
-// store (`objectStore` in session.ts); this module orders the calls and runs
-// transactions.
+// store (`objectStore` in session.ts), in the order it makes its requests
+// (`native/src/node.rs`); this module orders the calls and runs transactions.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { createRequire } from 'node:module';
@@ -47,10 +47,8 @@ interface Native {
   close(): Promise<void>;
 }
 
-type Request = [op: number, key: string, value: Uint8Array | null];
-
 const addon = load() as {
-  open(namespace: string, dispatch: (request: Request) => unknown, reader: boolean): Promise<Native>;
+  open(namespace: string, store: Store, reader: boolean): Promise<Native>;
 };
 
 /** The addon of this machine's platform: its package's (see platform.ts). */
@@ -68,47 +66,13 @@ function load(): unknown {
   }
 }
 
-// The store's operations, as the addon passes them.
-const GET = 0;
-const SET = 1;
-const CLEAR = 2;
-const SYNC = 3;
-const KEYS = 4;
-
 /**
  * Open the database of `namespace` over `store`. One process-wide page cache
  * serves every namespace. A `reader` reads beside the namespace's owner (a
  * shared handler), the state as of open, and writes nothing.
  */
 export async function open(namespace: string, store: Store, { reader = false } = {}): Promise<Database> {
-  // A failed write cannot fail its caller, which has moved on: the next sync
-  // reports it.
-  let failure: unknown;
-  const dispatch = ([op, key, value]: Request) => {
-    switch (op) {
-      case GET:
-        return store.get(key).then((v) => v ?? null);
-      case SET:
-      case CLEAR:
-        try {
-          if (op === SET) store.set(key, value!);
-          else store.clear(key);
-        } catch (error) {
-          failure ??= error;
-        }
-        return undefined;
-      case SYNC:
-        if (failure !== undefined) return Promise.reject(failure);
-        return store.sync().then(() => null);
-      case KEYS:
-        // Every key, one per line; none where the store cannot list them.
-        if (!store.keys) return Promise.resolve(null);
-        return store.keys().then((keys) => Buffer.from(keys.join('\n')));
-      default:
-        return Promise.reject(new Error(`unknown store operation ${op}`));
-    }
-  };
-  return new Database(await addon.open(namespace, dispatch, reader));
+  return new Database(await addon.open(namespace, store, reader));
 }
 
 // The transaction whose body is running, in that body's asynchronous context:

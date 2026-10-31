@@ -1,15 +1,17 @@
 //! Node.js bindings: SQL over a key/value store implemented in JavaScript.
 //!
-//! The host passes one dispatcher function, `([op, key, value])`, which
-//! `src/database.ts` builds from a store object `{ get, set, clear, sync, keys? }`. Every request
-//! goes through it in the order it was issued, so a read sees the writes
-//! before it. With `keys`, a checkpoint deletes the packs no checkpoint
-//! needs; a store without keeps its garbage.
+//! `open` takes the store, an object `{ get, set, clear, sync, keys? }`
+//! (`Store` in `src/database.ts`). Every request goes to it through one
+//! queue, in the order it was issued, so a read sees the writes before it:
+//! Rust reaches JavaScript only through a thread-safe function, and each such
+//! function is a queue of its own, with no order across them. So there is
+//! one, [`dispatcher`], which calls the store's method a request names.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
 //! loses only a suffix of them (see [`KvStore`]): a statement that commits
-//! queues its writes, then resolves at one `sync`.
+//! queues its writes, then resolves at one `sync`. With `keys`, a checkpoint
+//! deletes the packs no checkpoint needs; a store without keeps its garbage.
 //!
 //! Every database of the process is kept warm in one page cache
 //! ([`page_cache`]); a session itself, and its commits, is a
@@ -18,25 +20,114 @@ use crate::{KvStore, Numeric, PageCache, PageCacheConfig, Value};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use napi::bindgen_prelude::*;
-use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{JsValue, sys};
 use napi_derive::napi;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-const GET: u32 = 0;
-const SET: u32 = 1;
-const CLEAR: u32 = 2;
-const SYNC: u32 = 3;
-const KEYS: u32 = 4;
+/// What a request to the store does: the store's method it calls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Get = 0,
+    Set = 1,
+    Clear = 2,
+    Sync = 3,
+    Keys = 4,
+}
 
-type Args = (u32, String, Option<Buffer>);
-type Dispatch = ThreadsafeFunction<Args, Promise<Option<Uint8Array>>, Args, Status, false, true>;
+impl Op {
+    fn from_code(code: u32) -> Option<Op> {
+        [Op::Get, Op::Set, Op::Clear, Op::Sync, Op::Keys]
+            .into_iter()
+            .find(|op| *op as u32 == code)
+    }
+
+    fn method(self) -> &'static str {
+        match self {
+            Op::Get => "get",
+            Op::Set => "set",
+            Op::Clear => "clear",
+            Op::Sync => "sync",
+            Op::Keys => "keys",
+        }
+    }
+}
+
+/// A request, as the dispatcher's arguments: `(op, key, value)`.
+type Args = FnArgs<(u32, String, Option<Buffer>)>;
+/// What a request answers: a `get`'s value, the store's keys, or nothing.
+type Reply = Option<Either<Uint8Array, Vec<String>>>;
+type Dispatch = ThreadsafeFunction<Args, Promise<Reply>, Args, Status, false, true>;
+
+/// The queue that every request to `store` goes through: one function, run
+/// on the JavaScript thread, that calls the store's method for the request,
+/// with the store as `this`. A failed write cannot fail its caller, which
+/// has moved on: the next `sync`, and every one after it, rejects with its
+/// error.
+fn dispatcher(env: &Env, store: Object) -> Result<Dispatch> {
+    let failure = RefCell::new(None::<Error>);
+    let dispatch = env.create_function_from_closure::<Args, _, _>("dispatch", move |ctx| {
+        let store: Object = ctx.this()?;
+        let code: u32 = ctx.get(0)?;
+        let op = Op::from_code(code)
+            .ok_or_else(|| Error::from_reason(format!("unknown store operation {code}")))?;
+        let arg = |index: usize| ctx.get::<Unknown>(index).map(|value| value.raw());
+        let args = match op {
+            Op::Set => vec![arg(1)?, arg(2)?],
+            Op::Get | Op::Clear => vec![arg(1)?],
+            Op::Sync | Op::Keys => vec![],
+        };
+        if op == Op::Sync
+            && let Some(error) = &*failure.borrow()
+        {
+            return Err(error.try_clone()?);
+        }
+        let result = call(&store, op, &args);
+        if op == Op::Set || op == Op::Clear {
+            if let Err(error) = result {
+                failure.borrow_mut().get_or_insert(error);
+            }
+            return unsafe { <()>::to_napi_value(ctx.env.raw(), ()) };
+        }
+        result
+    })?;
+    // Typed as the queue calls it: each method it awaits answers a promise.
+    let dispatch =
+        unsafe { Function::<Args, Promise<Reply>>::from_napi_value(env.raw(), dispatch.raw()) }?;
+    dispatch
+        .bind(store)?
+        .build_threadsafe_function()
+        .callee_handled::<false>()
+        .weak::<true>()
+        .build()
+}
+
+/// `store[op](...args)`, with the store as `this`; a throw is its error.
+fn call(store: &Object, op: Op, args: &[sys::napi_value]) -> Result<sys::napi_value> {
+    let method: Unknown = store.get_named_property(op.method())?;
+    let env = store.value().env;
+    let mut result = std::ptr::null_mut();
+    napi::check_pending_exception!(env, unsafe {
+        sys::napi_call_function(
+            env,
+            store.raw(),
+            method.raw(),
+            args.len(),
+            args.as_ptr(),
+            &mut result,
+        )
+    })?;
+    Ok(result)
+}
 
 /// The JavaScript store's queue.
 struct JsQueue {
     dispatch: Dispatch,
+    /// Whether the store has `keys`.
+    lists_keys: bool,
 }
 
 fn io_error(error: impl std::fmt::Display) -> io::Error {
@@ -44,25 +135,24 @@ fn io_error(error: impl std::fmt::Display) -> io::Error {
 }
 
 impl JsQueue {
-    /// A request that answers: a read, or a sync.
-    async fn request(&self, op: u32, key: &str) -> io::Result<Option<Bytes>> {
+    /// A request that answers: a read, a sync, or the keys.
+    async fn request(&self, op: Op, key: &str) -> io::Result<Reply> {
         let promise = self
             .dispatch
-            .call_async_catch((op, key.to_owned(), None))
+            .call_async_catch((op as u32, key.to_owned(), None).into())
             .await
             .map_err(io_error)?;
-        let value = promise.await.map_err(io_error)?;
-        Ok(value.map(|value| Bytes::copy_from_slice(&value)))
+        promise.await.map_err(io_error)
     }
 
     /// Queue a write: a `set`, or a `clear` when `value` is `None`.
     fn queue(&self, key: &str, value: Option<Bytes>) -> io::Result<()> {
         let (op, value) = match value {
-            Some(value) => (SET, Some(Buffer::from(value.to_vec()))),
-            None => (CLEAR, None),
+            Some(value) => (Op::Set, Some(Buffer::from(value.to_vec()))),
+            None => (Op::Clear, None),
         };
         match self.dispatch.call(
-            (op, key.to_owned(), value),
+            (op as u32, key.to_owned(), value).into(),
             ThreadsafeFunctionCallMode::NonBlocking,
         ) {
             Status::Ok => Ok(()),
@@ -71,9 +161,22 @@ impl JsQueue {
     }
 }
 
+fn unexpected(op: Op) -> io::Error {
+    io_error(format!(
+        "the store's {} answered with the wrong type",
+        op.method()
+    ))
+}
+
 impl KvStore for JsQueue {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, io::Result<Option<Bytes>>> {
-        Box::pin(self.request(GET, key))
+        Box::pin(async move {
+            match self.request(Op::Get, key).await? {
+                None => Ok(None),
+                Some(Either::A(value)) => Ok(Some(Bytes::copy_from_slice(&value))),
+                Some(Either::B(_)) => Err(unexpected(Op::Get)),
+            }
+        })
     }
 
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
@@ -85,20 +188,21 @@ impl KvStore for JsQueue {
     }
 
     fn sync(&self) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async { self.request(SYNC, "").await.map(drop) })
+        Box::pin(async { self.request(Op::Sync, "").await.map(drop) })
     }
 
-    /// The store's keys, one per line; nothing where it has no `keys`.
     fn keys(&self) -> BoxFuture<'_, io::Result<Vec<String>>> {
         Box::pin(async move {
-            let Some(lines) = self.request(KEYS, "").await? else {
+            if !self.lists_keys {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "the store has no keys",
                 ));
-            };
-            let lines = std::str::from_utf8(&lines).map_err(io_error)?;
-            Ok(lines.lines().map(str::to_owned).collect())
+            }
+            match self.request(Op::Keys, "").await? {
+                Some(Either::B(keys)) => Ok(keys),
+                _ => Err(unexpected(Op::Keys)),
+            }
         })
     }
 }
@@ -129,22 +233,26 @@ async fn page_cache() -> io::Result<PageCache> {
     Ok(cache.insert(opened).clone())
 }
 
-/// Open the database of `namespace` over the store behind `dispatch`, kept
-/// warm in the process's page cache; see `src/database.ts` for the store
-/// object it is built from, and [`crate::Open::reader`] for a `reader`.
-#[napi(ts_return_type = "Promise<Database>")]
+/// Open the database of `namespace` over `store` (see the module's doc),
+/// kept warm in the process's page cache; see [`crate::Open::reader`] for a
+/// `reader`.
+#[napi(
+    ts_args_type = "namespace: string, store: Store, reader?: boolean",
+    ts_return_type = "Promise<Database>"
+)]
 pub(crate) fn open<'env>(
     env: &'env Env,
     namespace: String,
-    dispatch: Function<'env, Args, Promise<Option<Uint8Array>>>,
+    store: Object<'env>,
     reader: Option<bool>,
 ) -> Result<PromiseRaw<'env, Database>> {
-    let dispatch: Dispatch = dispatch
-        .build_threadsafe_function()
-        .callee_handled::<false>()
-        .weak::<true>()
-        .build()?;
-    let store = Arc::new(JsQueue { dispatch });
+    let lists_keys =
+        store.get_named_property::<Unknown>("keys")?.get_type()? == ValueType::Function;
+    let dispatch = dispatcher(env, store)?;
+    let store = Arc::new(JsQueue {
+        dispatch,
+        lists_keys,
+    });
     env.spawn_future(async move {
         let mut open = crate::Database::open(store).cached(&page_cache().await?, &namespace);
         if reader == Some(true) {
