@@ -4,6 +4,7 @@ import * as restate from 'restate-objects';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { settle } from '../src/calls.ts';
 
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
 const carts = restate.object({
@@ -169,6 +170,27 @@ describe("Restate's tools", () => {
     // Once answered, the same input is a call of its own.
     await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_4' });
     expect(next.made.map((m) => m.idempotencyKey)).toEqual(['inv1:call_1', 'inv1:call_3', 'inv1:call_4']);
+  });
+
+  it('make a call that answered again, until the framework stored its result', async () => {
+    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
+    const state = new Map<string, unknown>();
+    // An attempt makes the call, which answers; it crashes before the framework stores the result.
+    const first = context(state);
+    await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
+    // The next attempt's model makes it again, as a new tool call: it is the same call.
+    const next = context(state);
+    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
+    // The framework stores its result (under the new id), which a publish settles.
+    await settle(next.ctx, (id) => id === 'call_2');
+    // A later attempt's model making it again makes a call of its own.
+    const last = context(state);
+    await t.run({ order: '103' }, { ctx: last.ctx, callId: 'call_3' });
+    expect([...first.made, ...next.made, ...last.made].map((m) => m.idempotencyKey)).toEqual([
+      'inv1:call_1',
+      'inv1:call_1',
+      'inv1:call_3',
+    ]);
   });
 
   it('make two calls of the same input in one attempt', async () => {

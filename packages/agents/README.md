@@ -389,9 +389,10 @@ invocation's id and the call id), as Restate's tools do with each call they
 make: run again, it is the same call. OpenCode and the DeepSeek Harness tell
 the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
-if the input is the same (so a wait for an approval outlasts a restart). They
-keep the calls they wait for in the object's state, `restate-agents.calls`,
-for this. A tool of your own needs a way for the model to name the call it
+if the input is the same (so a wait for an approval outlasts a restart), and
+so is a call that answered just before the crash, until the framework has
+stored its result. They keep these calls in the object's state,
+`restate-agents.calls`, for this. A tool of your own needs a way for the model to name the call it
 retries (see their READMEs).
 
 **Tools for each invocation** (each user's, say) come with the options of

@@ -7,9 +7,9 @@
 // call: Restate calls carry an idempotency key made of the invocation id and
 // that id, so a tool call run again after a crash makes the same call, once.
 import * as restate from 'restate-objects';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { cancellationOf, type Configure, configured, ToolError } from './common.ts';
+import { callOf } from './calls.ts';
 import { signals, signalsOf } from './signals.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
@@ -108,64 +108,21 @@ export const tool = <S extends z.ZodObject>(options: {
 });
 
 /**
- * The Restate calls an invocation's tools made that have not answered yet,
- * in the object's state: each with the tool, its input as JSON, the call id
- * it was made with, and the attempt that made it, or last made it again.
- */
-interface OpenCalls {
-  invocation: string;
-  calls: { tool: string; input: string; callId: string; attempt: string }[];
-}
-
-/** The state key of the {@link OpenCalls}. */
-const OPEN_CALLS = 'restate-agents.calls';
-
-/** Each attempt's id, and its open calls, by its context. */
-const attempts = new WeakMap<object, { id: string; open: Promise<OpenCalls> }>();
-
-/**
  * `body`, a Restate call of tool `name` with `input`, made once however often
- * the tool call runs: it gets the call id that the call was first made with.
- * A crash or a suspension restarts the handler, and a framework then runs a
- * tool call that was cut off again with its id (pi, Claude, LangGraph), or
- * tells the model it was interrupted, and the model makes it again with a new
- * id (OpenCode, the DeepSeek Harness). Made again with the same input, it is
- * the call an earlier attempt made: its id, so the same idempotency key, so
- * the same Restate call (a wait for a signal, a sub-agent's task, a
- * workflow), which it waits for again.
+ * the tool call runs (see calls.ts): it gets the id of the call, which an
+ * earlier attempt may have made, and so its idempotency key.
  */
 async function once<T>(name: string, input: unknown, context: ToolCall, body: (call: ToolContext) => Promise<T>) {
   const { ctx } = context;
-  const invocation = ctx.request().id;
-  let attempt = attempts.get(ctx);
-  if (!attempt) {
-    const open = ctx
-      .get<OpenCalls>(OPEN_CALLS)
-      .then((o) => (o?.invocation === invocation ? o : { invocation, calls: [] }));
-    attempt = { id: randomUUID(), open };
-    attempts.set(ctx, attempt);
-  }
-  const { id } = attempt;
-  const open = await attempt.open;
-  const json = JSON.stringify(input);
-  let call =
-    open.calls.find((c) => c.callId === context.callId) ??
-    open.calls.find((c) => c.attempt !== id && c.tool === name && c.input === json);
-  if (call) call.attempt = id;
-  else open.calls.push((call = { tool: name, input: json, callId: context.callId, attempt: id }));
-  ctx.set(OPEN_CALLS, open);
-  const done = () => {
-    open.calls = open.calls.filter((c) => c !== call);
-    ctx.set(OPEN_CALLS, open);
-  };
+  const call = await callOf(ctx, name, input, context.callId);
   try {
-    const result = await body({ ctx, callId: call.callId, idempotencyKey: `${invocation}:${call.callId}` });
-    done();
+    const result = await body({ ctx, callId: call.id, idempotencyKey: `${ctx.request().id}:${call.id}` });
+    call.answered();
     return result;
   } catch (error) {
     // A terminal error answers the call; any other fails the attempt, and the
     // retry makes the call again.
-    if (error instanceof restate.TerminalError) done();
+    if (error instanceof restate.TerminalError) call.answered();
     throw error;
   }
 }

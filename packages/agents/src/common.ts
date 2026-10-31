@@ -3,6 +3,7 @@
 // cancellation, steering, publishing for the clients that follow it), and
 // the `messages` handler with its `Transcript`.
 import * as restate from 'restate-objects';
+import { settle } from './calls.ts';
 import * as log from './log.ts';
 import type { Said } from './log.ts';
 import { agentOf, type Steer, signals, signalsOf } from './signals.ts';
@@ -405,6 +406,11 @@ export class Transcript {
     if (error || output.startsWith('Error: ')) call.error = true;
   }
 
+  /** Whether tool call `id` has its output. */
+  hasResult(id: string) {
+    return this.#calls.get(id)?.output !== undefined;
+  }
+
   /** Its messages, in order: those with parts. */
   messages(): Said[] {
     return this.#messages.filter((m) => m.parts.length > 0);
@@ -426,6 +432,8 @@ function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
     const transcript = new Transcript();
     await read(transcript);
     await log.sync(ctx.db, transcript.messages(), () => ctx.get<log.Start>(log.START));
+    // The calls whose results the framework stored are made: see calls.ts.
+    await settle(ctx, (id) => transcript.hasResult(id));
   };
   const done = (writing.get(ctx) ?? Promise.resolve()).then(write, write);
   writing.set(ctx, done);
