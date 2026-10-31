@@ -170,7 +170,9 @@ remains of their delays, counted from the commit; Restate drops a send whose key
 send of a committed transaction is made once, even when a new attempt never
 uses the database, and a send of a transaction rolled back or lost is not
 made. A transaction without sends costs nothing more; one with sends costs
-one more commit. A send has
+one more commit. If making its sends fails after the commit (the attempt was
+replaced), `transaction()` rejects though it committed: the attempt is
+over, and the next one makes them. A send has
 no invocation id. Make calls before a transaction, with an idempotency key
 of their own, and record their outcome in it, as the shop's `Orders` does;
 its `expire` is a send of `tx`.

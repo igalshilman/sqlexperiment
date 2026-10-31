@@ -396,7 +396,10 @@ export class Attempt {
                 return body(transaction);
               }),
     };
-    sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));
+    sessions.set(this.db, (schemas) => {
+      this.unseenOpen = false;
+      return this.opened().then((db) => this.ensureSchemas(db, schemas));
+    });
     attempts.set(this.db, this);
   }
 

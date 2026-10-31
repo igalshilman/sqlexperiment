@@ -2,9 +2,9 @@
 // contexts, transactions with sends, and the types users write against.
 import assert from 'node:assert/strict';
 import * as restate from 'restate-session-objects';
-import { cancelCalls, invoke, reset, Schema } from 'restate-session-objects/internal';
+import { type AttemptContext, cancelCalls, contextOf, invoke, reset, Schema } from 'restate-session-objects/internal';
 import { expectTypeOf, test, vi } from 'vitest';
-import { fakeContext, type Made } from './support.ts';
+import { fakeContext, type Made, memoryDatabase } from './support.ts';
 
 const balanceOf = async (db: restate.DatabaseReader) =>
   (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
@@ -386,5 +386,38 @@ test('cancelled and cancelCalls take the ctx of a handler with explicitCancellat
   await assert.rejects(
     invoke(cancelling, 'explicit', fakeContext({ map: new Map(), service: 'cancelling' })),
     (error: Error) => !error.message.includes('explicitCancellation'),
+  );
+});
+
+test("calls: a typed one takes its handler's serdes; a literal one JSON, or those it is given", async () => {
+  const bytes = restate.object({
+    name: 'bytes',
+    handlers: {
+      echo: restate.handlers.object.exclusive(
+        { input: restate.serde.binary, output: restate.serde.binary },
+        async (_ctx: restate.ObjectContext, b: Uint8Array) => b,
+      ),
+    },
+  });
+  const made: restate.GenericCall<unknown, unknown>[] = [];
+  const sdk = {
+    key: 'k',
+    request: () => ({ id: 'inv', target: { service: 'caller', key: 'k', handler: 'call' } }),
+    genericCall: async (call: restate.GenericCall<unknown, unknown>) => {
+      made.push(call);
+      return null;
+    },
+  } as unknown as AttemptContext;
+  const ctx = contextOf(sdk, memoryDatabase());
+  await ctx.rpc(bytes, 'b').echo(new Uint8Array([1]));
+  await ctx.rpc({ service: 'bytes', key: 'b', handler: 'echo', input: 'x' });
+  await ctx.rpc({ service: 'bytes', key: 'b', handler: 'echo', input: 'y', inputSerde: restate.serde.binary as never });
+  assert.deepEqual(
+    made.map((c) => [c.inputSerde, c.outputSerde]),
+    [
+      [restate.serde.binary, restate.serde.binary],
+      [restate.serde.json, restate.serde.json],
+      [restate.serde.binary, restate.serde.json],
+    ],
   );
 });
