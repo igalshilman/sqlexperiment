@@ -73,55 +73,47 @@ may share a process.
 
 ## Inside: the layers
 
-Four layers, each knowing only the one below it. Every change climbs down the
-same way: a layer keeps it private until the one above hands it on, and only
-the state's flush makes it durable.
+Three layers, each knowing only the one below it. A change stays private to
+the database until a call commits it, and the state's flush makes it durable.
 
 ```
-host     restate-objects (TypeScript): flush after each SQL transaction
-             │
-             ▼
-SQL      Sql: statements change a private view; Sql::flush(&mut mutation)
-         moves what SQL committed into the mutation, as pages of the file `db`
-             │
-             ▼
-state    records · files, read as last flushed; a Mutation collects
-         changes, and its flush puts a tail entry, then the head: the commit
-             │
-             ▼
-store    one Restate object's key/value state: get · put · delete · sync
+host       restate-objects (TypeScript): ctx.db, transaction(), the effects
+               │
+               ▼
+database   Database: SQL on a private view of one file; each call that
+           leaves no SQL transaction open commits: the pages it changed and
+           the effects, in one flush of its state
+               │
+               ▼
+store      one Restate object's key/value state: get · put · delete · sync
 ```
 
-| Layer     | Gives the layer above                                                                                                                           | Keeps to itself                                                                             | Knows nothing of                                      |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| **Store** | `get`, `put`, `delete` and `sync` on one object's keys, writes in issue order; a crash keeps a prefix of the unsynced ones                      | Restate's own durability and fencing: one owner per object at a time                        | What the keys mean                                    |
-| **State** | `State` to read, `Mutation` to change, `flush` to make a mutation durable at once; a `Receipt` says what became of one; `park` for a warm value | The format: a tail, the head naming it, checkpoints in packs, garbage collection, the cache | Who writes it, and when to flush                      |
-| **SQL**   | `Sql`: `query`, `execute`, `transaction`; `flush(&mut mutation)` to hand over what SQL committed                                                | The engine, its private view of `db` and its WAL; a warm engine, parked                     | Other writers, and when to flush                      |
-| **Host**  | The SDK API: `ctx.db` in an object handler                                                                                                      | When to flush, and what goes in the same mutation                                           | How the state lays out what it stores, or SQL's pages |
+| Layer        | Gives the layer above                                                                                                      | Keeps to itself                                                                                                   | Knows nothing of                    |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| **Store**    | `get`, `put`, `delete` and `sync` on one object's keys, writes in issue order; a crash keeps a prefix of the unsynced ones | Restate's own durability and fencing: one owner per object at a time                                              | What the keys mean                  |
+| **Database** | `query`, `execute`, `begin`, `commit(effects)`, `rollback`, `save`, `close`: each commit durable when its call returns     | The engine, its private view of the file and its WAL; the state's format (a tail, the head, packs); a warm engine | Restate, and what the effects say   |
+| **Host**     | The SDK API: `ctx.db` in an object handler                                                                                 | What goes in a transaction, and the effects to commit with it                                                     | How the database lays out its pages |
 
-**When a change is durable.** At the state's flush, and only then. A
-statement that succeeds is in SQL's private view; `Sql::flush` puts it in a
-mutation, still in memory; the mutation's flush stores it with everything
-else in that mutation, in one tail entry that one head names. A mutation
-dropped, or flushed without `Sql::flush`, leaves SQL's changes private for a
-later one: pairing the two is the host's.
+**When a change is durable.** When the call that commits it returns. A
+statement outside a transaction commits on its own; one in a transaction,
+with the transaction's `COMMIT` (or `commit(effects)`): the pages it changed
+and the effects go into one mutation of the state, whose flush puts one tail
+entry, then the head naming it.
 
 **Failures.** An SQL error (syntax, a constraint) undoes only that statement.
-A storage error, a cancelled call or a failed flush ends the `Sql` and the
-`State` alike: the flush's outcome is unknown, so the host settles outstanding
-requests and opens them again, reading whatever head last landed.
+A storage error, a cancelled call or a failed commit ends the session: the
+flush's outcome is unknown, so the host settles outstanding requests and
+opens a new one, reading whatever head last landed.
 
-**The host.** `binding::Session`, the Node.js addon's under `restate-objects`,
-pairs `Sql::flush` with the mutation's flush after each call that leaves no
-SQL transaction open. In the same mutation it sets the record `effects`: the
-sends committed with the rows, an outbox, opaque to the storage.
+**Effects.** `commit(effects)` stores the effects with the rows, in the same
+flush: the sends committed with them, an outbox, opaque to the storage.
 
-All of it is one Rust crate, the addon. The state and SQL are private
-modules of it: `state` ([`src/state`](src/state/README.md): its
+All of it is one Rust crate, the addon, of two private modules: `state`
+([`src/state`](src/state/README.md): its
 [architecture](src/state/docs/ARCHITECTURE.md), [design](src/state/docs/DESIGN.md)
-and [format](src/state/docs/FORMAT.md)), and `sql` on it
-([`src/sql`](src/sql/README.md)). [`src/node.rs`](src/node.rs) is the napi
-bindings, around `sql::binding::Session`.
+and [format](src/state/docs/FORMAT.md)), the storage of one file and the
+effects, and `sql` ([`src/sql`](src/sql/README.md)), the `Database` on it.
+[`src/node.rs`](src/node.rs) is the napi bindings, around `sql::Database`.
 
 ## Build and test
 

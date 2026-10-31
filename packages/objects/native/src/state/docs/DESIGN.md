@@ -3,10 +3,10 @@
 Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
 namespace is all the object keeps, and the state is how it reaches the store:
-the host flushes a mutation (records, paged files and the SQL's file `db`, in
-one put) when it chooses: the addon, after each SQL transaction, as SQLite
+the database (the `sql` module's `Database`) flushes a mutation, the pages
+its SQL changed and the effects, in one put, at every commit, as SQLite
 does. The sections on SQL describe the `sql` module, which keeps its
-engine's state private until it flushes into a mutation.
+engine's state private until it commits.
 
 This doc holds the rules [ARCHITECTURE.md](ARCHITECTURE.md) leaves out;
 read that first, for the layout, flush, checkpoint, open and garbage
@@ -33,9 +33,11 @@ collection. The encodings are in [FORMAT.md](FORMAT.md).
 
 ## Records and the one rule
 
-**Records** are whole named values: in the manifest up to
-`inline_record_bytes` (1 KiB), and a value of their own in a pack when
-larger, written by the first checkpoint after they change.
+**Records** are whole named values, of which the state keeps one, the
+effects: in the manifest up to `inline_record_bytes` (1 KiB), and a value of
+its own in a pack when larger, written by the first checkpoint after it
+changes. The format names its records and files, as the database's file
+`db` and the record `effects`.
 
 **One rule.** A tail entry or a pack is stored before the first head that
 names it, and dropped only once no head that a state may still hold needs
@@ -51,28 +53,24 @@ the checkpoint holds it as a reference prefix ("patch from"), so a flush
 that changes a few bytes of a page writes about those bytes plus the
 frame's overhead.
 
-**Effects.** A host may flush bytes of its own with a transaction, as a
-record (the SDKs' `effects`): set in the same mutation, they ride in the same
-tail entry, so they are durable exactly when the transaction is, and stay
-until a later flush replaces them. The Restate SDKs keep a transaction's
-sends there, as its outbox, and make them once it is flushed. A host may set
-any record (`State::record`) and write paged files of its own
-(`State::file`) in a mutation, made durable by its flush. A mutation that changes
-nothing writes nothing.
+**Effects.** A host may commit bytes of its own with a transaction, as its
+effects (`Database::commit(effects)`): set in the same mutation, they ride
+in the same tail entry, so they are durable exactly when the transaction
+is, and stay until a later commit replaces them. The Restate SDKs keep a
+transaction's sends there, as its outbox, and make them once it is
+committed. A mutation that changes nothing writes nothing.
 
 ## When a flush happens
 
-At `Mutation::flush`, and only then. SQL statements and SQL `COMMIT` change the
-engine's private view; `Sql::flush(&mut mutation)` commits an open SQL transaction
-and copies what the SQL committed into the mutation, as writes to the file `db`;
-the mutation's flush makes it durable with every record and file in the mutation, in
-one tail entry, and consumes the mutation. SQL keeps the copied pages in its view until
-the mutation's receipt says the state flushed it: a mutation dropped unflushed discards
-its writes, and SQL's go into the next one. A mutation flushed without
-`Sql::flush` leaves SQL's changes private, for a later one: pairing the two
-is the host's.
-`Sql::transaction(closure)` wraps `BEGIN`/`COMMIT`, and rolls back when the
-closure returns `Err`.
+At every commit of the database, and only then: each call of a `Database`
+that leaves no SQL transaction open (a statement on its own, or the
+`COMMIT` of a transaction) moves the pages its SQL committed into a
+mutation, as writes to the file `db`, with the effects of
+`commit(effects)` if any, and flushes it, in one tail entry, before the
+call returns. SQL statements in a transaction change only the engine's
+private view. The pages stay private until the flush succeeds; a commit
+that fails ends the session. `Database::transaction(body)` wraps
+`begin`/`commit`, and rolls back when the body returns `Err`.
 
 A continuing session moves its view forward locally instead of reopening:
 the flush's entry joins the state's overlay. Each flush costs one round
@@ -86,7 +84,7 @@ fails after a flush runs again on top of it. Two patterns keep that correct:
 - **Idempotent requests.** In the same SQL transaction as the request's
   effects, write its id, and stop if it was already there:
   a plain `INSERT` into a table keyed by the id fails on a duplicate, which
-  rolls back `Sql::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
+  rolls back `Database::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
   returns no row for one. The dedupe row and the effects become durable
   together, because they are one tail entry.
 - **Outbox for calls.** Flush the intent to call another object or service
@@ -97,19 +95,16 @@ fails after a flush runs again on top of it. Two patterns keep that correct:
 A flush that returned an error has an unknown outcome: reopen and look (the
 dedupe row says whether it landed) rather than retrying blindly.
 
-**Choosing.** A flush per session costs one round trip per session and keeps
-a failed attempt invisible; a flush per SQL transaction costs one round trip
-per write transaction and makes progress durable as it happens. With a
-journal, prefer one per session: a replay re-runs the SQL against the state
-it started from. Without one, a flush per transaction is the only choice that
-does not lose acknowledged work when a later step fails.
+**Why a flush per commit.** It costs one round trip per write transaction
+and makes progress durable as it happens. Without a journal, it is the only
+choice that does not lose acknowledged work when a later step fails.
 
 ## Readers
 
 A reader (`State::open(store).reader()`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
-one. It flushes nothing: its SQL changes stay in the session, and its
-mutations refuse to flush. It reads the head it opened, its
+one. It flushes nothing: its SQL changes stay in the session, and it
+commits no effects. It reads the head it opened, its
 checkpoint and its tail, and packs never change, so it reads one consistent
 state, however the owner flushes meanwhile: snapshot isolation, with no
 check and no retry. The packs and the tail its head names stay until the
@@ -147,16 +142,16 @@ own), served by `KvIo`:
   so this holds when no I/O failed and none is pending; the adapter records
   every failed request and synchronous read to tell. Any other error (storage,
   a limit, a cancelled call, an engine anomaly) ends the session, and an error
-  from a flush leaves its outcome unknown.
-  `Sql::is_usable` says which happened.
-- **Flush.** `Sql::flush(&mut mutation)` commits an open SQL transaction and copies
-  the pages SQL committed into the mutation, as writes to the file `db`, and takes
-  the mutation's receipt. The pages stay in SQL's private view until the receipt
-  says the state flushed that mutation; a mutation dropped unflushed discards its copy,
-  and the next `flush` copies them again. Nothing is durable before a mutation's
-  flush. Inside `Sql::transaction`, a statement that ends the transaction
-  (`COMMIT`, `END`, `ROLLBACK`) fails and ends the session before anything is
-  durable, and so does dropping or unwinding the transaction future.
+  from a commit leaves its outcome unknown.
+  `Database::is_usable` says which happened.
+- **Commit.** The engine's checkpoint moves its WAL into the private view of
+  the database file, whose changed pages go into the mutation, as writes to
+  the file `db`. They stay in the private view until the mutation's flush
+  succeeds; a flush the state refused (before anything was written) leaves
+  them there, for the next commit. Inside `Database::transaction`, a
+  statement that ends the transaction (`COMMIT`, `END`, `ROLLBACK`) fails
+  and ends the session before anything is durable, and so does dropping the
+  transaction future.
 
 ## Owner cache
 

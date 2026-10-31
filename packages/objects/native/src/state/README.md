@@ -1,20 +1,17 @@
 # State
 
-Transactional state over an asynchronous key/value store, for namespaces with
-one owner at a time: the state of a Restate object without Restate's journal
-(`journalReplay: false`). It keeps named **records** (small whole values),
-and paged **files** (4 KiB pages, read and written at random). The state is
-read; it changes only through a **mutation**, an owned value that collects
-the records set and pages written, and a **flush** makes everything in the
+The storage of an object's database, over an asynchronous key/value store,
+for namespaces with one owner at a time: the state of a Restate object
+without Restate's journal (`journalReplay: false`). It keeps one paged
+**file** (4 KiB pages, read and written at random), the database's, and the
+**effects** committed with it (a small whole value). The state is read; it
+changes only through a **mutation**, an owned value that collects the pages
+written and the effects set, and a **flush** makes everything in the
 mutation durable at once, in one round trip. It needs only `get`, `put`,
 `delete` and `sync` from the backend, and a listing of its keys to collect
-the garbage. It is a private module of the addon's crate: its API is for
-[SQL](../sql/README.md) and the [bindings](../node.rs).
-
-The state knows nothing of what writes it. [SQL](../sql/README.md) keeps its
-database in the file `db` and moves what it committed into a mutation before
-the host flushes it, and the host adds records of its own beside it.
-Coordinating them is the host's: see [the layers](../../README.md#inside-the-layers).
+the garbage. It is a private module of the addon's crate, for the
+[database](../sql/README.md) on it: see [the
+layers](../../README.md#inside-the-layers).
 
 ## API
 
@@ -30,26 +27,23 @@ let cache = PageCache::open(PageCacheConfig::new(256 << 20, 8 << 30)).await?;
 // Per session, kept warm in the cache under the namespace's stable key.
 let state = State::open(store).cached(&cache, "object-42").await?;
 let mut mutation = state.mutation();
-mutation.set(&state.record("progress"), "step 7".into())?;
-mutation.write(&state.file("image")?, 0, Some(page))?;
-mutation.flush().await?; // the record and the page, durable together
+mutation.write(0, Some(page))?;
+mutation.set_effects("step 7".into())?;
+mutation.flush().await?; // the page and the effects, durable together
 ```
 
 Nothing is durable before `Mutation::flush`, and then everything in that
 mutation is, at once: its tail entry, then the head that names it, in one
 round trip. A flush consumes the mutation; a mutation dropped instead
-discards its writes. The state shows what was flushed (`record.get()`,
-`file.read(page)`), never what a mutation holds. The host must guarantee
-one owner per namespace. A failed or cancelled flush ends the state
-(`is_usable()` returns false): its outcome is unknown, so settle
+discards its writes. The state shows what was flushed (`state.effects()`,
+`state.file().read(page)`), never what a mutation holds. The host must
+guarantee one owner per namespace. A failed or cancelled flush ends the
+state (`is_usable()` returns false): its outcome is unknown, so settle
 outstanding requests and open a new one.
 
-Whoever moves its changes into a mutation keeps a receipt
-(`mutation.receipt()`), which tells it whether that mutation was flushed or
-discarded. With a page cache, a value can be parked for the namespace's next
-state (`state.park(key, value, weight)`), which takes it back
-(`state.take_parked(key)`) when nothing changed since: SQL keeps its
-engine warm this way.
+With a page cache, a value can be parked for the namespace's next state
+(`state.park(value, weight)`), which takes it back (`state.take_parked()`)
+when nothing changed since: the database keeps its engine warm this way.
 
 ## How it works
 
@@ -71,8 +65,8 @@ writes since the last sync.
 - [Design](docs/DESIGN.md): the rules the architecture leaves out: retries,
   readers, the SQL engine, the owner cache, costs and limits
 - [Storage format](docs/FORMAT.md): exact encodings
-- [SQL](../sql/README.md): SQLite-compatible SQL on the state, with the
-  storage tests and benchmarks that run SQL workloads
+- [SQL](../sql/README.md): the database on the state, with the storage
+  tests and benchmarks that run SQL workloads
 
 ## Layout
 

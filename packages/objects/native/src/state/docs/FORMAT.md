@@ -109,8 +109,8 @@ across records and files, at most 65,536 of them. A missing
 checkpoint means no files or records.
 
 The files are records and paged files. The SQL database is the paged
-file `db`; others are the host's (`State::file`). Nothing is deleted: a
-record is set, a file cut.
+file `db`, and the record `effects` holds the effects committed with it.
+Nothing is deleted: a record is set, a file cut.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the flush, checkpoint, open and
 garbage rules.
