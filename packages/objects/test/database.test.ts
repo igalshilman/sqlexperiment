@@ -185,6 +185,25 @@ test('a store of a class has its methods called on it', async () => {
   await db.save();
 });
 
+test('a store may answer a value rather than a promise of it', async () => {
+  const values = new Map<string, Uint8Array>();
+  const store = {
+    get: (key: string) => values.get(key),
+    set: (key: string, value: Uint8Array) => void values.set(key, Uint8Array.from(value)),
+    clear: (key: string) => void values.delete(key),
+    sync: () => undefined,
+    keys: () => [...values.keys()],
+  };
+  const db = await open(fresh(), store as unknown as Store);
+  await db.execute('CREATE TABLE t(id INTEGER)');
+  await db.execute('INSERT INTO t VALUES (1)');
+  assert.deepEqual(await db.query('SELECT id FROM t'), [[1]]);
+  await db.save();
+  const reopened = await open(fresh(), store as unknown as Store);
+  assert.deepEqual(await reopened.query('SELECT id FROM t'), [[1]]);
+  await reopened.close();
+});
+
 test('a transaction holds the session: other calls wait until it ends', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');

@@ -70,6 +70,45 @@ it('a call to ctx.db, or a nested ctx.transaction, from inside a body is termina
   });
 });
 
+it('a parameter the session cannot bind is terminal', async () => {
+  const a = sqlAttempt({ map: new Map() });
+  await a.end(async () => {
+    const error = await failure(a.db.query('SELECT ?', [new Date() as never]));
+    expect(error).toBeInstanceOf(restate.TerminalError);
+    expect(await a.db.query('SELECT 1')).toEqual([[1]]);
+  });
+});
+
+it('statements a body awaits together run in order, and none outlives its rollback', async () => {
+  const a = sqlAttempt({ map: new Map() });
+  await a.end(async () => {
+    await a.db.execute('CREATE TABLE t (n INTEGER)');
+    await a.transaction(({ db }) => Promise.all([1, 2, 3].map((n) => db.execute('INSERT INTO t VALUES (?)', [n]))));
+    expect(await a.db.query('SELECT n FROM t ORDER BY rowid')).toEqual([[1], [2], [3]]);
+    const error = await failure(
+      a.transaction(({ db }) =>
+        Promise.all([db.execute('INSERT INTO missing VALUES (1)'), db.execute('INSERT INTO t VALUES (4)')]),
+      ),
+    );
+    expect(error).toBeInstanceOf(restate.TerminalError);
+    expect(await a.db.query('SELECT count(*) FROM t')).toEqual([[3]]);
+  });
+});
+
+it('a statement that ends the transaction of a body is terminal, though it ends the session', async () => {
+  const a = sqlAttempt({ map: new Map() });
+  const error = await failure(a.end(() => a.transaction(({ db }) => db.execute('COMMIT'))));
+  expect(error).toBeInstanceOf(restate.TerminalError);
+  expect((error as Error).message).toMatch(/ended the transaction/);
+});
+
+it('a transaction the handler left open is terminal', async () => {
+  const a = sqlAttempt({ map: new Map() });
+  const error = await failure(a.end(() => a.db.execute('BEGIN')));
+  expect(error).toBeInstanceOf(restate.TerminalError);
+  expect((error as Error).message).toMatch(/left open/);
+});
+
 it('a storage error ends the session, and is retried', async () => {
   const fence = { closed: false };
   const a = sqlAttempt({ map: new Map(), fence });

@@ -1,9 +1,18 @@
 // A key's databases apart from the object's own (databaseOf of restate-objects),
 // without a Restate server: each its own tables, stored in the object's state
 // beside `ctx.db`'s, opened on first use and ended with the attempt.
+import { randomUUID } from 'node:crypto';
+import type { SqlDatabase } from 'restate-objects';
 import { databaseOf } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
+
+/** Make table `t` in `db` and insert three rows, one statement at a time; then its rows. */
+async function insertThree(db: SqlDatabase) {
+  await db.execute('CREATE TABLE t (x)');
+  for (let i = 0; i < 3; i++) await db.execute('INSERT INTO t VALUES (1)');
+  return db.query('SELECT count(*) FROM t');
+}
 
 describe("a key's other database", () => {
   it('keeps tables apart from the object’s own, through attempts', async () => {
@@ -24,12 +33,32 @@ describe("a key's other database", () => {
     expect(its).toEqual([['its own']]);
   });
 
-  it('is stored under the format’s prefix, with its name', async () => {
+  it('is stored under the format’s prefix, apart from the object’s database', async () => {
     const map = new Map<string, Uint8Array>();
     const attempt = sqlAttempt({ map });
-    await attempt.end(() => databaseOf(attempt.db, 'library').execute('CREATE TABLE t (x)'));
-    expect([...map.keys()].filter((key) => !key.startsWith('v22/library/'))).toEqual([]);
-    expect(map.has('v22/library/head')).toBe(true);
+    await attempt.end(() => databaseOf(attempt.db, 'pack').execute('CREATE TABLE t (x)'));
+    expect([...map.keys()].filter((key) => !key.startsWith('v22/db/pack/'))).toEqual([]);
+    expect(map.has('v22/db/pack/head')).toBe(true);
+  });
+
+  it('has a name of letters, digits, _, - and .', () => {
+    const attempt = sqlAttempt({ map: new Map() });
+    for (const name of ['', 'a/b', 'a b', 'x'.repeat(65)]) {
+      expect(() => databaseOf(attempt.db, name)).toThrow(/not a database name/);
+    }
+  });
+
+  it('is apart from the database of a key that ends in its name', async () => {
+    // Opened at once, each committing in turn: sharing a namespace, each
+    // would refuse the other's flushes.
+    const service = `test-${randomUUID()}`;
+    const slashed = sqlAttempt({ map: new Map(), service, key: 'x/library' });
+    const named = sqlAttempt({ map: new Map(), service, key: 'x' });
+    const counts = await Promise.all([
+      slashed.end(() => insertThree(slashed.db)),
+      named.end(() => insertThree(databaseOf(named.db, 'library'))),
+    ]);
+    expect(counts).toEqual([[[3]], [[3]]]);
   });
 
   it('reads in a shared handler, storing nothing', async () => {

@@ -20,10 +20,12 @@ export interface SqlQueryResult {
 }
 
 /**
- * A failure that leaves the session usable: SQL the engine rejected (a
- * syntax error, a constraint, a missing table), which undid just that
- * statement, or a call the session refused. A retry would repeat it. A
- * storage error, which ends the session, rejects as it is.
+ * A failure a retry would repeat: SQL the engine rejected (a syntax error, a
+ * constraint, a missing table), which undid just that statement and leaves
+ * the session usable; a parameter it cannot bind; or a call the session
+ * refused, which may have ended it (a `COMMIT` in a transaction's body, a
+ * transaction left open). A storage error, which ends the session, rejects
+ * as it is.
  */
 export class SqlError extends Error {
   override name = 'SqlError';
@@ -126,20 +128,29 @@ abstract class Sql implements SqlDatabase {
     await this.queryColumns(sql, params);
   }
 
-  /** `request`'s result, or its {@link failure}. */
-  protected async request<T>(request: Promise<T>): Promise<T> {
+  /**
+   * `call`'s result, or its {@link failure}: `call` makes the request, as the
+   * addon throws arguments it cannot convert as it is called.
+   */
+  protected async request<T>(call: () => Promise<T>): Promise<T> {
     try {
-      return await request;
+      return await call();
     } catch (error) {
       throw this.failure(error);
     }
   }
 
-  /** A request's `error`: an {@link SqlError} if the session goes on after it. */
+  /** A request's `error`: an {@link SqlError} if a retry would repeat it. */
   protected failure(error: unknown): unknown {
-    return this.native.isUsable() ? new SqlError((error as Error).message, { cause: error }) : error;
+    if (error instanceof SqlError) return error;
+    const repeats = (error as { code?: unknown }).code === REFUSED || this.native.isUsable();
+    return repeats ? new SqlError((error as Error).message, { cause: error }) : error;
   }
 }
+
+// The code of the addon's errors that a retry would repeat even though they
+// ended the session (its `Refused`), and of arguments it cannot convert.
+const REFUSED = 'InvalidArg';
 
 // The transaction whose body is running, in that body's asynchronous context:
 // the innermost, which knows the ones it runs inside.
@@ -156,28 +167,29 @@ export class Database extends Sql {
   private queue: Promise<unknown> = Promise.resolve();
 
   queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult> {
-    return this.serial(() => this.request(this.native.queryColumns(sql, params)));
+    return this.serial(() => this.request(() => this.native.queryColumns(sql, params)));
   }
 
   /**
    * Run `body` as one SQL transaction: it commits when `body` resolves, with
    * the records it set, and rolls back when it rejects, with the body's own
-   * error. A statement in it that ends the transaction (`COMMIT`,
-   * `ROLLBACK`) ends the session. A failing COMMIT rolls back.
+   * error, once the calls it made have settled. A statement in it that ends
+   * the transaction (`COMMIT`, `ROLLBACK`) ends the session. A failing
+   * COMMIT rolls back.
    */
   transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T> {
     return this.serial(async () => {
-      await this.request(this.native.begin());
+      await this.request(() => this.native.begin());
       const tx = new OpenTransaction(this, this.native, running.getStore());
       let result: T;
       try {
         result = await running.run(tx, () => body(tx));
       } catch (error) {
-        tx.end();
+        await tx.end();
         await this.rollback();
         throw error;
       }
-      const records = tx.end();
+      const records = await tx.end();
       try {
         await this.native.commit(records);
       } catch (error) {
@@ -195,7 +207,7 @@ export class Database extends Sql {
    * {@link Transaction.setRecord}); empty if none did.
    */
   record(name: string): Promise<Uint8Array> {
-    return this.serial(async () => new Uint8Array(await this.request(this.native.record(name))));
+    return this.serial(async () => new Uint8Array(await this.request(() => this.native.record(name))));
   }
 
   /** Whether SQL can still run: an SQL error leaves the session usable, a storage error ends it. */
@@ -209,7 +221,7 @@ export class Database extends Sql {
    * the session.
    */
   save(): Promise<void> {
-    return this.serial(() => this.native.save());
+    return this.serial(() => this.request(() => this.native.save()));
   }
 
   /** End the session now, whatever its state: queued calls reject. */
@@ -247,13 +259,20 @@ export interface Transaction extends SqlDatabase {
   record(name: string): Promise<Uint8Array>;
 }
 
-/** A {@link Transaction} of {@link Database.transaction}, open until its body settles. */
+/**
+ * A {@link Transaction} of {@link Database.transaction}, open until its body
+ * settles. Its calls run one at a time, in call order, also when the body
+ * awaits several together: none runs after the body settled, so none
+ * outlives a rollback.
+ */
 class OpenTransaction extends Sql implements Transaction {
   private readonly database: Database;
   /** The transaction whose body this one's runs in, if any: of another database, since a database's own are refused. */
   private readonly outer: OpenTransaction | undefined;
   /** The records it sets, by name. */
   private readonly records = new Map<string, Buffer>();
+  /** Settles once the last call queued so far has: the next call runs after it. */
+  private queue: Promise<unknown> = Promise.resolve();
   private ended = false;
 
   constructor(database: Database, native: NativeSession, outer: OpenTransaction | undefined) {
@@ -267,29 +286,43 @@ class OpenTransaction extends Sql implements Transaction {
     return (!this.ended && this.database === database) || (this.outer?.holds(database) ?? false);
   }
 
-  /** End it, returning the records it set, as the addon's commit takes them. */
-  end(): Record<string, Buffer> {
+  /**
+   * End it once the call running settles, refusing those queued behind it;
+   * then the records it set, as the addon's commit takes them.
+   */
+  async end(): Promise<Record<string, Buffer>> {
     this.ended = true;
+    await this.queue;
     return Object.fromEntries(this.records);
   }
 
-  async queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult> {
-    return this.request(this.open().queryColumns(sql, params));
+  queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult> {
+    return this.serial(() => this.request(() => this.native.queryColumns(sql, params)));
   }
 
   setRecord(name: string, value: Uint8Array): void {
-    this.open();
+    this.refuseEnded();
     this.records.set(name, Buffer.from(value));
   }
 
-  async record(name: string): Promise<Uint8Array> {
-    const set = this.records.get(name) ?? (await this.request(this.open().record(name)));
-    return new Uint8Array(set);
+  record(name: string): Promise<Uint8Array> {
+    return this.serial(async () => {
+      const set = this.records.get(name) ?? (await this.request(() => this.native.record(name)));
+      return new Uint8Array(set);
+    });
   }
 
-  /** The session, while the transaction is open. */
-  private open(): NativeSession {
+  /** Run `call` once the calls before it have, while the transaction is open. */
+  private serial<T>(call: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(() => {
+      this.refuseEnded();
+      return call();
+    });
+    this.queue = result.catch(() => {});
+    return result;
+  }
+
+  private refuseEnded(): void {
     if (this.ended) throw new SqlError('the transaction has ended');
-    return this.native;
   }
 }

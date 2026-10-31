@@ -137,14 +137,14 @@ const refusedWrite = () => {
 };
 
 /**
- * The keys of the database `name`, beside the object's own: each of the
+ * The keys of the database `name`, apart from the object's own: each of the
  * format's keys (`v22/head`, `v22/tail/...`, `v22/manifest/...`,
- * `v22/pack/...`) as `v22/<name>/head`, under the format's prefix still,
- * which tooling hides.
+ * `v22/pack/...`) as `v22/db/<name>/head`, under the format's prefix still,
+ * which tooling hides, and under none of the object's database's.
  */
 const beside = (name: string) => (key: string) => {
-  const at = key.indexOf('/');
-  return `${key.slice(0, at)}/${name}/${key.slice(at + 1)}`;
+  const at = key.indexOf('/') + 1;
+  return `${key.slice(0, at)}db/${name}/${key.slice(at)}`;
 };
 
 /**
@@ -152,8 +152,9 @@ const beside = (name: string) => (key: string) => {
  * `undefined` for any other key of the object.
  */
 const unbeside = (name: string) => (key: string) => {
-  const at = key.indexOf('/');
-  return at >= 0 && key.startsWith(`/${name}/`, at) ? key.slice(0, at) + key.slice(at + name.length + 1) : undefined;
+  const at = key.indexOf('/') + 1;
+  const prefix = `db/${name}/`;
+  return at > 0 && key.startsWith(prefix, at) ? key.slice(0, at) + key.slice(at + prefix.length) : undefined;
 };
 
 /**
@@ -190,35 +191,35 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined
 }
 
 /**
- * What a failed call to `db` fails the handler with: an {@link SqlError},
- * which a retry would repeat, becomes a {@link TerminalError}, its `cause`
- * the SQL error, unless the session has ended since. Anything else is as for
+ * What a failed call to the session fails the handler with: an
+ * {@link SqlError}, which a retry would repeat, becomes a
+ * {@link TerminalError}, its `cause` the SQL error. Anything else is as for
  * any handler: a storage error, which ends the session, or the handler's own
  * (a failed request to another service, say) is retried, unless it is a
  * TerminalError itself.
  */
-function handlerError(error: unknown, db: Database): unknown {
-  if (!(error instanceof SqlError) || !db.isUsable()) return error;
+function handlerError(error: unknown): unknown {
+  if (!(error instanceof SqlError)) return error;
   const terminal = new TerminalError(error.message);
   terminal.cause = error;
   return terminal;
 }
 
 /** `call`'s result, or the error the handler fails with (see {@link handlerError}). */
-async function forHandler<T>(db: Database, call: Promise<T>): Promise<T> {
+async function forHandler<T>(call: Promise<T>): Promise<T> {
   try {
     return await call;
   } catch (error) {
-    throw handlerError(error, db);
+    throw handlerError(error);
   }
 }
 
 /** The SQL of a transaction's body: `tx`'s, failing as {@link forHandler} does. */
-function forBody(db: Database, tx: SqlDatabase): SqlDatabase {
+function forBody(tx: SqlDatabase): SqlDatabase {
   return {
-    query: (sql, params) => forHandler(db, tx.query(sql, params)),
-    queryColumns: (sql, params) => forHandler(db, tx.queryColumns(sql, params)),
-    execute: (sql, params) => forHandler(db, tx.execute(sql, params)),
+    query: (sql, params) => forHandler(tx.query(sql, params)),
+    queryColumns: (sql, params) => forHandler(tx.queryColumns(sql, params)),
+    execute: (sql, params) => forHandler(tx.execute(sql, params)),
   };
 }
 
@@ -275,13 +276,18 @@ function settle<T>(outcome: Outcome<T>): T {
 // The attempts, by their `ctx.db`: for `databaseOf`.
 const attempts = new WeakMap<object, SqlAttempt>();
 
+// A database's name (`databaseOf`).
+const DATABASE_NAME = /^[\w.-]{1,64}$/;
+
 /**
  * The database `name` of the key, apart from the object's own (`ctx.db`, of
  * the attempt whose session `db` is): for a library whose tables must be
  * alone in their database, such as OpenCode's. It opens on its first use,
- * and ends with the attempt, as `ctx.db` does.
+ * and ends with the attempt, as `ctx.db` does. A name is 1 to 64 letters,
+ * digits, `_`, `-` or `.`.
  */
 export function databaseOf(db: SqlSession, name: string): SqlSession {
+  if (!DATABASE_NAME.test(name)) throw new Error(`databaseOf: ${JSON.stringify(name)} is not a database name`);
   const attempt = attempts.get(db);
   if (attempt === undefined) throw new Error("databaseOf takes a handler's ctx.db");
   return attempt.database(name);
@@ -317,7 +323,7 @@ export class SqlAttempt {
       query: (sql, params) => this.call((db) => db.query(sql, params)),
       queryColumns: (sql, params) => this.call((db) => db.queryColumns(sql, params)),
       execute: (sql, params) => this.call((db) => db.execute(sql, params)),
-      transaction: (body) => this.call((db) => db.transaction((tx) => body(forBody(db, tx)))),
+      transaction: (body) => this.call((db) => db.transaction((tx) => body(forBody(tx)))),
     };
     sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));
     attempts.set(this.db, this);
@@ -350,7 +356,7 @@ export class SqlAttempt {
       db.transaction(async (handle) => {
         let result: T;
         try {
-          result = await body({ db: forBody(db, handle), tx });
+          result = await body({ db: forBody(handle), tx });
         } finally {
           recording = false;
         }
@@ -386,14 +392,14 @@ export class SqlAttempt {
   /** `call` on the session, opening it on the first; its failure as the handler fails with it. */
   private async call<T>(call: (db: Database) => Promise<T>): Promise<T> {
     const db = await this.opened();
-    return forHandler(db, call(db));
+    return forHandler(call(db));
   }
 
   /** Apply the steps of `schemas` that the database lacks, each schema once per attempt. */
   private async ensureSchemas(db: Database, schemas: readonly Schema[]) {
     const lacking = schemas.filter((s) => !this.ensured.has(s.name));
     if (lacking.length === 0) return;
-    await forHandler(db, apply(db, lacking));
+    await forHandler(apply(db, lacking));
     for (const s of lacking) this.ensured.add(s.name);
   }
 
@@ -434,7 +440,9 @@ export class SqlAttempt {
 
   private async start(): Promise<Database> {
     const ctx = this.ctx;
-    const key = `${ctx.request().target.service}/${ctx.key}`;
+    // The page cache's: the key escaped, so that no key reads as another's
+    // database (a name has no `/`).
+    const key = `${ctx.request().target.service}/${encodeURIComponent(ctx.key)}`;
     const namespace = this.name === undefined ? key : `${key}/${this.name}`;
     const end = new AttemptEnd(ctx.invocationEndPromise.promise);
     const object = objectStore(ctx, end, this.name);
@@ -453,7 +461,7 @@ export class SqlAttempt {
       }
       if (own) await this.ensureSchemas(db, [own]);
     } catch (error) {
-      const failed = handlerError(error, db);
+      const failed = handlerError(error);
       await db.close();
       throw failed;
     }
@@ -475,19 +483,20 @@ export class SqlAttempt {
     if (this.ctx.shared) {
       // It read the snapshot it opened on, whatever committed since; one that
       // outlived 16 commits failed its read ("is gone"), and is retried.
-      const failed = 'error' in outcome ? handlerError(outcome.error, db) : undefined;
+      const failed = 'error' in outcome ? handlerError(outcome.error) : undefined;
       await db.close();
       if ('error' in outcome) throw failed;
       return outcome.value;
     }
     if ('error' in outcome) {
-      const error = handlerError(outcome.error, db);
+      const error = handlerError(outcome.error);
       // The handler's error stands: what it committed is stored, and an
       // outbox left full is made again by the next open.
       await this.save(db).catch(() => db.close().catch(() => {}));
       throw error;
     }
-    await this.save(db);
+    // A transaction left open, say, which a retry would leave open again.
+    await forHandler(this.save(db));
     return outcome.value;
   }
 
