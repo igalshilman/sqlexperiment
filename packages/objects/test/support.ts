@@ -140,7 +140,9 @@ export interface Made {
 /** A parameter as JSON: a send made again from the outbox has it as bytes. */
 const decoded = (parameter: unknown, inputSerde?: unknown) =>
   parameter instanceof Uint8Array && inputSerde === restate.serde.binary
-    ? (JSON.parse(new TextDecoder().decode(parameter)) as unknown)
+    ? parameter.length === 0
+      ? undefined
+      : (JSON.parse(new TextDecoder().decode(parameter)) as unknown)
     : parameter;
 
 /** A call or send as a test sees it. */

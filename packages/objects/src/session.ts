@@ -263,7 +263,10 @@ const refusedSend: Send = () => {
 // outbox, and so does the end of the attempt.
 
 /** A send, but its parameter, as it is stored. */
-type StoredSend = Omit<restate.GenericSend<unknown>, 'parameter' | 'inputSerde' | 'delay'> & { delay?: number };
+type StoredSend = Omit<restate.GenericSend<unknown>, 'parameter' | 'inputSerde' | 'delay'> & {
+  /** When a delayed send is due (epoch ms): one made again waits only what remains. */
+  due?: number;
+};
 
 /** The sends of a committed transaction, in the outbox. */
 interface Outgoing {
@@ -289,7 +292,7 @@ function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][numbe
   const { parameter, inputSerde, delay, ...rest } = send;
   return {
     ...rest,
-    ...(delay !== undefined ? { delay: millisOrDurationToMillis(delay) } : {}),
+    ...(delay !== undefined ? { due: Date.now() + millisOrDurationToMillis(delay) } : {}),
     parameter: Buffer.from((inputSerde ?? serde.binary).serialize(parameter)).toString('base64'),
   };
 }
@@ -342,6 +345,8 @@ export class SqlAttempt {
   /** The schemas this attempt's database has all the steps of. */
   private readonly ensured = new Set<string>();
   private ended = false;
+  /** Opened when the attempt started ({@link openNow}), and no call has seen how it went yet. */
+  private unseenOpen = false;
   /** Stops closing the session when the attempt ends. */
   private keepOpen: () => void = () => {};
 
@@ -431,8 +436,20 @@ export class SqlAttempt {
     return value;
   }
 
+  /**
+   * Open the session now, as the attempt starts, rather than on its first
+   * call: the open makes the sends a crashed attempt committed and left
+   * unmade, which must not wait for a handler that uses the database.
+   */
+  openNow() {
+    if (this.ctx.shared || this.name !== undefined || this.session !== undefined) return;
+    this.unseenOpen = true;
+    this.opened().catch(() => {});
+  }
+
   /** `call` on the session, opening it on the first; its failure as the handler fails with it. */
   private async call<T>(call: (db: Connection) => Promise<T>): Promise<T> {
+    this.unseenOpen = false;
     const db = await this.opened();
     return forHandler(call(db));
   }
@@ -447,9 +464,10 @@ export class SqlAttempt {
 
   /** Make the sends of a committed transaction: each with an idempotency key of the transaction (or its own), so that making them again is dropped. */
   private make({ id, sends }: Outgoing) {
-    sends.forEach(({ parameter, ...send }, index) => {
+    sends.forEach(({ parameter, due, ...send }, index) => {
       this.ctx.genericSend({
         ...send,
+        ...(due !== undefined ? { delay: Math.max(0, due - Date.now()) } : {}),
         parameter: new Uint8Array(Buffer.from(parameter, 'base64')),
         inputSerde: serde.binary,
         idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
@@ -517,8 +535,11 @@ export class SqlAttempt {
     let db: Connection;
     try {
       db = await session;
-    } catch {
-      // The open failed, and its error went to the call that made it.
+    } catch (error) {
+      // The open failed, and its error went to the call that made it; one
+      // made as the attempt started that no call saw fails the attempt, as
+      // its outbox is still to be made.
+      if (this.unseenOpen) throw error;
       return settle(outcome);
     }
     this.keepOpen();

@@ -149,6 +149,7 @@ function readerOf(db: Database): DatabaseReader {
 /** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
 function attempt(fn: Fn<never>, view: boolean, ctx: AttemptContext, input: unknown): Promise<unknown> {
   const session = new SqlAttempt(host(ctx, view));
+  session.openNow();
   const rpc = rpcOf(ctx);
   const context: SessionContext | ViewContext = view
     ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(session.db), rpc })
