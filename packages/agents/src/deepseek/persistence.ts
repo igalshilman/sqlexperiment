@@ -31,7 +31,7 @@ import {
   type SessionPersistenceCreateOptions,
   type SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 
 const SCHEMA = new Schema('restate-agents.deepseek', [
@@ -40,7 +40,7 @@ const SCHEMA = new Schema('restate-agents.deepseek', [
 ]);
 
 /** The stored events of session `id`, in order: for reading the log without a harness. */
-export async function storedEvents(db: SqlSession, id: SessionId): Promise<SessionEvent[]> {
+export async function storedEvents(db: Database, id: SessionId): Promise<SessionEvent[]> {
   await SCHEMA.ensure(db);
   const rows = await db.values('SELECT event FROM restate_deepseek_events WHERE session = ? ORDER BY seq', [id]);
   return rows.map(([event]) => JSON.parse(String(event)) as SessionEvent);
@@ -56,7 +56,7 @@ interface Stored {
 /** The harness's session persistence (a cordis plugin, `{ db }`): see the top of this file. */
 export class SqlSessionPersistence extends SessionPersistence {
   // Plain fields, not private ones: cordis hands out the service through a proxy.
-  db: SqlSession;
+  db: Database;
   schema: Promise<void> | undefined;
   queue: Promise<unknown> = Promise.resolve();
   /** The open write handle of each session, by id. */
@@ -67,7 +67,7 @@ export class SqlSessionPersistence extends SessionPersistence {
   abandoned = false;
 
   /** `config.db`: the object's database (`ctx.db`). */
-  constructor(ctx: Context, config: { db: SqlSession }) {
+  constructor(ctx: Context, config: { db: Database }) {
     super(ctx);
     this.db = config.db;
     // The live session's events go to its write handle; its flushes and its
@@ -92,7 +92,7 @@ export class SqlSessionPersistence extends SessionPersistence {
   }
 
   /** Run `operation` on the database after the ones before it: it serves one statement at a time. */
-  serial<T>(operation: (db: SqlSession) => Promise<T>): Promise<T> {
+  serial<T>(operation: (db: Database) => Promise<T>): Promise<T> {
     if (this.abandoned) return Promise.reject(new Error('sql session persistence: abandoned'));
     this.schema ??= SCHEMA.ensure(this.db);
     const result = this.queue.then(() => this.schema).then(() => operation(this.db));

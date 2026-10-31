@@ -14,7 +14,7 @@
  */
 import * as restate from 'restate-objects';
 
-const balanceOf = async (db: restate.SqlDatabase) =>
+const balanceOf = async (db: restate.DatabaseWriter) =>
   (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
 
 const account = restate.object({

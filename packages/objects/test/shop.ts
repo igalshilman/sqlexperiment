@@ -114,7 +114,7 @@ export interface Order {
   status: string;
 }
 
-async function readOrder(db: restate.SqlDatabase): Promise<Order | null> {
+async function readOrder(db: restate.DatabaseWriter): Promise<Order | null> {
   await db.execute(ORDER);
   const [stored] = await db.values('SELECT sku, qty, status FROM orders');
   return stored ? { sku: String(stored[0]), qty: Number(stored[1]), status: String(stored[2]) } : null;

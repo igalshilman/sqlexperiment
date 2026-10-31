@@ -7,7 +7,7 @@
 // the stored messages, and stores each message the runner adds.
 
 import type Anthropic from '@anthropic-ai/sdk';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 
 type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
@@ -19,16 +19,16 @@ const SCHEMA = new Schema('restate-agents.claude', [
 
 /** The conversation in the object's database: the tool runner's messages, and each prompt's answer. */
 export class Conversation {
-  #db: SqlSession;
+  #db: Database;
   /** Cancelled: a run cut off then stores nothing more. */
   #closed = false;
 
-  constructor(db: SqlSession) {
+  constructor(db: Database) {
     this.#db = db;
   }
 
   /** The conversation in `db` (`ctx.db`). */
-  static async open(db: SqlSession): Promise<Conversation> {
+  static async open(db: Database): Promise<Conversation> {
     await SCHEMA.ensure(db);
     return new Conversation(db);
   }

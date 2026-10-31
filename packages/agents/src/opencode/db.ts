@@ -7,7 +7,7 @@
 // config given inline, plugins given in code. Only its database differs. The
 // workerd profile reads a Durable Object's SQLite, whose `exec` is
 // synchronous; here OpenCode gets an Effect SqlClient instead, which is
-// asynchronous, through `Database.configuredClient`, the seam OpenCode keeps
+// asynchronous, through `Database.configuredClient` (OpenCode's), the seam OpenCode keeps
 // for an injected client. Each transaction is an SQL transaction, and the
 // session runs statements one at a time, as OpenCode's own clients do.
 //
@@ -19,13 +19,13 @@ import { Reactivity } from 'effect/reactivity';
 import { SqlClient, Statement } from 'effect/sql';
 import { SqlError, UnknownError } from 'effect/sql/SqlError';
 import type { Connection } from 'effect/sql/SqlConnection';
-import { Database } from '@opencode/core/database/database';
+import { Database as OpenCodeDatabase } from '@opencode/core/database/database';
 import { SessionRestart } from '@opencode/core/session/execution/restart';
 import { ServerWorkerd } from '@opencode/server/workerd';
 import { fromPromise } from '@opencode/core/plugin/promise';
 import { OpenCode } from '@opencode/sdk/effect';
 import type { Plugin } from '@opencode/plugin';
-import type { SqlDatabase, SqlSession, SqlValue } from 'restate-objects';
+import type { DatabaseWriter, Database, SqlValue } from 'restate-objects';
 
 /** Closed: every later statement fails. */
 export interface Fence {
@@ -51,7 +51,7 @@ const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient
  * call at a time and holds them while a transaction runs, or that
  * transaction's database. Each is refused once `fence` closes.
  */
-function connection(target: SqlDatabase, fence: Fence): Connection {
+function connection(target: DatabaseWriter, fence: Fence): Connection {
   // Effect binds what the compiler made of OpenCode's values: SQL values.
   const exec = <T>(read: (sql: string, params: SqlValue[]) => Promise<T>, sql: string, params: readonly unknown[]) =>
     Effect.tryPromise({
@@ -78,7 +78,7 @@ function connection(target: SqlDatabase, fence: Fence): Connection {
 }
 
 /** An Effect SqlClient over `db`, with its statements refused once `fence` closes. */
-export function sqlClient(db: SqlSession, fence: Fence): Layer.Layer<SqlClient.SqlClient> {
+export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.SqlClient> {
   // `effect` as one SQL transaction: it commits when `effect` succeeds
   // and rolls back when it fails. Its statements go to the transaction's
   // database.
@@ -186,7 +186,7 @@ const restarts = (resume: boolean) =>
  * previous attempt left unfinished. Close the host when done.
  */
 export async function openOpenCode(
-  db: SqlSession,
+  db: Database,
   fence: Fence,
   { plugins = [], config = {}, local = false, resume = true }: OpenOptions,
 ): Promise<Host> {
@@ -207,7 +207,7 @@ export async function openOpenCode(
       },
       {
         overrides: [
-          Database.node.replace(Database.configuredClient(sqlClient(db, fence))),
+          OpenCodeDatabase.node.replace(OpenCodeDatabase.configuredClient(sqlClient(db, fence))),
           ...rest,
           SessionRestart.node.replace(SessionRestart.node.mapLayer(() => restarts(resume) as never)),
         ],

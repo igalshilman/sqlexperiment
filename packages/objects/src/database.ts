@@ -34,8 +34,8 @@ export class SqlError extends Error {
 /** A row as an object, by column name. */
 export type Row = Record<string, SqlValue>;
 
-/** SQL: a database, or one transaction of it. */
-export interface SqlDatabase {
+/** Reads of a database, or of one transaction of it. */
+export interface DatabaseReader {
   /**
    * The rows of one statement, each an object by column name; parameters
    * bind to a single statement. `T` declares the row's shape, unchecked:
@@ -48,7 +48,11 @@ export interface SqlDatabase {
   get<T = Row>(sql: string, params?: SqlParam[]): Promise<T | undefined>;
   /** The rows of one statement as arrays, in column order: for adapters, and for columns that share a name. */
   values(sql: string, params?: SqlParam[]): Promise<SqlValue[][]>;
-  /** Run SQL (one or more statements), discarding rows. */
+}
+
+/** SQL: a database, or one transaction of it. */
+export interface DatabaseWriter extends DatabaseReader {
+  /** Run SQL (one or more statements), discarding rows; parameters only with a single statement. */
   execute(sql: string, params?: SqlParam[]): Promise<void>;
 }
 
@@ -61,8 +65,8 @@ function objects({ columns, rows }: SqlQueryResult): Row[] {
   return rows.map((row) => Object.fromEntries(columns.map((name, i) => [name, row[i]!])));
 }
 
-/** {@link SqlDatabase} over `run`, which runs one call's SQL and returns its rows with their columns. */
-export function sqlOver(run: (sql: string, params?: SqlParam[]) => Promise<SqlQueryResult>): SqlDatabase {
+/** {@link DatabaseWriter} over `run`, which runs one call's SQL and returns its rows with their columns. */
+export function sqlOver(run: (sql: string, params?: SqlParam[]) => Promise<SqlQueryResult>): DatabaseWriter {
   return {
     query: async <T>(sql: string, params?: SqlParam[]) => objects(await run(sql, params)) as T[],
     get: async <T>(sql: string, params?: SqlParam[]) => objects(await run(sql, params))[0] as T | undefined,
@@ -133,15 +137,15 @@ function load(): Addon {
  * serves every namespace. A `reader` reads beside the namespace's owner (a
  * shared handler), the state as of open, and writes nothing.
  */
-export async function open(namespace: string, store: Store, { reader = false } = {}): Promise<Database> {
-  return new Database(await addon.open(namespace, store, reader));
+export async function open(namespace: string, store: Store, { reader = false } = {}): Promise<Connection> {
+  return new Connection(await addon.open(namespace, store, reader));
 }
 
 /**
- * SQL on a session of the addon: {@link SqlDatabase}'s `query` and `execute`
+ * SQL on a session of the addon: {@link DatabaseWriter}'s `query` and `execute`
  * by way of its `queryColumns`.
  */
-abstract class Sql implements SqlDatabase {
+abstract class Sql implements DatabaseWriter {
   protected readonly native: NativeSession;
 
   constructor(native: NativeSession) {
@@ -200,7 +204,7 @@ const running = new AsyncLocalStorage<OpenTransaction>();
  * meanwhile wait, but a call from inside the transaction's body is refused,
  * as it would wait for that body: the body uses its `tx`.
  */
-export class Database extends Sql {
+export class Connection extends Sql {
   /** Settles once the last call queued so far has: the next call runs after it. */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -215,7 +219,7 @@ export class Database extends Sql {
    * the transaction (`COMMIT`, `ROLLBACK`) ends the session. A failing
    * COMMIT rolls back.
    */
-  transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T> {
+  transaction<T>(body: (tx: ConnectionTransaction) => Promise<T>): Promise<T> {
     return this.serial(async () => {
       await this.request(() => this.native.begin());
       const tx = new OpenTransaction(this, this.native, running.getStore());
@@ -242,7 +246,7 @@ export class Database extends Sql {
 
   /**
    * The record `name`, as the last commit that set it left it (see
-   * {@link Transaction.setRecord}); empty if none did.
+   * {@link ConnectionTransaction.setRecord}); empty if none did.
    */
   record(name: string): Promise<Uint8Array> {
     return this.serial(async () => new Uint8Array(await this.request(() => this.native.record(name))));
@@ -284,7 +288,7 @@ export class Database extends Sql {
 }
 
 /** SQL in one transaction, while its body runs, and the records it commits with. */
-export interface Transaction extends SqlDatabase {
+export interface ConnectionTransaction extends DatabaseWriter {
   /** The rows of one statement, with their column names. */
   queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult>;
   /**
@@ -300,13 +304,13 @@ export interface Transaction extends SqlDatabase {
 }
 
 /**
- * A {@link Transaction} of {@link Database.transaction}, open until its body
+ * A {@link ConnectionTransaction} of {@link Connection.transaction}, open until its body
  * settles. Its calls run one at a time, in call order, also when the body
  * awaits several together, or none: each call made while it is open runs
  * before its commit or rollback, so none outlives it.
  */
-class OpenTransaction extends Sql implements Transaction {
-  private readonly database: Database;
+class OpenTransaction extends Sql implements ConnectionTransaction {
+  private readonly database: Connection;
   /** The transaction whose body this one's runs in, if any: of another database, since a database's own are refused. */
   private readonly outer: OpenTransaction | undefined;
   /** The records it sets, by name. */
@@ -315,14 +319,14 @@ class OpenTransaction extends Sql implements Transaction {
   private queue: Promise<unknown> = Promise.resolve();
   private ended = false;
 
-  constructor(database: Database, native: NativeSession, outer: OpenTransaction | undefined) {
+  constructor(database: Connection, native: NativeSession, outer: OpenTransaction | undefined) {
     super(native);
     this.database = database;
     this.outer = outer;
   }
 
   /** Whether this transaction, or one it runs inside, is open and holds `database`. */
-  holds(database: Database): boolean {
+  holds(database: Connection): boolean {
     return (!this.ended && this.database === database) || (this.outer?.holds(database) ?? false);
   }
 

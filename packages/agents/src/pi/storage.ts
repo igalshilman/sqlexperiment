@@ -10,7 +10,7 @@
 //
 // pi-durable's tables and indexes are named `restate_pi_<name>` (its
 // storage's `prefix`), apart from the tables of yours in the same database.
-import type { SqlDatabase, SqlSession } from 'restate-objects';
+import type { DatabaseWriter, Database } from 'restate-objects';
 import {
   SqliteStorage,
   type SqliteDatabase,
@@ -23,8 +23,8 @@ const PREFIX = 'restate_pi_';
 
 /** SQL through `db`: the session, or one transaction's. */
 class Executor implements SqliteExecutor {
-  readonly db: SqlDatabase;
-  constructor(db: SqlDatabase) {
+  readonly db: DatabaseWriter;
+  constructor(db: DatabaseWriter) {
     this.db = db;
   }
   async exec(sql: string) {
@@ -43,9 +43,9 @@ class Executor implements SqliteExecutor {
 
 /** The `SqliteDatabase` facade over the session `db`. */
 class SqlKvDatabase extends Executor implements SqliteDatabase {
-  readonly #session: SqlSession;
+  readonly #session: Database;
 
-  constructor(db: SqlSession) {
+  constructor(db: Database) {
     super(db);
     this.#session = db;
   }
@@ -60,6 +60,6 @@ class SqlKvDatabase extends Executor implements SqliteDatabase {
 }
 
 /** Open pi-durable storage on the session `db`. */
-export function openSqlKvStorage(db: SqlSession): Promise<SqliteStorage> {
+export function openSqlKvStorage(db: Database): Promise<SqliteStorage> {
   return SqliteStorage.open(new SqlKvDatabase(db), { prefix: PREFIX });
 }

@@ -32,7 +32,7 @@
 // and a coding tool cut off by a crash is not run again (the model is told
 // it was interrupted).
 import * as restate from 'restate-objects';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import type { Context } from '@earendil-works/chord';
 import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
@@ -334,10 +334,10 @@ export const messages = () => messagesHandler();
  * never change, and a new one takes a greater id than any before it (they
  * are committed one at a time), so each read adds the entries after it.
  */
-const transcripts = new WeakMap<SqlSession, { last?: EntryId; transcript: Transcript }>();
+const transcripts = new WeakMap<Database, { last?: EntryId; transcript: Transcript }>();
 
 /** The root conversation in `db`, `root` of a Harness on it, from pi-durable's entries, as `messages` gives it. */
-const transcribe = async (db: SqlSession, root: Conversation, context: Context) => {
+const transcribe = async (db: Database, root: Conversation, context: Context) => {
   const read = transcripts.get(db) ?? { transcript: new Transcript() };
   transcripts.set(db, read);
   const { transcript } = read;

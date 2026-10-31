@@ -1,12 +1,12 @@
 // LangGraph's checkpointer conformance suite on checkpointer.ts, over a
 // SQL database in memory: `pnpm --filter restate-agents test langgraph`.
 import { validate } from '@langchain/langgraph-checkpoint-validation';
-import { open, type Database } from 'restate-objects/internal';
+import { open, type Connection } from 'restate-objects/internal';
 import { memoryStore } from 'restate-objects/test/support';
 import { SqlCheckpointSaver } from 'restate-agents/langgraph';
 
 let n = 0;
-const databases = new WeakMap<SqlCheckpointSaver, Database>();
+const databases = new WeakMap<SqlCheckpointSaver, Connection>();
 validate({
   checkpointerName: 'restate-objects',
   async createCheckpointer() {

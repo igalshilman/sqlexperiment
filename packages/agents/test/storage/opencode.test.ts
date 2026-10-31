@@ -1,6 +1,6 @@
 // The Effect SqlClient of restate-agents/opencode/db over an SQL database in memory.
 // `pnpm --filter restate-agents test opencode`.
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import { Effect, Exit, Fiber } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { open } from 'restate-objects/internal';
@@ -14,7 +14,7 @@ async function run<A, E>(body: (sql: SqlClient.SqlClient) => Effect.Effect<A, E>
   const program = Effect.gen(function* () {
     return yield* body(yield* SqlClient.SqlClient);
   });
-  return Effect.runPromise(program.pipe(Effect.provide(sqlClient(db as unknown as SqlSession, { closed: false }))));
+  return Effect.runPromise(program.pipe(Effect.provide(sqlClient(db as unknown as Database, { closed: false }))));
 }
 
 describe('the OpenCode SqlClient', () => {

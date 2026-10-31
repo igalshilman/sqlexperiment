@@ -40,7 +40,7 @@ import {
   type PendingWrite,
   type SerializerProtocol,
 } from '@langchain/langgraph-checkpoint';
-import type { SqlDatabase, SqlSession, SqlValue } from 'restate-objects';
+import type { DatabaseWriter, Database, SqlValue } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 
 const SCHEMA = new Schema('restate-agents.langgraph', [
@@ -106,7 +106,7 @@ function matches(actual: unknown, expected: unknown): boolean {
  * `checkpoint`: its other checkpoints, their pending writes, and the channel
  * values at versions other than `checkpoint`'s.
  */
-async function dropEarlier(tx: SqlDatabase, threadId: string, ns: string, checkpoint: Checkpoint) {
+async function dropEarlier(tx: DatabaseWriter, threadId: string, ns: string, checkpoint: Checkpoint) {
   const thread = [threadId, ns];
   for (const table of ['restate_langgraph_checkpoints', 'restate_langgraph_writes']) {
     await tx.execute(`DELETE FROM ${table} WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?`, [
@@ -124,7 +124,7 @@ async function dropEarlier(tx: SqlDatabase, threadId: string, ns: string, checkp
 
 /** A LangGraph checkpointer whose threads are in the database session `db`: see the top of this file. */
 export class SqlCheckpointSaver extends BaseCheckpointSaver {
-  #db: SqlSession;
+  #db: Database;
   #latest: boolean;
   #ready: Promise<void> | undefined;
   #tail: Promise<unknown> = Promise.resolve();
@@ -135,7 +135,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
    * serializer, by default its own.
    */
   constructor(
-    db: SqlSession,
+    db: Database,
     { history = 'all', serde }: { history?: 'all' | 'latest'; serde?: SerializerProtocol } = {},
   ) {
     super(serde);

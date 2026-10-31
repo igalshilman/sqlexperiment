@@ -4,7 +4,7 @@
  * the pair keeps up to date as it works.
  */
 import { tool } from 'restate-agents';
-import type { SqlDatabase } from 'restate-objects';
+import type { DatabaseWriter } from 'restate-objects';
 import { z } from 'zod';
 
 /** The plan's table, the project's own, beside the agent's: the pair's schema. */
@@ -18,7 +18,7 @@ export interface Task {
 }
 
 /** The plan: each task's number, text, and whether it is done. */
-export async function tasksOf(db: SqlDatabase): Promise<Task[]> {
+export async function tasksOf(db: DatabaseWriter): Promise<Task[]> {
   const rows = await db.query<{ n: number; task: string; done: number }>('SELECT n, task, done FROM plan ORDER BY n');
   return rows.map(({ n, task, done }) => ({ n, task, done: Boolean(done) }));
 }

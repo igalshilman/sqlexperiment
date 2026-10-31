@@ -13,25 +13,25 @@ import {
   type Row,
   sqlOver,
   SqlError,
-  type Database,
-  type SqlDatabase,
+  type Connection,
+  type DatabaseWriter,
   type SqlParam,
-  type SqlQueryResult,
+  type DatabaseReader,
   type SqlValue,
   type Store,
-  type Transaction,
+  type ConnectionTransaction,
 } from './database.ts';
 import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 
-export type { Row, SqlDatabase, SqlParam, SqlQueryResult, SqlValue };
+export type { DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue };
 
 /**
  * The object's database, `ctx.db`, for the whole handler: each statement
  * outside {@link transaction} is its own transaction. Calls run one at a
  * time, in call order.
  */
-export interface SqlSession extends SqlDatabase {
+export interface Database extends DatabaseWriter {
   /**
    * Run `body` as one SQL transaction: it commits when `body` resolves, and
    * rolls back when it rejects. The transaction holds the session: other
@@ -39,7 +39,7 @@ export interface SqlSession extends SqlDatabase {
    * refused, as it would wait for `body`. So `body` uses the `db` it gets,
    * which is invalid once `body` settles.
    */
-  transaction<T>(body: (db: SqlDatabase) => Promise<T>): Promise<T>;
+  transaction<T>(body: (db: DatabaseWriter) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -54,7 +54,7 @@ export type SqlTransactionSends = Pick<
 /** What the body of `ctx.transaction` gets. */
 export interface SqlTransaction {
   /** The transaction's SQL. */
-  db: SqlDatabase;
+  db: DatabaseWriter;
   /** The transaction's sends. */
   tx: SqlTransactionSends;
 }
@@ -217,7 +217,7 @@ async function forHandler<T>(call: Promise<T>): Promise<T> {
 }
 
 /** The SQL of a transaction's body: `tx`'s, failing as {@link forHandler} does. */
-function forBody(tx: Transaction): SqlDatabase {
+function forBody(tx: ConnectionTransaction): DatabaseWriter {
   return sqlOver((sql, params) => forHandler(tx.queryColumns(sql, params)));
 }
 
@@ -284,7 +284,7 @@ const DATABASE_NAME = /^[\w.-]{1,64}$/;
  * and ends with the attempt, as `ctx.db` does. A name is 1 to 64 letters,
  * digits, `_`, `-` or `.`.
  */
-export function databaseOf(db: SqlSession, name: string): SqlSession {
+export function databaseOf(db: Database, name: string): Database {
   if (!DATABASE_NAME.test(name)) throw new Error(`databaseOf: ${JSON.stringify(name)} is not a database name`);
   const attempt = attempts.get(db);
   if (attempt === undefined) throw new Error("databaseOf takes a handler's ctx.db");
@@ -299,13 +299,13 @@ export function databaseOf(db: SqlSession, name: string): SqlSession {
  */
 export class SqlAttempt {
   /** `ctx.db`. */
-  readonly db: SqlSession;
+  readonly db: Database;
   private readonly ctx: SqlHost;
   private readonly name: string | undefined;
   /** The key's other databases this attempt opened, by name. */
   private readonly databases = new Map<string, SqlAttempt>();
   /** The session, from its first use on. */
-  private session: Promise<Database> | undefined;
+  private session: Promise<Connection> | undefined;
   /** The ids of the outbox's transactions this attempt made the sends of. */
   private readonly made = new Set<string>();
   /** The schemas this attempt's database has all the steps of. */
@@ -326,7 +326,7 @@ export class SqlAttempt {
   }
 
   /** The key's database `name`, in this attempt: see {@link databaseOf}. */
-  database(name: string): SqlSession {
+  database(name: string): Database {
     if (this.ended) throw new Error('the handler has ended: its SQL session is closed');
     let database = this.databases.get(name);
     if (database === undefined) this.databases.set(name, (database = new SqlAttempt(this.ctx, name)));
@@ -337,7 +337,7 @@ export class SqlAttempt {
    * `ctx.transaction(body)`: one transaction of the session, whose sends are
    * made once it commits, and kept in the outbox until they are stored. A
    * call to the session from inside `body` is refused (see
-   * {@link Database.transaction}): `body` uses the `db` it gets.
+   * {@link Connection.transaction}): `body` uses the `db` it gets.
    */
   async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
     if (this.ctx.shared) throw new TerminalError('ctx.transaction is for exclusive handlers');
@@ -386,13 +386,13 @@ export class SqlAttempt {
   }
 
   /** `call` on the session, opening it on the first; its failure as the handler fails with it. */
-  private async call<T>(call: (db: Database) => Promise<T>): Promise<T> {
+  private async call<T>(call: (db: Connection) => Promise<T>): Promise<T> {
     const db = await this.opened();
     return forHandler(call(db));
   }
 
   /** Apply the steps of `schemas` that the database lacks, each schema once per attempt. */
-  private async ensureSchemas(db: Database, schemas: readonly Schema[]) {
+  private async ensureSchemas(db: Connection, schemas: readonly Schema[]) {
     const lacking = schemas.filter((s) => !this.ensured.has(s.name));
     if (lacking.length === 0) return;
     await forHandler(apply(db, lacking));
@@ -413,7 +413,7 @@ export class SqlAttempt {
   }
 
   /** The outbox as committed, but the transactions this attempt made the sends of: a commit made after them stores them first. */
-  private async unstored(db: Database | Transaction): Promise<Outgoing[]> {
+  private async unstored(db: Connection | ConnectionTransaction): Promise<Outgoing[]> {
     return decodeOutbox(await db.record(OUTBOX)).filter(({ id }) => !this.made.has(id));
   }
 
@@ -421,20 +421,20 @@ export class SqlAttempt {
    * Empty the outbox, so that a later open does not make its sends again: a
    * commit after them, which stores them first.
    */
-  private async flush(db: Database) {
+  private async flush(db: Connection) {
     if ((await db.record(OUTBOX)).length === 0) return;
     const outbox = encodeOutbox(await this.unstored(db));
     await db.transaction(async (tx) => tx.setRecord(OUTBOX, outbox));
   }
 
   /** The session, opening it on the first call. */
-  private opened(): Promise<Database> {
+  private opened(): Promise<Connection> {
     if (this.ended) return Promise.reject(new Error('the handler has ended: its SQL session is closed'));
     this.session ??= this.start();
     return this.session;
   }
 
-  private async start(): Promise<Database> {
+  private async start(): Promise<Connection> {
     const ctx = this.ctx;
     // The page cache's: the key escaped, so that no key reads as another's
     // database (a name has no `/`).
@@ -468,7 +468,7 @@ export class SqlAttempt {
     this.ended = true;
     const session = this.session;
     if (session === undefined) return settle(outcome);
-    let db: Database;
+    let db: Connection;
     try {
       db = await session;
     } catch {
@@ -497,7 +497,7 @@ export class SqlAttempt {
   }
 
   /** Empty the outbox and save the session; one a storage error ended only closes. */
-  private async save(db: Database) {
+  private async save(db: Connection) {
     if (!db.isUsable()) return db.close();
     await this.flush(db);
     await db.save();

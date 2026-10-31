@@ -26,7 +26,7 @@ async function stepsOf(map: Map<string, Uint8Array>, name: string) {
 const TABLES = "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name";
 
 /** A step of data: the notes so far are done. */
-const done = (tx: restate.SqlDatabase) => tx.execute('UPDATE notes SET done = 1');
+const done = (tx: restate.DatabaseWriter) => tx.execute('UPDATE notes SET done = 1');
 
 describe("an object's schema", () => {
   it('is applied once, where a key is first opened', async () => {

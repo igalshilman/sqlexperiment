@@ -28,7 +28,7 @@
 //   invocation id, and a retried attempt returns the answer of the turn that
 //   finished it.
 import * as restate from 'restate-objects';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import { Context } from '@deepseek-ai/cordis';
 import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { AgentLoop } from '@deepseek-ai/dsh-agent-loop';
@@ -127,7 +127,7 @@ function routeOf(model: string): Route {
  * an agent loop needs, the persistence and its checkpoints, and the provider
  * of `route`.
  */
-async function boot(db: restate.SqlSession, route: Route, system?: string): Promise<Context> {
+async function boot(db: restate.Database, route: Route, system?: string): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
@@ -446,7 +446,7 @@ const parsed = (json: string): unknown => {
 export const messages = () => messagesHandler();
 
 /** The session `key` in `db`, from its log, as `messages` gives it. */
-const transcribe = async (db: SqlSession, key: string) => {
+const transcribe = async (db: Database, key: string) => {
   const transcript = new Transcript();
   for (const e of await storedEvents(db, SessionId(key))) {
     // The prompts and the messages steered to them, not the requests to

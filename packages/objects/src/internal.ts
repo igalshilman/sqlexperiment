@@ -7,6 +7,6 @@ export * as sdk from '@restatedev/restate-sdk';
 export { Schema } from './schema.ts';
 export { databaseOf, setStoreWrapper, SqlAttempt, withSql } from './session.ts';
 export type { SqlHost } from './session.ts';
-export { open, type Database, type Store, type Transaction } from './database.ts';
+export { open, type Connection, type Store, type ConnectionTransaction } from './database.ts';
 export { PromiseSelector } from './selector.ts';
 export type { DoProgressResult, Selectable, UnresolvedFuture } from './selector.ts';

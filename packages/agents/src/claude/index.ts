@@ -24,7 +24,7 @@
 // - A reply cut off at `maxTokens`, or declined, ends the prompt: its tool
 //   calls do not run, and the handler fails with a terminal error.
 import * as restate from 'restate-objects';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
@@ -308,10 +308,10 @@ export const messages = () => messagesHandler();
  * attempt), as far as it was read: the conversation only grows, so each
  * read adds the messages stored since.
  */
-const transcripts = new WeakMap<SqlSession, { seq: number; transcript: Transcript }>();
+const transcripts = new WeakMap<Database, { seq: number; transcript: Transcript }>();
 
 /** The conversation in `db`, as `messages` gives it. */
-const transcribe = async (db: SqlSession): Promise<Transcript> => {
+const transcribe = async (db: Database): Promise<Transcript> => {
   const read = transcripts.get(db) ?? { seq: 0, transcript: new Transcript() };
   transcripts.set(db, read);
   const { transcript } = read;

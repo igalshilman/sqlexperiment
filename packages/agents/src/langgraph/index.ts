@@ -26,7 +26,7 @@
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
 import * as restate from 'restate-objects';
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { ChatAnthropic } from '@langchain/anthropic';
 import type { ChatOpenAI } from '@langchain/openai';
@@ -307,7 +307,7 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
 export const messages = () => messagesHandler();
 
 /** The thread `key` in `db`, from its last checkpoint, as `messages` gives it. */
-const transcribe = async (db: SqlSession, key: string) => {
+const transcribe = async (db: Database, key: string) => {
   const transcript = new Transcript();
   const saved = await new SqlCheckpointSaver(db).getTuple({ configurable: { thread_id: key } });
   for (const m of (saved?.checkpoint.channel_values.messages ?? []) as BaseMessage[]) {

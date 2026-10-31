@@ -21,18 +21,18 @@
 import * as restate from '@restatedev/restate-sdk';
 import { register, type Step } from './schema.ts';
 import { hookSelector } from './selector.ts';
-import { SqlAttempt, type SqlHost, type SqlSession, type SqlTransaction, withSql } from './session.ts';
+import { SqlAttempt, type SqlHost, type Database, type SqlTransaction, withSql } from './session.ts';
 
 // The SDK, but what this module declares in its place.
 export * from '@restatedev/restate-sdk';
 export type {
-  SqlDatabase,
-  SqlSession,
+  Database,
+  DatabaseReader,
+  DatabaseWriter,
+  Row,
+  SqlParam,
   SqlTransaction,
   SqlTransactionSends,
-  SqlParam,
-  Row,
-  SqlQueryResult,
   SqlValue,
 } from './session.ts';
 export type { Step } from './schema.ts';
@@ -66,7 +66,7 @@ export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> 
    * since a retry would repeat it; a storage error, which ends the session,
    * is retried. The handler's own errors are as in any handler.
    */
-  readonly db: SqlSession;
+  readonly db: Database;
 
   /**
    * Run `body` as one transaction of {@link db}, with the sends it makes:
@@ -88,7 +88,7 @@ export interface ObjectContext extends Omit<restate.ObjectContext, 'awakeable'> 
  * only one that outlives 16 of its commits fails, and Restate retries it.
  */
 export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, 'awakeable'> {
-  readonly db: SqlSession;
+  readonly db: Database;
 }
 
 /**

@@ -2,7 +2,7 @@
 // and lost writes.
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { open, type Database, type Store, type Transaction } from 'restate-objects/internal';
+import { open, type Connection, type Store, type ConnectionTransaction } from 'restate-objects/internal';
 import { test } from 'vitest';
 
 /** Stored values, and writes issued but not yet synced. */
@@ -246,7 +246,7 @@ test('a store may answer a value rather than a promise of it', async () => {
 test('a transaction holds the session: other calls wait until it ends', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');
-  let handle: Transaction | undefined;
+  let handle: ConnectionTransaction | undefined;
   const rolledBack = db.transaction(async (tx) => {
     handle = tx;
     await tx.execute('INSERT INTO t VALUES(1)');
@@ -364,7 +364,8 @@ test('a call running meanwhile does not make the session look unusable', async (
 });
 
 /** A session's record `name`, as text. */
-const text = async (db: Database | Transaction, name = 'outbox') => new TextDecoder().decode(await db.record(name));
+const text = async (db: Connection | ConnectionTransaction, name = 'outbox') =>
+  new TextDecoder().decode(await db.record(name));
 
 const bytes = (value: string) => new TextEncoder().encode(value);
 

@@ -2,13 +2,13 @@
 // without a Restate server: each its own tables, stored in the object's state
 // beside `ctx.db`'s, opened on first use and ended with the attempt.
 import { randomUUID } from 'node:crypto';
-import type { SqlDatabase } from 'restate-objects';
+import type { DatabaseWriter } from 'restate-objects';
 import { databaseOf } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 
 /** Make table `t` in `db` and insert three rows, one statement at a time; then its rows. */
-async function insertThree(db: SqlDatabase) {
+async function insertThree(db: DatabaseWriter) {
   await db.execute('CREATE TABLE t (x)');
   for (let i = 0; i < 3; i++) await db.execute('INSERT INTO t VALUES (1)');
   return db.values('SELECT count(*) FROM t');

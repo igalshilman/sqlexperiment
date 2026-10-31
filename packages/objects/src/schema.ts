@@ -20,14 +20,14 @@
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
 // they use them, in any object: internal, from restate-objects/internal.
-import type { Database, SqlDatabase, Transaction } from './database.ts';
-import type { SqlSession } from './session.ts';
+import type { Connection, DatabaseWriter, ConnectionTransaction } from './database.ts';
+import type { Database } from './session.ts';
 
 /** The database's record of how many steps of the schema `name` it has. */
 const recordOf = (name: string) => `schema/${name}`;
 
 /** A statement, or an async function of the transaction. */
-export type Step = string | ((tx: SqlDatabase) => Promise<void>);
+export type Step = string | ((tx: DatabaseWriter) => Promise<void>);
 
 /** A part of a database's schema: its `name`, and the `steps` that make it, in order. */
 export class Schema {
@@ -44,9 +44,9 @@ export class Schema {
    * any object. On a handler's `ctx.db`, once per attempt, and a shared
    * handler's are its own, vanishing with its session.
    */
-  ensure(db: SqlSession | Database): Promise<void> {
+  ensure(db: Database | Connection): Promise<void> {
     const session = sessions.get(db);
-    return session ? session([this]) : apply(db as Database, [this]);
+    return session ? session([this]) : apply(db as Connection, [this]);
   }
 }
 
@@ -63,7 +63,7 @@ export const register = (name: string, steps: readonly Step[]) => void objects.s
 export const ofObject = (name: string) => objects.get(name);
 
 /** Apply the steps of `schemas` that `db` lacks, in one transaction, with how far each got. */
-export async function apply(db: Database, schemas: readonly Schema[]) {
+export async function apply(db: Connection, schemas: readonly Schema[]) {
   if ((await behind(db, schemas)).length === 0) return;
   await db.transaction(async (tx) => {
     // Again, now that the transaction holds the session: a call before it
@@ -78,7 +78,7 @@ export async function apply(db: Database, schemas: readonly Schema[]) {
 }
 
 /** The schemas `db` lacks steps of, with how many it has. */
-async function behind(db: Database | Transaction, schemas: readonly Schema[]) {
+async function behind(db: Connection | ConnectionTransaction, schemas: readonly Schema[]) {
   const applied = await Promise.all(
     schemas.map(async (schema) => {
       const record = await db.record(recordOf(schema.name));

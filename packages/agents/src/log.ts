@@ -14,7 +14,7 @@
 // got to: the next conversation's ids and cursors go on from there
 // (`START`), so a client following it reads on, and drops the messages
 // before `first`.
-import type { SqlSession } from 'restate-objects';
+import type { Database } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
@@ -62,10 +62,10 @@ interface Head {
  * stored it: the next compares the transcript with it, rather than read the
  * whole log again at each step.
  */
-const heads = new WeakMap<SqlSession, Head>();
+const heads = new WeakMap<Database, Head>();
 
 /** The log's head in `db`: as this session stored it last, or else as the log has it. */
-async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promise<Head> {
+async function headOf(db: Database, start: () => Promise<Start | null>): Promise<Head> {
   const cached = heads.get(db);
   if (cached) return cached;
   const rows = (await db.values(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
@@ -83,7 +83,7 @@ async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promi
  * Store the transcript's `messages`, in order, in the log: those that
  * changed since the last time, in one transaction.
  */
-export async function sync(db: SqlSession, messages: Said[], start: () => Promise<Start | null>) {
+export async function sync(db: Database, messages: Said[], start: () => Promise<Start | null>) {
   await SCHEMA.ensure(db);
   const head = await headOf(db, start);
   // A message the transcript did not change is the one stored (see Transcript in common.ts):
@@ -132,7 +132,7 @@ export async function sync(db: SqlSession, messages: Said[], start: () => Promis
  * cursor to follow the conversation from.
  */
 export async function page(
-  db: SqlSession,
+  db: Database,
   { limit = 50, before, cursor }: MessagesRequest,
   start: Start | null,
 ): Promise<Messages> {
