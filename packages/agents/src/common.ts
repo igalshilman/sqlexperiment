@@ -111,6 +111,13 @@ export const messageSerde: restate.Serde<string> = {
  */
 export const CANCELLED = 'Cancelled: the turn was stopped before it finished.';
 
+/**
+ * What a prompt answers that the model's provider refused for good (see
+ * {@link refusal}): the prompt is over, and the model sees it in the
+ * conversation that goes on, rather than answer it with the next message.
+ */
+export const UNANSWERED = "Unanswered: the model's provider refused the request.";
+
 /** The state key of the {@link Turn} being answered. */
 export const TURN = 'restate-agents.turn';
 

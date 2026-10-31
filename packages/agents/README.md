@@ -130,7 +130,8 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'       # "Hello Alic
 A key answers one message at a time: a message sent while another is
 answered waits for it. A message that fails for good answers with an error:
 HTTP 424 if the model's provider refused it (a missing or wrong API key, an
-unknown model), 500 otherwise.
+unknown model), 500 otherwise. A refused message is over: the next message
+is answered on its own, not after it.
 
 **Send now, fetch the answer later.** A turn can take longer than an HTTP
 request should wait (a tool that waits for a person, say). Add `/send` to

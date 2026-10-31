@@ -14,6 +14,7 @@ export {
   type Part,
   REFUSED,
   type Turn,
+  UNANSWERED,
   type Configure,
 } from './common.ts';
 export { object, type Status, type Stopped } from './object.ts';

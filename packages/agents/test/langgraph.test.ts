@@ -4,7 +4,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
 import type { ObjectContext } from 'restate-objects';
-import { CANCELLED } from 'restate-agents';
+import { CANCELLED, REFUSED, UNANSWERED } from 'restate-agents';
 import {
   afterCancel,
   cancelledTransfer,
@@ -20,6 +20,7 @@ import {
 import { Teller } from './fakes/langgraph.ts';
 import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
+import { bank } from './bank.ts';
 
 vi.mock('@langchain/openai', () => import('./fakes/langgraph.ts'));
 
@@ -111,6 +112,24 @@ describe('the LangGraph agent', () => {
     const values = await c.read(count('restate_langgraph_channel_values'));
     await c.attempt('inv3', 'Please move 5 from 1 to 2');
     expect(await c.read(count('restate_langgraph_channel_values'))).toBe(values);
+  });
+
+  it('ends a prompt the provider refused, and answers the next message afresh', async () => {
+    // The teller, but for its first reply: a wrong API key.
+    let refused = false;
+    const model = new (class extends Teller {
+      override reply(...args: Parameters<Teller['reply']>) {
+        if (refused) return super.reply(...args);
+        refused = true;
+        throw new Error('Anthropic API key not found');
+      }
+    })({});
+    const c = conversation(langgraph.chat({ model, tools: bank('GraphAgent') }), 'refused');
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(c.ledger.calls).toEqual([]);
+    const { messages } = await c.read(langgraph.messages());
+    expect(messages[1]!.parts).toEqual([{ type: 'text', text: UNANSWERED }]);
   });
 
   it('gives the model its system prompt', async () => {

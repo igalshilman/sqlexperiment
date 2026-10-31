@@ -3,7 +3,7 @@
 // the way out of a crashed attempt. `pnpm --filter restate-agents test claude`. Its client is the teller's (../fakes/claude.ts).
 import * as restate from 'restate-objects';
 import { describe, expect, it, vi } from 'vitest';
-import { CANCELLED, tool } from 'restate-agents';
+import { CANCELLED, REFUSED, tool, UNANSWERED } from 'restate-agents';
 import { z } from 'zod';
 import {
   afterCancel,
@@ -284,6 +284,20 @@ describe('the Claude agent', () => {
     // The next message is answered, not the one cut off again.
     expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
     expect(c.ledger.calls).toEqual([]);
+  });
+
+  it('ends a prompt the provider refused, and answers the next message afresh', async () => {
+    const c = conversation(prompt, 'refused');
+    const reply = teller.reply;
+    teller.reply = () => {
+      teller.reply = reply;
+      throw new HttpError(401, 'authentication_error', 'invalid x-api-key');
+    };
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(c.ledger.calls).toEqual([]);
+    const { messages } = await c.read(claude.messages());
+    expect(messages[1]!.parts).toEqual([{ type: 'text', text: UNANSWERED }]);
   });
 
   it('finishes an interrupted prompt before starting the next one', async () => {

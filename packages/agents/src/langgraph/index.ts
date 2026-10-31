@@ -50,6 +50,8 @@ import {
   toolCallStarted,
   type Transcript,
   transcribing,
+  refusal,
+  UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import type { z } from 'zod';
@@ -234,20 +236,22 @@ const answerOnce = async (
     } catch (error) {
       // Cancelled: the run ends, and the next prompt starts afresh.
       if (turn?.aborted || error instanceof restate.CancelledError) {
-        await cancel(app, config);
+        await close(app, config, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
+      // Refused for good (a wrong API key): the run ends unanswered.
+      if (refusal(error)) await close(app, config, UNANSWERED);
       throw error;
     }
   }
 };
 
 /**
- * End the run of `app` that was cancelled, as its `answer` node: a result for
- * each tool call of the last reply that has none, then {@link CANCELLED} as
- * the reply and the prompt's answer.
+ * End the run of `app` that was cancelled or refused, as its `answer` node: a
+ * result of `text` for each tool call of the last reply that has none, then
+ * `text` as the reply and the prompt's answer.
  */
-async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, config: RunnableConfig) {
+async function close(app: ReturnType<ReturnType<typeof graph>['compile']>, config: RunnableConfig, text: string) {
   const { values } = await app.getState(config);
   const messages = (values.messages ?? []) as BaseMessage[];
   const answered = new Set(messages.filter((m) => ToolMessage.isInstance(m)).map((m) => m.tool_call_id));
@@ -259,10 +263,10 @@ async function cancel(app: ReturnType<ReturnType<typeof graph>['compile']>, conf
     config,
     {
       messages: [
-        ...calls.map((call) => new ToolMessage({ tool_call_id: call.id!, content: CANCELLED, status: 'error' })),
-        new AIMessage(CANCELLED),
+        ...calls.map((call) => new ToolMessage({ tool_call_id: call.id!, content: text, status: 'error' })),
+        new AIMessage(text),
       ],
-      answers: { [values.prompt]: CANCELLED },
+      answers: { [values.prompt]: text },
     },
     'answer',
   );

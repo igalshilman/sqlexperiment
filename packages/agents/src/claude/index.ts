@@ -43,6 +43,8 @@ import {
   toolCallStarted,
   type Transcript,
   transcribing,
+  refusal,
+  UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import type { z } from 'zod';
@@ -256,6 +258,8 @@ const answerOnce = async (
         await conversation.cancel(pending, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
+      // Refused for good (a wrong API key): the prompt ends unanswered.
+      if (refusal(error)) await conversation.close(pending, UNANSWERED);
       throw error;
     }
   }

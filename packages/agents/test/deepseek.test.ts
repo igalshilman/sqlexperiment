@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestMessage } from '@deepseek-ai/dsh-llm';
 import * as restate from '@restatedev/restate-sdk';
+import { REFUSED } from 'restate-agents';
 import {
   afterCancel,
   cancelledTransfer,
@@ -39,6 +40,18 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
+  it('ends a prompt the provider refused, and answers the next message afresh', async () => {
+    const c = conversation(prompt, 'refused');
+    const reply = teller.reply;
+    teller.reply = () => {
+      teller.reply = reply;
+      throw new Error('API key not found');
+    };
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(c.ledger.calls).toEqual([]);
+  });
+
   it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
     const { answer, ran } = await invalidArguments((tools) => deepseek.chat({ tools }));
     expect(answer).toMatch(/error/i);

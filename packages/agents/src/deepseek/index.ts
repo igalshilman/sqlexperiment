@@ -68,6 +68,8 @@ import {
   toolCallStarted,
   type Transcript,
   transcribing,
+  refusal,
+  UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import { type Definition, object } from '../object.ts';
@@ -150,9 +152,10 @@ const textOf = (message: Message) => message.content.flatMap((c) => (c.type === 
 
 /**
  * The answer to prompt `id` in the session log: the last reply of the first
- * turn completed after it, or {@link CANCELLED} if a cancellation aborted its
- * turn; undefined while it is absent or unfinished (a crash's interrupted
- * turn is continued).
+ * turn completed after it, {@link CANCELLED} if a cancellation aborted its
+ * turn, or {@link UNANSWERED} if the model's provider refused it for good;
+ * undefined while it is absent or unfinished (a crash's interrupted turn, or
+ * one that failed otherwise, is continued).
  */
 function answerOf(events: readonly SessionEvent[], id: MessageId): string | undefined {
   const at = events.findIndex((e) => e.type === 'user/message' && e.data.id === id);
@@ -160,13 +163,17 @@ function answerOf(events: readonly SessionEvent[], id: MessageId): string | unde
   let answer: string | undefined;
   for (const e of events.slice(at)) {
     if (e.type === 'assistant/message') answer = textOf(e.data.message);
-    if (e.type === 'turn/end' && e.data.reason.kind === 'completed') return answer ?? '';
-    if (e.type === 'turn/end' && e.data.reason.kind === 'aborted' && e.data.reason.reason.kind === 'user') {
-      return CANCELLED;
-    }
+    if (e.type !== 'turn/end') continue;
+    const { reason } = e.data;
+    if (reason.kind === 'completed') return answer ?? '';
+    if (reason.kind === 'aborted' && reason.reason.kind === 'user') return CANCELLED;
+    if (reason.kind === 'error' && refusal(turnError(reason.error))) return UNANSWERED;
   }
   return undefined;
 }
+
+/** The error a turn failed with, as the attempt fails with it (see {@link throwIfTurnFailed}). */
+const turnError = (error: unknown) => new Error(`the agent's turn failed: ${JSON.stringify(error)}`);
 
 /** The last prompt in the session log, by id. */
 function lastPrompt(events: readonly SessionEvent[]): MessageId | undefined {
@@ -331,9 +338,10 @@ async function answered(harness: Context, agent: Agent, id: string, text: string
   const found = agent.session.snapshotEvents().length;
   for (;;) {
     const events = agent.session.snapshotEvents();
+    // First: a prompt refused in this attempt fails it, rather than answer.
+    throwIfTurnFailed(events.slice(found));
     const answer = answerOf(events, promptId(id));
     if (answer !== undefined) return answer;
-    throwIfTurnFailed(events.slice(found));
     const last = lastPrompt(events);
     const unfinished = last !== undefined && answerOf(events, last) === undefined;
     agent.followup(unfinished ? message(`continue:${events.length}`, CONTINUE) : message(promptId(id), text));
@@ -349,7 +357,7 @@ async function answered(harness: Context, agent: Agent, id: string, text: string
  */
 function throwIfTurnFailed(events: readonly SessionEvent[]) {
   const end = events.findLast((e): e is SessionEvent<'turn/end'> => e.type === 'turn/end')?.data.reason;
-  if (end?.kind === 'error') throw new Error(`the agent's turn failed: ${JSON.stringify(end.error)}`);
+  if (end?.kind === 'error') throw turnError(end.error);
 }
 
 /** Cancel `agent`'s turn, and store it cancelled. */
