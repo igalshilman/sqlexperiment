@@ -1,15 +1,20 @@
-// The packages as a user installs them: restate-objects and restate-agents
-// packed (pnpm pack, which builds their JavaScript), checked (publint, and
-// Are the Types Wrong?), then installed with npm into a new project with pi's
-// harness alone. Its agent runs and type-checks; the other harnesses'
-// subpaths fail for their missing packages; and the install is weighed.
+// The packages as a user installs them: restate-objects, its addon's package
+// for this machine, and restate-agents packed (pnpm pack, which builds their
+// JavaScript), checked (publint, and Are the Types Wrong?), then installed
+// with npm into a new project with pi's harness alone. A database opens
+// through the addon, the agent runs and type-checks, the other harnesses'
+// subpaths fail for their missing packages, and the install is weighed.
 //
 //   pnpm --filter restate-objects build:dist   # the addon as a package ships it
 //   pnpm --filter e2e packaging
+//
+// PACKAGES=<dir> takes the tarballs there instead, every platform's addon
+// among them, as the CI packs them (.github/workflows/packages.yml).
 import { execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { platform } from '../objects/src/platform.ts';
 
 const root = new URL('../../', import.meta.url).pathname;
 const bin = (name: string) => join(root, 'node_modules/.bin', name);
@@ -23,16 +28,24 @@ const at = mkdtempSync(join(tmpdir(), 'restate-packaging-'));
 console.log(`in ${at}`);
 
 // Packed, as published: the JavaScript in dist/, and the exports to it.
-run('pnpm', ['--filter', 'restate-objects', '--filter', 'restate-agents', 'pack', '--pack-destination', at], {
-  cwd: root,
-  stdio: ['ignore', 'ignore', 'inherit'],
-});
-const tarballs = readdirSync(at).filter((name) => name.endsWith('.tgz'));
+const packages = process.env.PACKAGES ?? at;
+if (!process.env.PACKAGES) {
+  const addon = `./packages/objects/npm/${platform()}`;
+  const filters = ['restate-objects', 'restate-agents', addon].flatMap((name) => ['--filter', name]);
+  run('pnpm', [...filters, 'pack', '--pack-destination', at], { cwd: root, stdio: ['ignore', 'ignore', 'inherit'] });
+}
+const tarballs = readdirSync(packages).filter((name) => name.endsWith('.tgz'));
 const tarball = (name: string) =>
   join(
-    at,
-    tarballs.find((t) => t.startsWith(`${name}-`))!,
+    packages,
+    tarballs.find((t) => t.slice(0, t.lastIndexOf('-')) === name)!,
   );
+// Each platform's addon, which npm installs on its platform alone.
+const addons = Object.fromEntries(
+  tarballs
+    .filter((t) => t.startsWith('restate-objects-') && !/^restate-objects-\d/.test(t))
+    .map((t) => [t.slice(0, t.lastIndexOf('-')), `file:${join(packages, t)}`]),
+);
 for (const name of ['restate-objects', 'restate-agents']) {
   run(bin('publint'), ['run', tarball(name), '--strict']);
   // ESM only: CommonJS imports them with import().
@@ -57,15 +70,31 @@ writeFileSync(
       'restate-agents': `file:${tarball('restate-agents')}`,
       ...Object.fromEntries(pi.map((name) => [name, agents.devDependencies[name]])),
     },
+    // Not published: from their tarballs, each skipped on another platform.
+    optionalDependencies: addons,
   }),
 );
 run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: app });
 
-// It runs, from the package's JavaScript.
+// A database opens through the addon, and the agent runs, from the package's
+// JavaScript.
 writeFileSync(
   join(app, 'agent.ts'),
   `import { object } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
+import { open } from 'restate-objects/internal';
+
+const values = new Map<string, Uint8Array>();
+const db = await open('packaging', {
+  get: async (key) => values.get(key),
+  set: (key, value) => void values.set(key, value),
+  clear: (key) => void values.delete(key),
+  sync: async () => {},
+});
+await db.execute('CREATE TABLE t (n INTEGER)');
+await db.execute('INSERT INTO t VALUES (42)');
+console.log(\`the addon runs SQL: \${JSON.stringify(await db.query('SELECT n FROM t'))}\`);
+await db.save();
 
 export const agent = object({ name: 'agent', handlers: { chat: pi.chat({ system: 'Be brief.' }) } });
 console.log(Object.keys(agent).length > 0 ? 'restate-agents/pi runs' : 'no agent');
@@ -121,7 +150,7 @@ const size = (path: string): number =>
 const installed = output('npm', ['ls', '--all', '--parseable'], app).trim().split('\n').length - 1;
 const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
 console.log(`installed: ${installed} packages, ${mb(size(join(app, 'node_modules')))}`);
-for (const name of ['restate-objects', 'restate-agents']) {
+for (const name of ['restate-objects', `restate-objects-${platform()}`, 'restate-agents']) {
   console.log(`  ${name}: ${mb(size(join(app, 'node_modules', name)))} (packed ${mb(statSync(tarball(name)).size)})`);
 }
 rmSync(at, { recursive: true });

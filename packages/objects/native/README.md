@@ -124,7 +124,7 @@ From `packages/objects`; at the repository's root, `pnpm build` builds the
 addon, and `pnpm test` runs its tests with the rest:
 
 ```sh
-pnpm build                          # release build, copied to native/objects.node
+pnpm build                          # release build, into this machine's package (npm/<platform>)
 pnpm build:debug
 pnpm test:rust                      # cargo test: the state and SQL, their API, crashes and fault campaigns
 pnpm lint:rust                      # rustfmt, and clippy with and without the crate's features

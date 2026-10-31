@@ -5,8 +5,7 @@
   "description": "SQL in Restate virtual objects: a database per key, kept in the object's state (ctx.db)",
   "files": [
     "dist",
-    "src",
-    "native/objects.node"
+    "src"
   ],
   "type": "module",
   "sideEffects": false,
@@ -28,19 +27,24 @@
     }
   },
   "scripts": {
-    "build": "cargo build --release --manifest-path native/Cargo.toml && node native/copy-addon.mjs release",
-    "build:debug": "cargo build --manifest-path native/Cargo.toml && node native/copy-addon.mjs debug",
+    "build": "cargo build --release --manifest-path native/Cargo.toml && node native/copy-addon.ts release",
+    "build:debug": "cargo build --manifest-path native/Cargo.toml && node native/copy-addon.ts debug",
     "test": "vitest run",
     "test:rust": "cd native && cargo test --locked --release",
     "lint:rust": "cd native && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo clippy --locked --all-targets --features bench,object-store -- -D warnings",
     "format:rust": "cd native && cargo fmt",
-    "build:dist": "cargo build --locked --profile dist --manifest-path native/Cargo.toml && node native/copy-addon.mjs dist",
+    "build:dist": "cargo build --locked --profile dist --manifest-path native/Cargo.toml && node native/copy-addon.ts dist",
     "build:ts": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "prepack": "pnpm build:ts"
   },
   "dependencies": {
     "@restatedev/restate-sdk": "1.17.4",
     "@restatedev/restate-sdk-core": "1.17.4"
+  },
+  "optionalDependencies": {
+    "restate-objects-darwin-arm64": "workspace:*",
+    "restate-objects-linux-arm64-gnu": "workspace:*",
+    "restate-objects-linux-x64-gnu": "workspace:*"
   },
   "engines": {
     "node": ">=24"

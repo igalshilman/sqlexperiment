@@ -1,5 +1,7 @@
 packages:
   - packages/*
+  # restate-objects' addon, a package per platform.
+  - packages/objects/npm/*
 # Dependencies whose install scripts run (npm ran them all).
 allowBuilds:
   '@google/genai': true

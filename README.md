@@ -217,12 +217,17 @@ To run an example, see [Run an example](packages/examples/README.md#run-an-examp
 In the workspace, node runs each package's TypeScript as it is. Packed
 (`pnpm pack`), `restate-objects` and `restate-agents` are JavaScript and its
 types, compiled into `dist/` (`pnpm --filter <package> build:ts`), ESM only,
-each module a file of its own; restate-objects carries its addon.
+each module a file of its own. restate-objects' addon is a package per
+platform (`restate-objects-<platform>`, in `packages/objects/npm`), which it
+depends on optionally: a package manager installs its machine's alone. CI
+builds them for Linux (x64 and arm64, glibc 2.35 or later) and macOS on Apple
+silicon, packs every package, and installs them on each
+([`packages.yml`](.github/workflows/packages.yml)).
 restate-agents has each framework's packages as optional peer dependencies:
 a project installs those of the frameworks it imports
 ([which](packages/agents/README.md#choose-a-framework)).
 
 ```sh
-pnpm --filter restate-objects build:dist   # the addon a package ships: smaller and whole-program optimized (minutes)
+pnpm --filter restate-objects build:dist   # this machine's addon as it ships: smaller and whole-program optimized (minutes)
 pnpm --filter e2e packaging                # both packed, linted, and installed as a user's project with pi alone
 ```

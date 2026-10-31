@@ -5,6 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { createRequire } from 'node:module';
+import { PLATFORMS, platform } from './platform.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 export type SqlValue = null | number | bigint | string | Uint8Array;
@@ -48,9 +49,24 @@ interface Native {
 
 type Request = [op: number, key: string, value: Uint8Array | null];
 
-const addon = createRequire(import.meta.url)('../native/objects.node') as {
+const addon = load() as {
   open(namespace: string, dispatch: (request: Request) => unknown, reader: boolean): Promise<Native>;
 };
+
+/** The addon of this machine's platform: its package's (see platform.ts). */
+function load(): unknown {
+  const name = `restate-objects-${platform()}`;
+  try {
+    return createRequire(import.meta.url)(name);
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 'MODULE_NOT_FOUND') throw error;
+    throw new Error(
+      `restate-objects found no addon for ${platform()}, the package ${name}: it ships them for ` +
+        `${PLATFORMS.join(', ')}. In its repository, \`pnpm build\` builds this machine's.`,
+      { cause: error },
+    );
+  }
+}
 
 // The store's operations, as the addon passes them.
 const GET = 0;

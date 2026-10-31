@@ -1,0 +1,19 @@
+{
+  "name": "restate-objects-linux-arm64-gnu",
+  "version": "0.1.0",
+  "private": true,
+  "description": "restate-objects' addon for Linux on arm64, glibc 2.35 or later: installed with restate-objects, on that platform alone",
+  "files": [
+    "objects.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "objects.node"
+}
