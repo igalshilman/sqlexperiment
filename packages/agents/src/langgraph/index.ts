@@ -204,12 +204,15 @@ const answerOnce = async (
   { model, system, tools = [] }: Options,
 ): Promise<string> => {
   const llm = typeof model === 'object' ? model : await chatModel(modelOf(model));
+  // The latest checkpoint is all an agent resumes from: earlier ones would
+  // store the conversation again at each step.
+  const checkpointer = new SqlCheckpointSaver(ctx.db, { history: 'latest' });
   const app = graph(
     ctx,
     llm,
     tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
     system,
-  ).compile({ checkpointer: new SqlCheckpointSaver(ctx.db) });
+  ).compile({ checkpointer });
   const config = { configurable: { thread_id: ctx.key }, durability: 'sync' as const };
   const id = nextPromptId(ctx);
   for (;;) {

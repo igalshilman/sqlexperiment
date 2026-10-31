@@ -3,6 +3,7 @@
 // way out of a crashed attempt. `pnpm --filter restate-agents test langgraph`. Its model is the teller (../fakes/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
+import type { ObjectContext } from 'restate-objects';
 import { CANCELLED } from 'restate-agents';
 import {
   afterCancel,
@@ -21,6 +22,10 @@ import * as langgraph from 'restate-agents/langgraph';
 import { prompt } from './langgraph.ts';
 
 vi.mock('@langchain/openai', () => import('./fakes/langgraph.ts'));
+
+/** The rows of `table` in an object's database. */
+const count = (table: string) => async (ctx: ObjectContext) =>
+  Number((await ctx.db.query(`SELECT COUNT(*) FROM ${table}`))[0]![0]);
 
 describe('the LangGraph agent', () => {
   it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
@@ -94,6 +99,18 @@ describe('the LangGraph agent', () => {
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
     expect(await c.read(langgraph.messages())).toEqual({ messages: SAID, more: false, cursor: expect.any(Number) });
+  });
+
+  it('keeps the latest checkpoint only, and the values it has', async () => {
+    const c = conversation(prompt, 'latest');
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    await c.attempt('inv2', 'audit the books');
+    expect(await c.read(count('restate_langgraph_checkpoints'))).toBe(1);
+    expect(await c.read(langgraph.messages())).toMatchObject({ messages: SAID });
+    // One value per channel (the messages, the prompt, the answers...), however long the conversation.
+    const values = await c.read(count('restate_langgraph_channel_values'));
+    await c.attempt('inv3', 'Please move 5 from 1 to 2');
+    expect(await c.read(count('restate_langgraph_channel_values'))).toBe(values);
   });
 
   it('gives the model its system prompt', async () => {

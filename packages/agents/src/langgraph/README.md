@@ -35,8 +35,11 @@ loop: a model node, a tools node, and back to the model until it answers.
 
 The checkpointer ([`checkpointer.ts`](checkpointer.ts), `SqlCheckpointSaver`)
 keeps checkpoints, channel values and pending writes in three tables; a step
-stores only the channels it changed, so a long conversation does not store
-its whole message list at every step. The handler is not replayed: a retried
+stores only the channels it changed. An agent's thread keeps its latest
+checkpoint only (`history: 'latest'`), as each step changes the message
+list: kept at every step, it would grow with the square of the
+conversation. `new SqlCheckpointSaver(db)` of your own graph keeps them all,
+for LangGraph's history. The handler is not replayed: a retried
 attempt runs it again from the start, and LangGraph carries on from the last
 step it stored.
 

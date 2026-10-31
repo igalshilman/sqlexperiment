@@ -106,8 +106,9 @@ describe('a webhook', () => {
   });
 
   it('says what it is in its handler metadata', () => {
-    const [symbol] = Object.getOwnPropertySymbols(handlerOf(issues));
-    const wrapper = (handlerOf(issues) as unknown as Record<symbol, { options: { metadata: Record<string, string> } }>)[symbol!]!;
+    const handler = handlerOf(issues);
+    const [symbol] = Object.getOwnPropertySymbols(handler);
+    const wrapper = (handler as unknown as Record<symbol, { options: { metadata: Record<string, string> } }>)[symbol!]!;
     expect(wrapper.options.metadata).toEqual({
       'restate-agents.kind': 'webhook',
       'restate-agents.routes': 'triage,audit',

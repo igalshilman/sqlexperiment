@@ -16,6 +16,13 @@
 // Each `put` and `putWrites` is one SQL transaction, so a step is stored whole,
 // in order with everything else the handler does. Operations run one at a
 // time, in call order: LangGraph writes the results of parallel tasks at once.
+//
+// By default a thread keeps every checkpoint (LangGraph's history: `list`,
+// time travel, forks). With `history: 'latest'`, each `put` drops the
+// thread's earlier checkpoints, their writes and the values only they had:
+// a thread then takes the space of its state once, not once per step (a
+// message list stored again at each step grows with the square of its
+// length).
 import { randomUUID } from 'node:crypto';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
@@ -33,7 +40,7 @@ import {
   type PendingWrite,
   type SerializerProtocol,
 } from '@langchain/langgraph-checkpoint';
-import type { SqlSession, SqlValue } from 'restate-objects';
+import type { SqlDatabase, SqlSession, SqlValue } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 
 const SCHEMA = new Schema('restate-agents.langgraph', [
@@ -94,16 +101,46 @@ function matches(actual: unknown, expected: unknown): boolean {
   return Object.entries(expected).every(([key, value]) => matches((actual as Record<string, unknown>)[key], value));
 }
 
+/**
+ * Drop what the thread `threadId` (namespace `ns`) keeps from before
+ * `checkpoint`: its other checkpoints, their pending writes, and the channel
+ * values at versions other than `checkpoint`'s.
+ */
+async function dropEarlier(tx: SqlDatabase, threadId: string, ns: string, checkpoint: Checkpoint) {
+  const thread = [threadId, ns];
+  for (const table of ['restate_langgraph_checkpoints', 'restate_langgraph_writes']) {
+    await tx.execute(`DELETE FROM ${table} WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?`, [
+      ...thread,
+      checkpoint.id,
+    ]);
+  }
+  const versions = Object.entries(checkpoint.channel_versions ?? {});
+  const kept = versions.map(() => '(channel = ? AND version = ?)').join(' OR ') || '0';
+  await tx.execute(
+    `DELETE FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND NOT (${kept})`,
+    [...thread, ...versions.flatMap(([channel, version]) => [channel, String(version)])],
+  );
+}
+
 /** A LangGraph checkpointer whose threads are in the database session `db`: see the top of this file. */
 export class SqlCheckpointSaver extends BaseCheckpointSaver {
   #db: SqlSession;
+  #latest: boolean;
   #ready: Promise<void> | undefined;
   #tail: Promise<unknown> = Promise.resolve();
 
-  /** `db`: a database session (`ctx.db`). */
-  constructor(db: SqlSession, serde?: SerializerProtocol) {
+  /**
+   * `db`: a database session (`ctx.db`). `history`: the checkpoints a thread
+   * keeps, `all` (the default) or the `latest` only; `serde`: LangGraph's
+   * serializer, by default its own.
+   */
+  constructor(
+    db: SqlSession,
+    { history = 'all', serde }: { history?: 'all' | 'latest'; serde?: SerializerProtocol } = {},
+  ) {
     super(serde);
     this.#db = db;
+    this.#latest = history === 'latest';
   }
 
   /**
@@ -272,6 +309,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
           `INSERT OR REPLACE INTO restate_langgraph_checkpoints (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [thread_id, checkpoint_ns, checkpoint.id, parentId ?? null, type, stored, metadataValue],
         );
+        if (this.#latest) await dropEarlier(tx, thread_id, checkpoint_ns, checkpoint);
       });
       return { configurable: { thread_id, checkpoint_ns, checkpoint_id: checkpoint.id } };
     });
