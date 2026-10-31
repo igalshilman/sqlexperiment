@@ -306,10 +306,9 @@ class OpenTransaction extends Sql implements Transaction {
   }
 
   record(name: string): Promise<Uint8Array> {
-    return this.serial(async () => {
-      const set = this.records.get(name) ?? (await this.request(() => this.native.record(name)));
-      return new Uint8Array(set);
-    });
+    // As set when it is called, in call order with `setRecord`.
+    const set = this.records.get(name);
+    return this.serial(async () => new Uint8Array(set ?? (await this.request(() => this.native.record(name)))));
   }
 
   /** Run `call`, made while the transaction is open, once the calls before it have. */

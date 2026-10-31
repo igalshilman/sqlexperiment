@@ -336,14 +336,16 @@ test('records commit with their transaction, and only then', async () => {
   await db.execute('CREATE TABLE t(id INTEGER)');
   assert.equal(await text(db), '');
   // Even with a transaction that changes nothing; two records at once.
-  // Inside, the transaction reads its own records; the session waits for it.
+  // Inside, the transaction reads its own records, in call order (a read
+  // made before a set, not awaited, does not see it); the session waits.
   let before: string | undefined;
   let after: string | undefined;
   await db.transaction(async (tx) => {
     await tx.query('SELECT * FROM t');
-    before = await text(tx);
+    const earlier = text(tx);
     tx.setRecord('outbox', bytes('sends 1'));
     tx.setRecord('schema', bytes('1'));
+    before = await earlier;
     after = await text(tx);
     await assert.rejects(text(db), /use the transaction handle/);
   });
