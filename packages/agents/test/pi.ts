@@ -36,7 +36,7 @@ const transfer = (ctx: restate.ObjectContext) =>
         restate.rpc.opts({ idempotencyKey }),
       );
       return {
-        content: [
+        output: [
           { type: 'text', text: `moved ${applied.amount} from account ${applied.from} to account ${applied.to}` },
         ],
       };
@@ -52,7 +52,7 @@ const audit = (ctx: restate.ObjectContext) =>
     execute: async (_params, api) => {
       const idempotencyKey = `${ctx.request().id}:${api.callId}`;
       const books = await ctx.objectClient(ledger, 'bank').audit(restate.rpc.opts({ idempotencyKey }));
-      return { content: [{ type: 'text', text: JSON.stringify(books) }] };
+      return { output: [{ type: 'text', text: JSON.stringify(books) }] };
     },
   });
 

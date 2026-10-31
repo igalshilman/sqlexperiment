@@ -149,10 +149,7 @@ export const prompt = async (ctx: restate.ObjectContext, text: z.infer<typeof PR
             idempotencyKey: `${ctx.request().id}:${api.callId}`,
           }),
         );
-        return {
-          content: [{ type: 'text', text: answer }],
-          isError: false,
-        };
+        return { output: [{ type: 'text', text: answer }] };
       },
     }),
   );

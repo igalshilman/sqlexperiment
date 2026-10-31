@@ -63,7 +63,9 @@ handler does. A retried attempt opens the Harness again and carries on:
   invocation's id);
 - an answered prompt returns its answer;
 - unfinished work resumes: a model call is made again, and a tool call runs
-  again with the same call id, which a tool passes on to stay idempotent;
+  again with the same call id, which a tool passes on to stay idempotent,
+  however often a crash cut it off (pi-durable's `restartLimit` is
+  `Infinity`: Restate's retry policy decides);
 - a tool's error fails the attempt, and Restate retries it (pi-durable would
   hand it to the model); a `restate.TerminalError` of a `restate-agents`
   tool is its answer to the model.

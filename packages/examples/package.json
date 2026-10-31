@@ -8,8 +8,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
     "@langchain/core": "1.2.12",
     "@langchain/openai": "1.7.0",
     "@modelcontextprotocol/client": "2.0.0",

@@ -1,6 +1,6 @@
 // pi-durable storage on an SQL database: the `SqliteDatabase` facade of
-// @earendil-works/pi-durable/storage/sqlite, over a database session `db`
-// (in Restate, `ctx.db`), which has `query`, `queryColumns`, `execute` and
+// @earendil-works/chord/sqlite, over a database session `db` (in Restate,
+// `ctx.db`), which has `query`, `queryColumns`, `execute` and
 // `transaction(body)`.
 //
 // The facade's operations must run one at a time, a transaction excluding
@@ -8,10 +8,8 @@
 // once its body settles. A statement outside a transaction is its own
 // transaction.
 //
-// pi-durable names its tables and indexes plainly (`tasks`, `entries`...):
-// each statement here has them renamed `restate_pi_<name>`, apart from the
-// tables of yours in the same database. Its SQL is fixed text, where those
-// names are only ever tables' and indexes' (storage/sqlite of 1.1.0).
+// pi-durable's tables and indexes are named `restate_pi_<name>` (its
+// storage's `prefix`), apart from the tables of yours in the same database.
 import type { SqlDatabase, SqlSession } from 'restate-objects';
 import {
   SqliteStorage,
@@ -20,45 +18,8 @@ import {
   type SqliteValue,
 } from '@earendil-works/pi-durable/storage/sqlite';
 
-// pi-durable's tables and indexes (storage/sqlite/migrations.js of 1.1.0).
-const NAMES = [
-  'conversations',
-  'conversations_by_owner_conversation',
-  'conversations_by_owner_task',
-  'document_revisions',
-  'document_revisions_by_kind',
-  'documents',
-  'documents_by_address',
-  'documents_by_scope',
-  'documents_by_scope_kind',
-  'durable_metadata',
-  'durable_schema',
-  'entries',
-  'entries_by_conversation',
-  'entry_heads_by_conversation',
-  'record_ids',
-  'submissions',
-  'submissions_by_conversation',
-  'submissions_by_request',
-  'submissions_by_status',
-  'tasks',
-  'tasks_by_abort_requested',
-  'tasks_by_background',
-  'tasks_by_conversation',
-  'tasks_by_kind',
-  'tasks_by_status',
-];
-const NAMED = new RegExp(`\\b(${NAMES.join('|')})\\b`, 'g');
-
-/** Each statement of pi-durable's, renamed: its SQL is fixed text, a few dozen statements. */
-const statements = new Map<string, string>();
-
-/** pi-durable's `sql`, its tables and indexes renamed `restate_pi_<name>`. */
-function renamed(sql: string) {
-  let named = statements.get(sql);
-  if (named === undefined) statements.set(sql, (named = sql.replace(NAMED, 'restate_pi_$1')));
-  return named;
-}
+/** The prefix of pi-durable's tables and indexes. */
+const PREFIX = 'restate_pi_';
 
 const objects = <T>({ columns, rows }: { columns: string[]; rows: unknown[][] }): T[] =>
   rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]])) as T);
@@ -70,16 +31,16 @@ class Executor implements SqliteExecutor {
     this.db = db;
   }
   async exec(sql: string) {
-    await this.db.execute(renamed(sql));
+    await this.db.execute(sql);
   }
   async run(sql: string, ...params: SqliteValue[]) {
-    await this.db.execute(renamed(sql), params);
+    await this.db.execute(sql, params);
   }
   async get<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T | undefined> {
     return (await this.all<T>(sql, ...params))[0];
   }
   async all<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T[]> {
-    return objects<T>(await this.db.queryColumns(renamed(sql), params));
+    return objects<T>(await this.db.queryColumns(sql, params));
   }
 }
 
@@ -103,5 +64,5 @@ class SqlKvDatabase extends Executor implements SqliteDatabase {
 
 /** Open pi-durable storage on the session `db`. */
 export function openSqlKvStorage(db: SqlSession): Promise<SqliteStorage> {
-  return SqliteStorage.open(new SqlKvDatabase(db));
+  return SqliteStorage.open(new SqlKvDatabase(db), { prefix: PREFIX });
 }

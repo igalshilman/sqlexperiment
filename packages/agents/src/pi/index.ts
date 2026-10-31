@@ -135,7 +135,7 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolRegistration =>
     replay: 'safe', // a crash runs it again, with the same call id
     // Aborted (the conversation's work, on a cancellation), it waits no more.
     execute: async (args, { callId }, task) => ({
-      content: [{ type: 'text', text: await awaitWithContext(t.run(args, { ctx, callId }), task) }],
+      output: [{ type: 'text', text: await awaitWithContext(t.run(args, { ctx, callId }), task) }],
     }),
   });
 
@@ -249,8 +249,13 @@ export const withPi = async <T>(
     system,
     workspace,
   );
-  // pi-durable hands its stream settings to pi-ai's requests as they are: serviceTier is pi-ai's.
-  const settings = serviceTier ? { stream: { serviceTier } as ConversationStreamOptions } : undefined;
+  const settings = {
+    // A task that crashes is run again however often Restate retries the attempt (its retry policy decides):
+    // pi-durable would park it after 5 crashes in a row, and the prompt would never be answered.
+    restartLimit: Infinity,
+    // pi-durable hands its stream settings to pi-ai's requests as they are: serviceTier is pi-ai's.
+    ...(serviceTier ? { stream: { serviceTier } as ConversationStreamOptions } : {}),
+  };
   const harness = await Harness.open(await openSqlKvStorage(ctx.db), { models, registry, env, settings }, context);
 
   const prompt = async (text: string, id = nextPromptId(ctx)) => {

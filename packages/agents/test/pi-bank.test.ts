@@ -30,6 +30,14 @@ describe('the bank agent on pi', () => {
     expect(await crashedAnywhere(prompt, pi.messages(), { concurrency: 1, steered: true })).toEqual([]);
   }, 600_000);
 
+  it('runs a tool call again however often a crash cuts it off', async () => {
+    // pi-durable parks a task cut off 5 times in a row by default: Restate's retries decide here.
+    const c = conversation(prompt, 'restarts');
+    for (let crash = 0; crash < 8; crash++) await c.crash('inv1', 'Please move 5 from 1 to 2');
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: moved 5/);
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 120_000);
+
   it('tells the model a tool it does not have is not there', async () => {
     // The teller audits with a tool `audit`, which this agent lacks.
     const c = conversation(pi.chat(), 'unknown');

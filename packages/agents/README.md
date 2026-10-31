@@ -84,8 +84,8 @@ the packages of the frameworks it imports, so that `restate-agents/pi`
 brings pi alone:
 
 ```sh
-npm install restate-agents @earendil-works/pi-durable@1.1.0 @earendil-works/pi-ai @earendil-works/chord   # pi
-npm install restate-agents @anthropic-ai/sdk                                                              # Claude
+npm install restate-agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord   # pi
+npm install restate-agents @anthropic-ai/sdk                                                        # Claude
 npm install restate-agents @langchain/core @langchain/langgraph @langchain/langgraph-checkpoint \
   @langchain/openai                       # LangGraph, and the provider of its models: or @langchain/anthropic
 npm install restate-agents @opencode/core@2.0.32 @opencode/plugin@2.0.32 @opencode/sdk@2.0.32 \
@@ -96,10 +96,10 @@ npm install restate-agents @earendil-works/pi-ai @deepseek-ai/cordis \
   @deepseek-ai/{dsh-system-prompt,dsh-tools}@0.2.1-rc.2   # DeepSeek
 ```
 
-pi-durable and OpenCode are pinned: restate-agents stores their tables in
-the object's database, as their versions lay them out. A subpath whose
-packages are missing fails as it is imported, naming the first it lacks.
-The packages are not published yet:
+OpenCode is pinned: restate-agents stores its tables in the object's
+database, as its version lays them out. A subpath whose packages are
+missing fails as it is imported, naming the first it lacks. The packages
+are not published yet:
 [`pnpm --filter e2e packaging`](../e2e/packaging.ts) installs them from
 their tarballs, with pi alone. In this repository the frameworks' packages
 are restate-agents' development dependencies, so every example runs as it is.
