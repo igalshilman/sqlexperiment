@@ -20,7 +20,7 @@ import { deliver, hasCompanion } from './signals.ts';
 
 /** How a webhook is signed: the HMAC-SHA256 of its body with `secret`, in hex, in the request's `header`. */
 export interface WebhookAuth {
-  /** The header with the signature, such as `linear-signature` (GitHub's `sha256=` prefix is taken too). */
+  /** The header with the signature, such as `linear-signature` or `X-Hub-Signature-256` (GitHub's `sha256=` prefix is taken too), in any case. */
   header: string;
   /** The webhook's signing secret, which the other system shows when the webhook is made. */
   secret: string;
@@ -47,7 +47,8 @@ export interface WebhookOptions<P extends string = string> {
   /**
    * The header with the delivery's id, which a delivery sent again has too
    * (such as `linear-delivery`): it reaches the same message, not a second
-   * one. Without it, each request is a delivery of its own.
+   * one. Without it, each request is a delivery of its own. In any case, as
+   * header names are.
    */
   idempotencyHeader?: string;
   /** The agents each delivery goes to. */
@@ -125,6 +126,9 @@ export const webhook = <P extends string>({
   }
   if (auth && !auth.secret) throw new Error(`webhook ${name}: its auth has no secret (unset in the environment?)`);
   const what = description ?? `A webhook into ${route.map((r) => r.name).join(', ')}`;
+  // Restate gives a request's headers by their names in lower case.
+  const signatureHeader = auth?.header.toLowerCase();
+  const deliveryHeader = idempotencyHeader?.toLowerCase();
   return restate.service({
     name,
     description: what,
@@ -143,11 +147,11 @@ export const webhook = <P extends string>({
         },
         async (ctx: restate.Context, body: Uint8Array) => {
           const headers = ctx.request().headers;
-          if (auth && !signed(body, headers.get(auth.header), auth.secret)) {
+          if (auth && !signed(body, headers.get(signatureHeader!), auth.secret)) {
             throw new restate.TerminalError(`Not signed: no valid ${auth.header}`, { errorCode: 401 });
           }
           const event = parsed(body);
-          const delivery = (idempotencyHeader && headers.get(idempotencyHeader)) || ctx.request().id;
+          const delivery = (deliveryHeader && headers.get(deliveryHeader)) || ctx.request().id;
           const to = key ? key(event) : delivery;
           if (to === undefined) return;
           const text = webhookMessage(name, delivery, message ? message(event) : event);

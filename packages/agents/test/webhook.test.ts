@@ -20,10 +20,10 @@ const issues = webhook({
 });
 
 type Handler = (ctx: unknown, body: Uint8Array) => Promise<void>;
-const handler = (issues as unknown as { service: { webhook: Handler } }).service.webhook;
+const handlerOf = (service: unknown) => (service as { service: { webhook: Handler } }).service.webhook;
 
-/** A delivery of `event`, signed with `secret`: what the handler sent. */
-async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1' } = {}) {
+/** A delivery of `event`, signed with `secret`, to `to`'s handler: what the handler sent. */
+async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1', to = issues } = {}) {
   const body = new TextEncoder().encode(JSON.stringify(event));
   const headers = new Map([
     ['linear-signature', createHmac('sha256', secret).update(body).digest('hex')],
@@ -37,13 +37,25 @@ async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1' } = {}
         sent.push({ object: target.name, key, ...input, idempotencyKey: opts.getOpts().idempotencyKey }),
     }),
   };
-  await handler(ctx, body);
+  await handlerOf(to)(ctx, body);
   return sent;
 }
 
 const created = { action: 'create', data: { identifier: 'ENG-1' } };
 
 describe('a webhook', () => {
+  it('takes its headers in any case, as Restate gives them in lower case', async () => {
+    const capitalized = webhook({
+      name: 'linear',
+      auth: { header: 'Linear-Signature', secret: 'shh' },
+      idempotencyHeader: 'Linear-Delivery',
+      route: [triage],
+      key: () => 'ENG-1',
+    });
+    const [sent] = await deliver(created, { to: capitalized });
+    expect(sent!.idempotencyKey).toBe('webhook:linear:d-1');
+  });
+
   it("delivers to each agent of its route, keyed by its body, through the agent's signals", async () => {
     const sent = await deliver(created);
     expect(sent.map((s) => [s.object, s.key, s.agent])).toEqual([
@@ -94,8 +106,8 @@ describe('a webhook', () => {
   });
 
   it('says what it is in its handler metadata', () => {
-    const [symbol] = Object.getOwnPropertySymbols(handler);
-    const wrapper = (handler as unknown as Record<symbol, { options: { metadata: Record<string, string> } }>)[symbol!]!;
+    const [symbol] = Object.getOwnPropertySymbols(handlerOf(issues));
+    const wrapper = (handlerOf(issues) as unknown as Record<symbol, { options: { metadata: Record<string, string> } }>)[symbol!]!;
     expect(wrapper.options.metadata).toEqual({
       'restate-agents.kind': 'webhook',
       'restate-agents.routes': 'triage,audit',
