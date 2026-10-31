@@ -3,8 +3,16 @@
 // and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
-import { SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
+import { asDatabase, lazyDatabase, open, SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
 import type { AttemptContext, Store } from 'restate-objects/internal';
+
+/**
+ * A handler's `ctx.db` over `map` without the SDK, opened on its first call:
+ * an attempt's, which sends nothing. Give the same map to the next attempt's.
+ */
+export function memoryDatabase(map = new Map<string, Uint8Array>()): restate.Database {
+  return lazyDatabase(async () => asDatabase(await open(`memory-${randomUUID()}`, memoryStore(map))));
+}
 
 /**
  * An SQL store over `map`. Give the same map to several databases for an

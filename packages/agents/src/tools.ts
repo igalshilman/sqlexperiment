@@ -117,12 +117,12 @@ async function once<T>(name: string, input: unknown, context: ToolCall, body: (c
   const call = await callOf(ctx, name, input, context.callId);
   try {
     const result = await body({ ctx, callId: call.id, idempotencyKey: `${ctx.request().id}:${call.id}` });
-    call.answered();
+    await call.answered();
     return result;
   } catch (error) {
     // A terminal error answers the call; any other fails the attempt, and the
     // retry makes the call again.
-    if (error instanceof restate.TerminalError) call.answered();
+    if (error instanceof restate.TerminalError) await call.answered();
     throw error;
   }
 }

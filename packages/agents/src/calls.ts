@@ -1,6 +1,6 @@
 // The Restate calls of an invocation's tools (`call`, `signal`, `subagent`...
-// of tools.ts), kept in the object's state so that a call is made once,
-// however often its tool call runs.
+// of tools.ts), kept in the object's database (`restate_agent_calls`) so that
+// a call is made once, however often its tool call runs.
 //
 // A crash or a suspension restarts the handler. pi, Claude and LangGraph then
 // run a tool call that was cut off again, with its id. OpenCode and the
@@ -18,6 +18,7 @@
 // model makes it again. Once stored, the model has its result, and an
 // identical call it makes later is a call of its own.
 import type * as restate from 'restate-objects';
+import { Schema } from 'restate-objects/internal';
 import { randomUUID } from 'node:crypto';
 
 /** A tool's call: the tool, its input as JSON, the ids it was made with (the first is its own), and the attempt that last made it. */
@@ -36,18 +37,45 @@ interface Calls {
   calls: Call[];
 }
 
-/** The state key of the {@link Calls}. */
-const CALLS = 'restate-agents.calls';
+/** The table of the {@link Calls}: one row, of the invocation whose calls they are. */
+const SCHEMA = new Schema('restate-agents.calls', [
+  `CREATE TABLE restate_agent_calls (
+    row INTEGER PRIMARY KEY CHECK (row = 0),
+    invocation TEXT NOT NULL,
+    calls TEXT NOT NULL
+  )`,
+]);
+
+/** What the calls need of a handler's context. */
+type CallsContext = Pick<restate.ObjectContext, 'db' | 'request'>;
+
+/** Store `calls`, committed before the call they record is made. */
+async function store(ctx: CallsContext, { invocation, calls }: Calls) {
+  await ctx.db.execute('INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)', [
+    invocation,
+    JSON.stringify(calls),
+  ]);
+}
+
+/** The calls of `invocation`, as stored: none if the row is another invocation's. */
+async function load(ctx: CallsContext, invocation: string): Promise<Calls> {
+  await SCHEMA.ensure(ctx.db);
+  const row = await ctx.db.get<{ invocation: string; calls: string }>(
+    'SELECT invocation, calls FROM restate_agent_calls',
+  );
+  return row?.invocation === invocation
+    ? { invocation, calls: JSON.parse(row.calls) as Call[] }
+    : { invocation, calls: [] };
+}
 
 /** Each attempt's id, and its calls, by its context. */
 const attempts = new WeakMap<object, { id: string; calls: Promise<Calls> }>();
 
 /** The attempt of `ctx`: its id, and the calls of its invocation. */
-function attemptOf(ctx: restate.ObjectContext) {
+function attemptOf(ctx: CallsContext) {
   let attempt = attempts.get(ctx);
   if (!attempt) {
-    const invocation = ctx.request().id;
-    const calls = ctx.get<Calls>(CALLS).then((c) => (c?.invocation === invocation ? c : { invocation, calls: [] }));
+    const calls = load(ctx, ctx.request().id);
     attempt = { id: randomUUID(), calls };
     attempts.set(ctx, attempt);
   }
@@ -60,7 +88,7 @@ function attemptOf(ctx: restate.ObjectContext) {
  * the same tool and input (made again under a new id), or else a new one.
  * `run(id)` makes it with its own id, and stores that it answered.
  */
-export async function callOf(ctx: restate.ObjectContext, tool: string, input: unknown, callId: string) {
+export async function callOf(ctx: CallsContext, tool: string, input: unknown, callId: string) {
   const attempt = attemptOf(ctx);
   const state = await attempt.calls;
   const json = JSON.stringify(input);
@@ -73,14 +101,14 @@ export async function callOf(ctx: restate.ObjectContext, tool: string, input: un
   } else {
     state.calls.push((call = { tool, input: json, ids: [callId], attempt: attempt.id }));
   }
-  ctx.set(CALLS, state);
+  await store(ctx, state);
   const made = call;
   return {
     id: made.ids[0]!,
     /** It answered (a terminal error included): kept until the transcript has its result. */
-    answered() {
+    async answered() {
       made.done = true;
-      ctx.set(CALLS, state);
+      await store(ctx, state);
     },
   };
 }
@@ -93,10 +121,10 @@ export async function callOf(ctx: restate.ObjectContext, tool: string, input: un
  * otherwise take one an earlier attempt made, and the model has the result
  * of.
  */
-export async function settle(ctx: restate.ObjectContext, stored: (id: string) => boolean) {
+export async function settle(ctx: CallsContext, stored: (id: string) => boolean) {
   const state = await attemptOf(ctx).calls;
   const kept = state.calls.filter((c) => !c.done || !stored(c.ids.at(-1)!));
   if (kept.length === state.calls.length) return;
   state.calls = kept;
-  ctx.set(CALLS, state);
+  await store(ctx, state);
 }

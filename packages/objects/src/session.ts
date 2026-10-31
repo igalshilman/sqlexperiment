@@ -263,6 +263,29 @@ export function reset(tx: Transaction): Promise<void> {
   return forHandler(of());
 }
 
+/**
+ * A database that `opener` opens on its first call, as a handler's `ctx.db`
+ * opens: for tests, which give each attempt one over the same state.
+ */
+export function lazyDatabase(opener: () => Promise<Database>): Database {
+  let opened: Promise<Database> | undefined;
+  const db = () => (opened ??= opener());
+  const lazy: Database = {
+    query: async (sql, params) => (await db()).query(sql, params),
+    get: async (sql, params) => (await db()).get(sql, params),
+    values: async (sql, params) => (await db()).values(sql, params),
+    execute: async (sql, params) => (await db()).execute(sql, params),
+    transaction: async (body) => (await db()).transaction(body),
+  };
+  sessions.set(lazy, async (schemas) => {
+    const inner = await db();
+    const ensure = sessions.get(inner);
+    if (ensure === undefined) throw new Error("lazyDatabase opens a handler's ctx.db, or a database of asDatabase");
+    await ensure(schemas);
+  });
+  return lazy;
+}
+
 /** The sends of a transaction that has no outbox: a shared handler's, or another database's. */
 const refusedSend: Send = () => {
   throw new TerminalError("a send of a transaction is an exclusive handler's, in the object's own database");

@@ -2,6 +2,7 @@
 // with a fake context that records the calls they make.
 import * as restate from 'restate-objects';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
+import { memoryDatabase } from 'restate-objects/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { settle } from '../src/calls.ts';
@@ -17,13 +18,12 @@ const refund = restate.workflow({
   handlers: { run: async (_ctx: restate.WorkflowContext, _order: string) => 'refunded' },
 });
 
-/** A context, keyed `alice`, of invocation `inv1`, recording what is called and sent, with the object's `state`. */
-function context(state = new Map<string, unknown>()) {
+/** A context, keyed `alice`, of invocation `inv1`, recording what is called and sent, with the object's database in `state`. */
+function context(state = new Map<string, Uint8Array>()) {
   const made: Record<string, unknown>[] = [];
   const ctx = {
     key: 'alice',
-    get: async (name: string) => structuredClone(state.get(name) ?? null),
-    set: (name: string, value: unknown) => void state.set(name, structuredClone(value)),
+    db: memoryDatabase(state),
     request: () => ({ id: 'inv1', target: { service: 'assistant', handler: 'chat', key: 'alice' } }),
     genericCall: async (c: Record<string, unknown>) => (made.push({ kind: 'call', ...c }), `${String(c.method)} done`),
     genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
@@ -157,12 +157,14 @@ describe('tool', () => {
 describe("Restate's tools", () => {
   it('make a call again with the call id of the attempt that first made it', async () => {
     const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
-    const state = new Map<string, unknown>();
+    const state = new Map<string, Uint8Array>();
     // An attempt makes the call, and ends (a crash, a suspension) before it answers.
     const first = context(state);
-    first.ctx.genericCall = (() => new Promise(() => {})) as never;
+    const made = Promise.withResolvers<void>();
+    first.ctx.genericCall = (() => (made.resolve(), new Promise(() => {}))) as never;
     void t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
-    await new Promise((r) => setTimeout(r, 0));
+    // Stored before it is made.
+    await made.promise;
     // The next attempt's model makes it again, as a new tool call: it is the same call.
     const next = context(state);
     await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
@@ -175,7 +177,7 @@ describe("Restate's tools", () => {
 
   it('make a call that answered again, until the framework stored its result', async () => {
     const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
-    const state = new Map<string, unknown>();
+    const state = new Map<string, Uint8Array>();
     // An attempt makes the call, which answers; it crashes before the framework stores the result.
     const first = context(state);
     await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
@@ -196,7 +198,7 @@ describe("Restate's tools", () => {
 
   it('make a call that answered again, after the framework gave it an interruption error', async () => {
     const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
-    const state = new Map<string, unknown>();
+    const state = new Map<string, Uint8Array>();
     const first = context(state);
     await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
     // Resumed, OpenCode gives the call an error, which is not its result: the model makes it again.
@@ -211,7 +213,7 @@ describe("Restate's tools", () => {
 
   it('make a call whose result is stored as a call of its own, in an attempt that made none yet', async () => {
     const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
-    const state = new Map<string, unknown>();
+    const state = new Map<string, Uint8Array>();
     const first = context(state);
     await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
     // The framework stored its result, and the attempt ended before a publish settled it.
