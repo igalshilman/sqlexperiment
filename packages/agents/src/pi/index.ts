@@ -32,6 +32,7 @@
 // and a coding tool cut off by a crash is not run again (the model is told
 // it was interrupted).
 import * as restate from 'restate-objects';
+import type { SqlSession } from 'restate-objects';
 import type { Context } from '@earendil-works/chord';
 import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
@@ -47,6 +48,7 @@ import {
   section,
   type Conversation,
   type ConversationStreamOptions,
+  type EntryId,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
@@ -277,7 +279,7 @@ export const withPi = async <T>(
 
   try {
     // The log reads the root conversation through this Harness, while it is open.
-    const read = async () => transcribe(await harness.root(context), context);
+    const read = async () => transcribe(ctx.db, await harness.root(context), context);
     return await transcribing(ctx, read, () =>
       Promise.race([abortOn(), work({ harness, context, conversation, prompt })]),
     );
@@ -321,18 +323,34 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
  */
 export const messages = () => messagesHandler();
 
-/** The conversation of `root`, from pi-durable's entries, as `messages` gives it. */
-const transcribe = async (root: Conversation, context: Context) => {
-  const transcript = new Transcript();
+/**
+ * The transcript of each session's root conversation (`ctx.db`, one per
+ * attempt), as far as it was read, to its last entry. pi-durable's entries
+ * never change, and a new one takes a greater id than any before it (they
+ * are committed one at a time), so each read adds the entries after it.
+ */
+const transcripts = new WeakMap<SqlSession, { last?: EntryId; transcript: Transcript }>();
+
+/** The root conversation in `db`, `root` of a Harness on it, from pi-durable's entries, as `messages` gives it. */
+const transcribe = async (db: SqlSession, root: Conversation, context: Context) => {
+  const read = transcripts.get(db) ?? { transcript: new Transcript() };
+  transcripts.set(db, read);
+  const { transcript } = read;
+  // From the last entry read (the bound is inclusive), or the first.
+  const query = { order: 'ascending' as const, ...(read.last === undefined ? {} : { minEntryId: read.last }) };
   for (let cursor: Parameters<typeof root.entries>[2]; ;) {
-    const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
-    for (const m of page.items.flatMap((entry) => entry.model ?? [])) {
-      if (m.role === 'user') transcript.say('user', textOf(m.content));
-      if (m.role === 'assistant') {
-        transcript.say('assistant', textOf(m.content));
-        for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
+    const page = await root.entries(query, 100, cursor, context);
+    for (const entry of page.items) {
+      if (entry.id === read.last) continue;
+      read.last = entry.id;
+      for (const m of entry.model ?? []) {
+        if (m.role === 'user') transcript.say('user', textOf(m.content));
+        if (m.role === 'assistant') {
+          transcript.say('assistant', textOf(m.content));
+          for (const c of m.content) if (c.type === 'toolCall') transcript.call(c.id, c.name, c.arguments);
+        }
+        if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
       }
-      if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
     }
     cursor = page.next;
     if (cursor === undefined) return transcript;
