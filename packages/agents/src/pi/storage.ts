@@ -50,8 +50,15 @@ const NAMES = [
 ];
 const NAMED = new RegExp(`\\b(${NAMES.join('|')})\\b`, 'g');
 
+/** Each statement of pi-durable's, renamed: its SQL is fixed text, a few dozen statements. */
+const statements = new Map<string, string>();
+
 /** pi-durable's `sql`, its tables and indexes renamed `restate_pi_<name>`. */
-const renamed = (sql: string) => sql.replace(NAMED, 'restate_pi_$1');
+function renamed(sql: string) {
+  let named = statements.get(sql);
+  if (named === undefined) statements.set(sql, (named = sql.replace(NAMED, 'restate_pi_$1')));
+  return named;
+}
 
 const objects = <T>({ columns, rows }: { columns: string[]; rows: unknown[][] }): T[] =>
   rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]])) as T);
