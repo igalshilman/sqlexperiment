@@ -10,8 +10,10 @@
 // is replayed, so a handler with SQL hands every awaited promise to one loop,
 // which asks the VM about all of them at once (`hookSelector`). The hook
 // replaces the invocation's `promisesExecutor.doProgress`: it relies on the
-// SDK's internals, as of the version this package pins (1.17.4). See FUTURE.md
-// at the repository's root: the SDK may do it itself one day.
+// SDK's internals, as of the version this package pins (1.17.4).
+//
+// TODO: drop the selector, and the pin, once an SDK release lets a handler
+// with explicit recovery await concurrently (FUTURE.md at the repository's root).
 import { setImmediate } from 'node:timers/promises';
 
 /** A future of the VM, as `do_progress` takes it. */

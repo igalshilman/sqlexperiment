@@ -78,9 +78,10 @@ message it answers), `clear` (forget it all), `sync`, `notifications` and
 | [`restate-agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
 
 Each framework's packages are optional peer dependencies of
-restate-agents: a project installs restate-agents (which brings
-restate-objects and zod) and the packages of the frameworks it imports, so
-that `restate-agents/pi` brings pi alone:
+restate-agents: a project installs restate-agents, whose required peers
+(restate-objects, the Restate SDK and zod) npm and pnpm install with it, and
+the packages of the frameworks it imports, so that `restate-agents/pi`
+brings pi alone:
 
 ```sh
 npm install restate-agents @earendil-works/pi-durable@1.1.0 @earendil-works/pi-ai @earendil-works/chord   # pi

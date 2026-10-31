@@ -170,7 +170,8 @@ packages, each with its README, and its tests in its `test/` directory:
   small file you run with node.
 - [`packages/e2e`](packages/e2e/README.md): the tests against a real Restate
   server: the agents and SQL objects through crashes, the context without
-  journal replay, and the SQL benchmark.
+  journal replay, Restate's own agent tools, and the SQL benchmark; and the
+  packages as a user installs them.
 
 ## Requirements
 

@@ -5,7 +5,7 @@ The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 [cordis](https://www.npmjs.com/package/@deepseek-ai/cordis): an agent loop, a
 model service, a tool registry, and an event-sourced session that is the
 source of truth for everything the agent did. Here the session is in the
-agent's SQL database ([SQL in Restate virtual objects](../../../sql/README.md)),
+agent's SQL database ([SQL in Restate virtual objects](../../../objects/README.md)),
 and is the object's key. The integration pins the harness's `next` release
 line, 0.2.1-rc.2, exactly: its packages are release candidates that require
 each other's exact versions.

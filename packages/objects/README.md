@@ -63,10 +63,13 @@ that wants a database for the handler's work gets `ctx.db`: the
 this way.
 
 An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
-`ctx.db` and `ctx.transaction` alike, since a retry would repeat it; a storage
-error, which ends the session, is retried. The handler's own errors are as in any handler: a `TerminalError` is
-terminal, and any other error, such as a failed request to a model or another
-service, is retried.
+`ctx.db` and `ctx.transaction` alike, since a retry would repeat it: a
+statement the engine rejects, a parameter it cannot bind, or a call the
+session refuses, even one that ends the session (a `COMMIT` inside a
+transaction's body, a transaction left open when the handler ends). A storage
+error, which ends the session, is retried. The handler's own errors are as in
+any handler: a `TerminalError` is terminal, and any other error, such as a
+failed request to a model or another service, is retried.
 
 **The schema.** `schema` in `restate.object` is the steps that make each
 key's database, in order: statements, or async functions of the transaction

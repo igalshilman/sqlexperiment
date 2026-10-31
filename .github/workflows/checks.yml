@@ -1,0 +1,46 @@
+# The repository's checks, as a contributor runs them at the root: `pnpm lint`
+# (types, oxlint, oxfmt, rustfmt, clippy) and `pnpm test` (every package's
+# tests, then the addon's Rust tests). A pull request merges once they pass.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Lint, and the TypeScript tests over this runner's addon (`pnpm build`).
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/objects/native
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm -r --workspace-concurrency=1 test
+
+  # The addon's Rust tests (`pnpm --filter restate-objects test:rust`).
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/objects/native
+      - run: cargo test --locked --release --manifest-path packages/objects/native/Cargo.toml

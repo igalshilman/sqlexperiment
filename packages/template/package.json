@@ -5,6 +5,9 @@
   "description": "A tutorial in files: virtual objects, then SQL in them, then agents, one concept at a time",
   "type": "module",
   "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
     "restate-agents": "workspace:*",
     "restate-objects": "workspace:*",
     "zod": "4.6.5"

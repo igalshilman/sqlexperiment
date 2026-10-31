@@ -7,7 +7,7 @@ messages, the inbox, durable events) is an SQL database of the key's own,
 in the object's state beside `ctx.db` (`databaseOf` of restate-objects): OpenCode
 boots only on a database that is empty or its own, so its tables are alone
 there, and `ctx.db` keeps the conversation's log and the tables of yours
-([SQL in Restate virtual objects](../../../sql/README.md)). The integration
+([SQL in Restate virtual objects](../../../objects/README.md)). The integration
 pins OpenCode 2.0.27 exactly, with the Effect release it is built on (4.0.1);
 OpenCode needs Node 24.
 

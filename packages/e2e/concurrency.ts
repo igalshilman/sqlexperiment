@@ -1,7 +1,7 @@
 // Handlers with SQL (restate-objects), against a real Restate server: they run
 // with explicit recovery (a retried attempt starts over, against the state as
 // stored), and their operations are awaited concurrently, with native or
-// hand-written combinators (the patched SDK's promise selector drives them
+// hand-written combinators (restate-objects' promise selector drives them
 // all); a suspension waits for any of them, and a cancellation reaches all of
 // them. With lazy state, every state read of the database goes to the server.
 //

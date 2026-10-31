@@ -7,7 +7,7 @@ feature. They count logical KV operations and bytes in MemoryKv; they do
 not model a real remote backend.
 
 Against a real Restate server, `pnpm --filter e2e bench` from the
-repository's root runs [the end-to-end benchmark](../../e2e/bench.ts).
+repository's root runs [the end-to-end benchmark](../../../e2e/bench.ts).
 
 Run from `packages/objects/native`:
 

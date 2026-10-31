@@ -69,8 +69,8 @@ awaited promise wait for the server at a time
 (`ExternalProgressChannel.awaitNext`), so concurrent awaits that need the
 server fail with `awaitNext already pending`.
 
-**Then:** drop the selector, and the pin. `packages/e2e/concurrency.ts` tells
-whether a release has it (with the hook off, its concurrent awaits fail).
+**Then:** drop the selector, and the pin, once `packages/e2e/concurrency.ts`
+passes without it (on today's SDK, its concurrent awaits fail).
 
 ## The SQL engine's huge pages, in the addon
 
