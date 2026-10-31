@@ -503,7 +503,7 @@ export class Attempt {
   private async ensureSchemas(db: Connection, schemas: readonly Schema[]) {
     const lacking = schemas.filter((s) => !this.ensured.has(s.name));
     if (lacking.length === 0) return;
-    await forHandler(apply(db, lacking));
+    await forHandler(apply(db, lacking, { reader: this.ctx.shared }));
     for (const s of lacking) this.ensured.set(s.name, s);
   }
 
@@ -562,6 +562,8 @@ export class Attempt {
     // key never written reads as empty tables.
     const own = this.name === undefined ? ofObject(ctx.request().target.service) : undefined;
     try {
+      // A view writes nothing: a write fails, rather than vanish with the attempt.
+      if (ctx.shared) await db.execute('PRAGMA query_only = 1');
       // What a crash may have left unmade.
       if (!ctx.shared && this.name === undefined) {
         decodeOutbox(await db.record(OUTBOX)).forEach((outgoing) => this.make(outgoing, true));

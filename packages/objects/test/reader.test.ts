@@ -21,13 +21,12 @@ describe("a shared handler's ctx.db", () => {
     expect(await shared.end(() => shared.db.values('SELECT n FROM numbers'))).toEqual([[1]]);
   });
 
-  it('keeps what it writes to itself', async () => {
+  it('refuses a write, which no attempt would keep', async () => {
     const { reader } = await object();
     const first = reader();
-    await first.end(async () => {
-      await first.db.execute('CREATE TABLE IF NOT EXISTS numbers (n INTEGER)');
-      await first.db.execute('INSERT INTO numbers VALUES (99)');
-    });
+    await expect(first.end(() => first.db.execute('INSERT INTO numbers VALUES (99)'))).rejects.toThrow(
+      /query_only/,
+    );
     const second = reader('again');
     expect(await second.end(() => second.db.values('SELECT n FROM numbers'))).toEqual([[1]]);
   });

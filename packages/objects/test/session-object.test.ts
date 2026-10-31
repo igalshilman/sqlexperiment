@@ -300,6 +300,7 @@ const resettable = restate.sessionObject({
       }),
   },
   views: {
+    writing: async (ctx) => ctx.db.query("INSERT INTO items VALUES ('z') RETURNING v"),
     sqliteNamed: async (ctx) => ctx.db.query("SELECT name FROM sqlite_schema WHERE name = 'sqliteusers'"),
     state: async (ctx) => ({
       items: await ctx.db.get<{ n: number }>('SELECT n FROM counted'),
@@ -345,6 +346,11 @@ test('reset empties the database in a transaction, with the schemas applied agai
     ],
   });
   assert.deepEqual(await invoke(resettable, 'sqliteNamed', ctx()), []);
+  // A view's write fails, rather than vanish.
+  await assert.rejects(
+    invoke(resettable, 'writing', fakeContext({ map, service: 'resettable', shared: true })),
+    (error: Error) => error instanceof restate.TerminalError && /query_only/.test(error.message),
+  );
   assert.deepEqual(
     sends.map(({ method, key }) => [method, key]),
     [['fill', 'other']],

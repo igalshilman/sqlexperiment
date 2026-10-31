@@ -74,11 +74,20 @@ export const register = (name: string, steps: readonly Step[]) => void objects.s
 export const ofObject = (name: string) => objects.get(name);
 
 /** Apply the steps of `schemas` that `db` lacks, in one transaction, with how far each got. */
-export async function apply(db: Connection, schemas: readonly Schema[]) {
+export async function apply(db: Connection, schemas: readonly Schema[], { reader = false } = {}) {
   if (behind(await appliedIn(db), schemas).length === 0) return;
   // Again in the transaction, which holds the session: a call before it may
   // have applied them.
-  await db.transaction((tx) => applyIn(tx, schemas));
+  await db.transaction(async (tx) => {
+    if (!reader) return applyIn(tx, schemas);
+    // A reader's session is query-only, but for its schemas.
+    await tx.execute('PRAGMA query_only = 0');
+    try {
+      await applyIn(tx, schemas);
+    } finally {
+      await tx.execute('PRAGMA query_only = 1');
+    }
+  });
 }
 
 /** Apply the steps of `schemas` that the transaction `tx` lacks, and record how far each got. */
