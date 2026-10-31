@@ -31,8 +31,8 @@ const recall = tool({
   description: 'Everything remembered about the user.',
   input: z.object({}),
   run: async (_input, { ctx }) => {
-    const rows = await ctx.db.values('SELECT fact FROM facts ORDER BY rowid');
-    return rows.map(([fact]) => fact);
+    const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+    return rows.map(({ fact }) => fact);
   },
 });
 
@@ -50,8 +50,8 @@ const assistant = object({
 
     /** What the assistant knows about the user: shared, so it answers while a message is answered. */
     facts: handlers.object.shared(async (ctx) => {
-      const rows = await ctx.db.values('SELECT fact FROM facts ORDER BY rowid');
-      return rows.map(([fact]) => fact);
+      const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+      return rows.map(({ fact }) => fact);
     }),
 
     /** Forget a fact. */

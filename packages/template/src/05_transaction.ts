@@ -26,13 +26,13 @@ const wallet = restate.object({
         await db.execute('INSERT INTO history (change) VALUES (?)', [change]);
         // Below zero, this throws, and the insert above rolls back with it.
         await db.execute('UPDATE balance SET amount = amount + ?', [change]);
-        const [balance] = (await db.values('SELECT amount FROM balance')).map(([amount]) => amount);
-        return balance;
+        const balance = await db.get<{ amount: number }>('SELECT amount FROM balance');
+        return balance?.amount;
       }),
 
     history: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
-      const rows = await ctx.db.values('SELECT change FROM history ORDER BY rowid');
-      return rows.map(([change]) => change);
+      const rows = await ctx.db.query<{ change: number }>('SELECT change FROM history ORDER BY rowid');
+      return rows.map(({ change }) => change);
     }),
   },
 });

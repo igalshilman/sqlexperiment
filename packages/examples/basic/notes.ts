@@ -21,8 +21,8 @@ const notes = restate.object({
 
     /** Shared: it reads while `add` writes; a key with no notes yet has none. */
     list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
-      const rows = await ctx.db.values('SELECT text FROM notes ORDER BY rowid');
-      return rows.map(([text]) => text);
+      const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
+      return rows.map(({ text }) => text);
     }),
   },
 });

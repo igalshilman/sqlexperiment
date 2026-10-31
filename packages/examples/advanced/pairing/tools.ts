@@ -19,8 +19,8 @@ export interface Task {
 
 /** The plan: each task's number, text, and whether it is done. */
 export async function tasksOf(db: SqlDatabase): Promise<Task[]> {
-  const rows = await db.values('SELECT n, task, done FROM plan ORDER BY n');
-  return rows.map(([n, task, done]) => ({ n: Number(n), task: String(task), done: Boolean(done) }));
+  const rows = await db.query<{ n: number; task: string; done: number }>('SELECT n, task, done FROM plan ORDER BY n');
+  return rows.map(({ n, task, done }) => ({ n, task, done: Boolean(done) }));
 }
 
 export const plan = tool({

@@ -30,8 +30,8 @@ interface Settings {
 }
 
 async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
-  const [row] = await ctx.db.values('SELECT json FROM settings');
-  return row ? (JSON.parse(String(row[0])) as Settings) : {};
+  const row = await ctx.db.get<{ json: string }>('SELECT json FROM settings');
+  return row ? (JSON.parse(row.json) as Settings) : {};
 }
 
 const clock = tool({

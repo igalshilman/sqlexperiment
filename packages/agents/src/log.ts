@@ -71,9 +71,9 @@ async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promi
   const rows = (await db.values(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
     ([id, json]) => ({ id: Number(id), message: JSON.parse(String(json)) as Said, json: String(json) }),
   );
-  const [[last, next]] = (await db.values(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
-    [number | null, number | null],
-  ];
+  const { last, next } = (await db.get<{ last: number | null; next: number | null }>(
+    `SELECT MAX(seq) AS last, MAX(id) + 1 AS next FROM ${TABLE}`,
+  ))!;
   if (last !== null) return { rows, seq: last, next: next! };
   const from = (await start()) ?? { seq: 0, id: 0 };
   return { rows, seq: from.seq, next: from.id };
@@ -151,7 +151,9 @@ export async function page(
       ...first,
     };
   }
-  const [[now]] = (await db.values(`SELECT COALESCE(MAX(seq), ?) FROM ${TABLE}`, [start?.seq ?? 0])) as [[number]];
+  const { now } = (await db.get<{ now: number }>(`SELECT COALESCE(MAX(seq), ?) AS now FROM ${TABLE}`, [
+    start?.seq ?? 0,
+  ]))!;
   const rows = await db.values(`SELECT id, message FROM ${TABLE} WHERE id < ? ORDER BY id DESC LIMIT ?`, [
     before ?? Number.MAX_SAFE_INTEGER,
     limit + 1,

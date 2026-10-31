@@ -24,7 +24,7 @@ const greeter = restate.object({
     },
 
     history: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
-      ctx.db.values('SELECT at, mood FROM greetings ORDER BY rowid'),
+      ctx.db.query<{ at: string; mood: string }>('SELECT at, mood FROM greetings ORDER BY rowid'),
     ),
   },
 });

@@ -34,8 +34,8 @@ const companion = object({
     messages: pi.messages(),
 
     facts: handlers.object.shared(async (ctx) => {
-      const rows = await ctx.db.values('SELECT fact FROM facts ORDER BY rowid');
-      return rows.map(([fact]) => fact);
+      const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+      return rows.map(({ fact }) => fact);
     }),
   },
 });

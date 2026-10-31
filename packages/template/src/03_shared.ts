@@ -22,8 +22,8 @@ const greeter = restate.object({
     },
 
     history: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
-      const rows = await ctx.db.values('SELECT at FROM greetings ORDER BY rowid');
-      return rows.map(([at]) => at);
+      const rows = await ctx.db.query<{ at: string }>('SELECT at FROM greetings ORDER BY rowid');
+      return rows.map(({ at }) => at);
     }),
   },
 });
