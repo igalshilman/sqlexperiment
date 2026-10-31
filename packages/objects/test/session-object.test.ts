@@ -151,11 +151,11 @@ test('an object or workflow needs its key, a service has none', async () => {
   });
   await assert.rejects(
     invoke(wrong, 'noKey', fakeContext({ map: new Map(), service: 'wrong' })),
-    /account is an object: call it with its key/,
+    (error: Error) => error instanceof restate.TerminalError && /account is an object: call it with its key/.test(error.message),
   );
   await assert.rejects(
     invoke(wrong, 'key', fakeContext({ map: new Map(), service: 'wrong' })),
-    /pricing is a service: call it without a key/,
+    (error: Error) => error instanceof restate.TerminalError && /pricing is a service: call it without a key/.test(error.message),
   );
 });
 
@@ -269,6 +269,8 @@ const resettable = restate.sessionObject({
   schema: [
     'CREATE TABLE items (v TEXT)',
     'CREATE TABLE starts (at INTEGER)',
+    'CREATE TABLE parent (id INTEGER PRIMARY KEY)',
+    'CREATE TABLE child (parent INTEGER REFERENCES parent (id))',
     'CREATE VIEW counted AS SELECT count(*) AS n FROM items',
     'CREATE TRIGGER stamped AFTER INSERT ON items BEGIN INSERT INTO starts VALUES (0); END',
   ],
@@ -277,11 +279,14 @@ const resettable = restate.sessionObject({
       await LIBRARY.ensure(ctx.db);
       await ctx.db.execute('CREATE TABLE IF NOT EXISTS sqliteusers (v TEXT)'); // a name LIKE 'sqlite_%' matches
       await ctx.db.execute("INSERT INTO items VALUES ('a'), ('b')");
+      await ctx.db.execute('INSERT INTO parent VALUES (1)');
+      await ctx.db.execute('INSERT INTO child VALUES (1)');
       await ctx.db.execute("INSERT INTO restate_library VALUES ('x')");
       await ctx.db.execute('CREATE TABLE extra (v TEXT)');
     },
     clear: async (ctx, start: number) => {
       await LIBRARY.ensure(ctx.db);
+      await ctx.db.execute('PRAGMA foreign_keys = ON'); // a parent table goes after its child
       await ctx.db.transaction(async (tx) => {
         tx.send(resettable, 'other').fill();
         await reset(tx);
@@ -315,8 +320,10 @@ test('reset empties the database in a transaction, with the schemas applied agai
     starts: [{ at: 0 }, { at: 0 }],
     library: [{ v: 'x' }],
     tables: [
+      { name: 'child' },
       { name: 'extra' },
       { name: 'items' },
+      { name: 'parent' },
       { name: 'restate_library' },
       { name: 'sqliteusers' },
       { name: 'starts' },
@@ -329,7 +336,13 @@ test('reset empties the database in a transaction, with the schemas applied agai
     items: { n: 0 },
     starts: [{ at: 7 }],
     library: [],
-    tables: [{ name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+    tables: [
+      { name: 'child' },
+      { name: 'items' },
+      { name: 'parent' },
+      { name: 'restate_library' },
+      { name: 'starts' },
+    ],
   });
   assert.deepEqual(await invoke(resettable, 'sqliteNamed', ctx()), []);
   assert.deepEqual(
@@ -344,8 +357,10 @@ test('reset empties the database in a transaction, with the schemas applied agai
     starts: [{ at: 7 }, { at: 0 }, { at: 0 }],
     library: [{ v: 'x' }],
     tables: [
+      { name: 'child' },
       { name: 'extra' },
       { name: 'items' },
+      { name: 'parent' },
       { name: 'restate_library' },
       { name: 'sqliteusers' },
       { name: 'starts' },

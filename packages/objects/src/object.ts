@@ -286,7 +286,7 @@ export function sessionObject<
 /** The SDK's context behind a session object's context. */
 function sdkOf(ctx: SessionContext | ViewContext) {
   const sdk = sdkContexts.get(ctx);
-  if (sdk === undefined) throw new Error("this takes a session object's ctx");
+  if (sdk === undefined) throw new restate.TerminalError("this takes a session object's ctx");
   return restate.internal.asInternal(sdk);
 }
 

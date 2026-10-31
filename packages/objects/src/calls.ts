@@ -5,7 +5,7 @@
 // an object or a workflow), or a literal naming it, for one known only at run
 // time. Options go with the target: a client's methods take only their input.
 import type * as restate from '@restatedev/restate-sdk';
-import { serde } from '@restatedev/restate-sdk';
+import { serde, TerminalError } from '@restatedev/restate-sdk';
 import type {
   Duration,
   HandlerDescriptor,
@@ -105,11 +105,11 @@ function clientOf(args: unknown[]): { def: Defined; key: string | undefined; opt
   const options = ((typeof second === 'string' ? third : second) ?? {}) as SendOptions;
   const keyed = def._kind !== 'service';
   if (keyed && key === undefined) {
-    throw new TypeError(
+    throw new TerminalError(
       `${def.name} is ${def._kind === 'workflow' ? 'a workflow' : 'an object'}: call it with its key`,
     );
   }
-  if (!keyed && key !== undefined) throw new TypeError(`${def.name} is a service: call it without a key`);
+  if (!keyed && key !== undefined) throw new TerminalError(`${def.name} is a service: call it without a key`);
   return { def, key, options };
 }
 

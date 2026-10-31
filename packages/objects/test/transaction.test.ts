@@ -228,6 +228,41 @@ describe('the sends of a transaction', () => {
     expect(next.sent).toEqual([]);
   });
 
+  it('keeps the sends of transactions that commit while another empties the outbox', async () => {
+    const o = object();
+    const a = o.attempt();
+    const sending = (item: string) =>
+      a.db.transaction(async (tx) => {
+        await tx.execute('CREATE TABLE IF NOT EXISTS log (v TEXT)');
+        await tx.execute('INSERT INTO log VALUES (?)', [item]);
+        tx.send(store, 'a').reserve(item);
+      });
+    await Promise.all(['book', 'pen', 'ink', 'cup'].map(sending));
+    a.abort();
+    expect(a.sent.map(decode).sort()).toEqual(['book', 'cup', 'ink', 'pen']);
+    expect(await o.outbox()).toEqual([]);
+  });
+
+  it('counts a delay from the commit', async () => {
+    const o = object();
+    const a = o.attempt({ crash: true });
+    let committed = 0;
+    await expect(
+      a.end(async () => {
+        await a.db.transaction(async (tx) => {
+          tx.send(store, 'a', { delay: { seconds: 10 } }).reserve('book');
+          // The body runs on after the send: its delay is not counted yet.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          committed = Date.now();
+        });
+      }),
+    ).rejects.toThrow();
+    const next = o.attempt();
+    await next.end(() => next.db.values('SELECT 1'));
+    const [delay] = next.sent.map((s) => s.delay as number);
+    expect(delay).toBeGreaterThan(10_000 - (Date.now() - committed) - 5);
+  });
+
   it("keeps a send's delay and its own idempotency key", async () => {
     const o = object();
     const a = o.attempt();

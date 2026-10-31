@@ -240,7 +240,7 @@ const resets = new WeakMap<Transaction, () => Promise<void>>();
  */
 export function reset(tx: Transaction): Promise<void> {
   const of = resets.get(tx);
-  if (of === undefined) throw new Error("reset takes a transaction of an exclusive handler's ctx.db");
+  if (of === undefined) throw new TerminalError("reset takes a transaction of an exclusive handler's ctx.db");
   return forHandler(of());
 }
 
@@ -261,7 +261,7 @@ export function lazyDatabase(opener: () => Promise<Database>): Database {
   sessions.set(lazy, async (schemas) => {
     const inner = await db();
     const ensure = sessions.get(inner);
-    if (ensure === undefined) throw new Error("lazyDatabase opens a handler's ctx.db, or a database of asDatabase");
+    if (ensure === undefined) throw new TerminalError("lazyDatabase opens a handler's ctx.db, or a database of asDatabase");
     await ensure(schemas);
   });
   return lazy;
@@ -314,9 +314,7 @@ function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][numbe
   const { parameter, inputSerde, delay, ...rest } = send;
   return {
     ...rest,
-    ...(delay !== undefined
-      ? { delay: millisOrDurationToMillis(delay), due: Date.now() + millisOrDurationToMillis(delay) }
-      : {}),
+    ...(delay !== undefined ? { delay: millisOrDurationToMillis(delay) } : {}),
     parameter: Buffer.from((inputSerde ?? serde.binary).serialize(parameter)).toString('base64'),
   };
 }
@@ -343,9 +341,9 @@ const DATABASE_NAME = /^[\w.-]{1,64}$/;
  * digits, `_`, `-` or `.`.
  */
 export function database(db: Database, name: string): Database {
-  if (!DATABASE_NAME.test(name)) throw new Error(`database: ${JSON.stringify(name)} is not a database name`);
+  if (!DATABASE_NAME.test(name)) throw new TerminalError(`database: ${JSON.stringify(name)} is not a database name`);
   const attempt = attempts.get(db);
-  if (attempt === undefined) throw new Error("database takes a handler's ctx.db");
+  if (attempt === undefined) throw new TerminalError("database takes a handler's ctx.db");
   return attempt.database(name);
 }
 
@@ -440,6 +438,9 @@ export class Attempt {
         // transaction's: unchanged, it is not written again.
         const outbox = await this.unstored(handle);
         if (sends.length > 0) {
+          // A delay counts from the commit: one made again waits what remains.
+          const now = Date.now();
+          for (const send of sends) if (send.delay !== undefined) send.due = now + send.delay;
           outgoing = { id: randomUUID(), sends };
           outbox.push(outgoing);
         }
@@ -532,8 +533,9 @@ export class Attempt {
    */
   private async flush(db: Connection) {
     if ((await db.record(OUTBOX)).length === 0) return;
-    const outbox = encodeOutbox(await this.unstored(db));
-    await db.transaction(async (tx) => tx.setRecord(OUTBOX, outbox));
+    // Read in the transaction that writes it: one that committed sends since
+    // the read above keeps them.
+    await db.transaction(async (tx) => tx.setRecord(OUTBOX, encodeOutbox(await this.unstored(tx))));
   }
 
   /** The session, opening it on the first call. */

@@ -110,11 +110,44 @@ export async function dropAll(tx: ConnectionTransaction, schemas: readonly Schem
     "SELECT type, name FROM sqlite_schema WHERE substr(name, 1, 7) != 'sqlite_'",
   );
   // A trigger or view may name a table; an index goes with its table.
-  for (const type of ['trigger', 'view', 'table']) {
-    for (const { name } of made.filter((m) => m.type === type)) {
-      await tx.execute(`DROP ${type.toUpperCase()} IF EXISTS "${name.replaceAll('"', '""')}"`);
-    }
+  for (const type of ['trigger', 'view']) {
+    for (const { name } of made.filter((m) => m.type === type)) await drop(tx, type, name);
+  }
+  for (const name of await childrenFirst(
+    tx,
+    made.filter((m) => m.type === 'table').map((m) => m.name),
+  )) {
+    await drop(tx, 'table', name);
   }
   tx.setRecord(RECORD, new Uint8Array());
   await applyIn(tx, schemas);
+}
+
+function drop(tx: ConnectionTransaction, type: string, name: string) {
+  return tx.execute(`DROP ${type.toUpperCase()} IF EXISTS "${name.replaceAll('"', '""')}"`);
+}
+
+/**
+ * `tables`, each after every table whose foreign keys name it: with foreign
+ * keys on, dropping a table deletes its rows, which a child's rows may not
+ * outlive. Tables in a cycle stay in their order.
+ */
+async function childrenFirst(tx: ConnectionTransaction, tables: string[]): Promise<string[]> {
+  const parents = new Map<string, Set<string>>();
+  for (const name of tables) {
+    const keys = await tx.query<{ table: string }>('SELECT "table" FROM pragma_foreign_key_list(?)', [name]);
+    // SQL names are case-insensitive.
+    const own = name.toLowerCase();
+    parents.set(name, new Set(keys.map((k) => k.table.toLowerCase()).filter((t) => t !== own)));
+  }
+  const ordered: string[] = [];
+  let left = tables;
+  while (left.length > 0) {
+    const named = new Set(left.flatMap((name) => [...parents.get(name)!]));
+    const unnamed = left.filter((name) => !named.has(name.toLowerCase()));
+    const next = unnamed.length > 0 ? unnamed : left;
+    ordered.push(...next);
+    left = left.filter((name) => !next.includes(name));
+  }
+  return ordered;
 }
