@@ -239,7 +239,12 @@ describe('the sends of a transaction', () => {
       });
     await Promise.all(['book', 'pen', 'ink', 'cup'].map(sending));
     a.abort();
-    expect(a.sent.map(decode).toSorted((x, y) => String(x).localeCompare(String(y)))).toEqual(['book', 'cup', 'ink', 'pen']);
+    expect(a.sent.map(decode).toSorted((x, y) => String(x).localeCompare(String(y)))).toEqual([
+      'book',
+      'cup',
+      'ink',
+      'pen',
+    ]);
     expect(await o.outbox()).toEqual([]);
   });
 
