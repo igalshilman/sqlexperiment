@@ -1,6 +1,6 @@
-// restate-agents: agent frameworks in Restate virtual objects. Each framework
+// restate-agents: agent frameworks in Restate session objects. Each framework
 // is a subpath (restate-agents/pi, /opencode, /langgraph, /claude,
-// /deepseek); this is what they share: virtual objects with SQL, tools for
+// /deepseek); this is what they share: session objects, tools for
 // any of them, and the tools that are Restate itself.
 import { sdk as restate } from 'restate-sessions/internal';
 import { signals } from './signals.ts';

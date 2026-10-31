@@ -1,24 +1,24 @@
-# SQL objects and agents on Restate
+# Session objects and agents on Restate
 
 Two layers, the second on the first:
 
-1. **[Objects with SQL](#objects-with-sql)**: Restate virtual objects whose
-   handlers run without journal replay, so a retried attempt runs again
-   against the state as stored, each key with its own SQLite-compatible
-   database, stored in the object's state
+1. **[Session objects](#session-objects)**, sessions in short: Restate virtual
+   objects whose handlers run without journal replay, so a retried attempt
+   runs again against the state as stored, each key with its own
+   SQLite-compatible database, stored in the object's state
    ([`restate-sessions`](packages/sessions/README.md)).
-2. **[AI agents](#ai-agents)** in those objects, their conversation in the
-   object's database: pi, OpenCode, LangGraph, Claude and more
+2. **[AI agents](#ai-agents)** in those sessions, their conversation in the
+   session's database: pi, OpenCode, LangGraph, Claude and more
    ([`restate-agents`](packages/agents/README.md)).
 
 New to them? [The tutorial](packages/template/README.md) goes one concept per
 file, from a virtual object to agents that delegate.
 
-## Objects with SQL
+## Session objects
 
-Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
-kept in the object's state: no database to run. `restate-sessions` is the
-Restate SDK with those objects, `restate.sessionObject`
+Each key of a session object, a Restate virtual object, has a SQLite database
+of its own, up to 10 GiB, kept in the object's state: no database to run.
+`restate-sessions` is the Restate SDK with sessions, `restate.sessionObject`
 ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
@@ -56,7 +56,7 @@ statements, and the sends made in it (`tx.send`), into one commit. See
 
 ## AI agents
 
-An agent is an object with SQL: its conversation is in its own database, so
+An agent is a session: its conversation is in its own database, so
 a crash, or a manager who takes a day, changes nothing. This one's tools are
 Restate itself: it looks an order up with a service, waits for a manager's
 approval, and refunds with a workflow
@@ -94,7 +94,7 @@ and [the examples](packages/examples/README.md).
 
 ### Tools of its own
 
-A tool is a function with the object's `ctx`. This assistant keeps what it
+A tool is a function with the session's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
 conversation, and a view of yours serves that table, for a profile page
 say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
@@ -165,13 +165,13 @@ packages, each with its README, and its tests in its `test/` directory:
   [the layers](packages/sessions/native/README.md#inside-the-layers), from
   Restate's key/value store up to `ctx.db`.
 - [`packages/agents`](packages/agents/README.md): `restate-agents`,
-  pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in virtual objects.
+  pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in sessions.
 - [`packages/template`](packages/template/README.md): a tutorial, one concept
-  per file: a virtual object, then SQL in it, then agents.
+  per file: a virtual object, then a session, then agents.
 - [`packages/examples`](packages/examples/README.md): the examples, each a
   small file you run with node.
 - [`packages/e2e`](packages/e2e/README.md): the tests against a real Restate
-  server: the agents and SQL objects through crashes, the context without
+  server: the agents and sessions through crashes, the context without
   journal replay, Restate's own agent tools, and the SQL benchmark; and the
   packages as a user installs them.
 
@@ -207,10 +207,10 @@ the 1.8.0 release that `@restatedev/restate-server` installs, or the binary
 
 ```sh
 pnpm --filter restate-agents test langgraph   # one framework's agent tests
-pnpm --filter e2e crash                       # the agents and SQL objects through crashes
+pnpm --filter e2e crash                       # the agents and sessions through crashes
 pnpm --filter e2e concurrency                 # the context without journal replay
 pnpm --filter e2e tools                       # Restate's own agent tools
-pnpm --filter e2e bench                       # SQL in objects: latency, throughput and stored bytes
+pnpm --filter e2e bench                       # SQL in sessions: latency, throughput and stored bytes
 ```
 
 To run an example, see [Run an example](packages/examples/README.md#run-an-example).

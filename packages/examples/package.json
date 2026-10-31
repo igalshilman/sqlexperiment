@@ -2,7 +2,7 @@
   "name": "examples",
   "version": "0.1.0",
   "private": true,
-  "description": "Restate virtual objects with SQL, and agents on it: each a file you run with node",
+  "description": "Restate session objects, and agents in them: each a file you run with node",
   "type": "module",
   "scripts": {
     "test": "vitest run"

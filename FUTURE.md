@@ -44,7 +44,7 @@ ephemeral one.
 `eagerStateKeysWhitelist` (1.17.4 has no such option). Restate has it since
 1.8.0 ([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
 
-**Now:** SQL objects set lazy state, so an invocation does not start with
+**Now:** session objects set lazy state, so an invocation does not start with
 every tail entry and pack, and a session's first read is the head
 (`v22/head`): a round trip, cached or not.
 

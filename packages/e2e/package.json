@@ -2,7 +2,7 @@
   "name": "e2e",
   "version": "0.1.0",
   "private": true,
-  "description": "Tests against a real Restate server: the agents and SQL objects through crashes, the context without journal replay, Restate's own agent tools, and the SQL benchmark; and the packages as a user installs them",
+  "description": "Tests against a real Restate server: the agents and sessions through crashes, the context without journal replay, Restate's own agent tools, and the SQL benchmark; and the packages as a user installs them",
   "type": "module",
   "scripts": {
     "crash": "node crash.ts",
