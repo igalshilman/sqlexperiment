@@ -1,5 +1,5 @@
 /**
- * 12 · A tool
+ * 11 · A tool
  *
  * A tool is a function the model may call: a name and a description for the
  * model, its input as a zod schema, and `run`, which answers with text or
@@ -7,7 +7,7 @@
  * `TerminalError` is an answer too, for the model to correct itself; any
  * other error is a failure, which Restate retries.
  *
- *   node src/12_tool.ts   # and register it (see 01)
+ *   node src/11_tool.ts   # and register it (see 01)
  *   curl localhost:8080/timekeeper/alice/chat -d 'What time is it in Lisbon and in Tokyo?'
  */
 import { TerminalError } from 'restate-objects';

@@ -1,12 +1,12 @@
 /**
- * 09 · Sends that commit with the rows
+ * 08 · Sends that commit with the rows
  *
  * A send is a call that does not wait for its answer. A send made in a
  * transaction, with its `tx`, is part of it: Restate makes it once the
  * transaction commits, and never if it rolls back. Here, the money leaves
  * alice's account and is sent to bob's together, or not at all.
  *
- *   node src/09_sends.ts                                                               # and register it (see 01)
+ *   node src/08_sends.ts                                                               # and register it (see 01)
  *   curl localhost:8080/account/alice/deposit --json '{"id": "d1", "amount": 100}'     # 100
  *   curl localhost:8080/account/alice/transfer --json '{"to": "bob", "amount": 30}'    # 70
  *   curl localhost:8080/account/bob/balance                                            # 30, once the send arrived
@@ -29,13 +29,17 @@ const account = restate.object({
       return balanceOf(ctx.db);
     },
 
-    /** Move `amount` to the account `to`: a step (07), so a retry does not move it twice. */
+    /** Move `amount` to the account `to`, once per transfer (06). */
     transfer: (ctx: restate.ObjectContext, { to, amount }: { to: string; amount: number }) =>
-      ctx.step('transfer', async ({ db, tx }) => {
-        if ((await balanceOf(db)) < amount) throw new restate.TerminalError('Insufficient funds');
+      ctx.transaction(async ({ db, tx }) => {
         const id = ctx.request().id; // the transfer's id: the same on every attempt
-        await db.execute('INSERT INTO entries (id, amount) VALUES (?, ?)', [id, -amount]);
-        tx.objectSendClient(account, to).deposit({ id, amount }); // made once this commits
+        // A retry finds the transfer committed, and its send made: it moves nothing.
+        const [done] = await db.query('SELECT 1 FROM entries WHERE id = ?', [id]);
+        if (done === undefined) {
+          if ((await balanceOf(db)) < amount) throw new restate.TerminalError('Insufficient funds');
+          await db.execute('INSERT INTO entries (id, amount) VALUES (?, ?)', [id, -amount]);
+          tx.objectSendClient(account, to).deposit({ id, amount }); // made once this commits
+        }
         return balanceOf(db);
       }),
 

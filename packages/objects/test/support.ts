@@ -1,6 +1,6 @@
 // Test support: an object's state in memory, and an attempt of a handler over
-// it, with restate-objects's own `ctx.db`, `ctx.transaction` and `ctx.step`, through
-// crashes and fencing, without a Restate server.
+// it, with restate-objects's own `ctx.db` and `ctx.transaction`, through crashes
+// and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
 import { SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
@@ -51,8 +51,8 @@ export interface AttemptOptions {
 }
 
 /**
- * `ctx.db`, `ctx.transaction` and `ctx.step` of an attempt, restate-objects's own,
- * over `map`, and `end`, which runs the handler and ends the attempt's session
+ * `ctx.db` and `ctx.transaction` of an attempt, restate-objects's own, over
+ * `map`, and `end`, which runs the handler and ends the attempt's session
  * as an object's handler does. Each attempt is a database of its own in this
  * process (a namespace of its own), so that one a crash abandoned does not
  * share the page cache.
@@ -120,7 +120,6 @@ export function sqlAttempt({
     set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
     clear: (name: string) => ctx.clear(name),
     transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
-    step: <T>(name: string, body: (t: restate.SqlTransaction) => Promise<T>) => attempt.step(name, body),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => withSql(handler, attempt),
     /** The attempt ends, as when Restate fences or suspends it. */

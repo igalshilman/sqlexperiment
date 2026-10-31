@@ -1,8 +1,8 @@
 // An attempt's SQL session: the object's database, kept in its state
-// (database.ts), opened on the handler's first use of `ctx.db`,
-// `ctx.transaction` or `ctx.step` and saved when the handler ends;
+// (database.ts), opened on the handler's first use of `ctx.db` or
+// `ctx.transaction` and saved when the handler ends; and
 // `ctx.transaction(body)`, one transaction of it with the sends it commits
-// with; and `ctx.step(name, body)`, one whose result the invocation keeps.
+// with.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
@@ -300,25 +300,9 @@ function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][numbe
   };
 }
 
-// The steps of the invocation in flight: each step's result, by the
-// invocation's id (the request id, the same on every attempt) and the step's
-// name, committed with the step's transaction. The object runs one exclusive
-// invocation at a time, so once one ends, every row belongs to an invocation
-// that ended: the end of an invocation that ran steps, or of the next one that
-// uses the database after a killed invocation left rows, drops the table. It
-// exists only while an invocation that ran steps is in flight.
-
-/** The table of steps. */
-const STEPS = 'restate_steps';
-
-/** A step's result as stored: JSON, or NULL for `undefined`. */
-const encodeStep = (value: unknown): string | null => (value === undefined ? null : JSON.stringify(value));
-
-const decodeStep = (value: SqlValue): unknown => (value === null ? undefined : JSON.parse(value as string));
-
 /**
- * The attempt whose transaction or step body runs: a call to its session from
- * inside the body would wait for the transaction, which waits for the body.
+ * The attempt whose transaction body runs: a call to its session from inside
+ * the body would wait for the transaction, which waits for the body.
  */
 const inBody = new AsyncLocalStorage<SqlAttempt>();
 
@@ -365,10 +349,6 @@ export class SqlAttempt {
   #db: Database | undefined;
   // The ids of the outbox's transactions this attempt made the sends of.
   readonly #made = new Set<string>();
-  // The names of the steps this attempt runs or ran: a name is one step.
-  readonly #steps = new Set<string>();
-  // Whether the table of steps exists, once known.
-  #stepsTable: boolean | undefined;
   // The schemas this attempt's database has all the steps of.
   readonly #ensured = new Set<string>();
   #ended = false;
@@ -411,121 +391,42 @@ export class SqlAttempt {
    */
   async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
     if (this.#ctx.shared) throw new TerminalError('ctx.transaction is for exclusive handlers');
-    return this.#commit(await this.#use(), body, { begin: 'now' });
-  }
-
-  /**
-   * `ctx.step(name, body)`: `body` as a transaction ({@link transaction})
-   * whose result commits with it, as the invocation's step `name`. A later
-   * attempt of the invocation gets the result, without running `body` again.
-   */
-  async step<T>(name: string, body: (t: SqlTransaction) => Promise<T>): Promise<T> {
-    if (this.#ctx.shared) throw new TerminalError('ctx.step is for exclusive handlers');
-    if (this.#steps.has(name)) throw new TerminalError(`ctx.step: the invocation has a step '${name}' already`);
-    this.#steps.add(name);
-    try {
-      const db = await this.#use();
-      const invocation = this.#ctx.request().id;
-      if (await this.#hasSteps(db)) {
-        const [done] = await this.#errors.track(
-          db.query(`SELECT value FROM ${STEPS} WHERE invocation = ? AND name = ?`, [invocation, name]),
-        );
-        if (done !== undefined) return decodeStep(done[0]!) as T;
-      }
-      return await this.#commit(db, body, {
-        begin: 'at first statement',
-        record: async (sql, value) => {
-          if (!this.#stepsTable) {
-            await sql.execute(
-              `CREATE TABLE IF NOT EXISTS ${STEPS} (invocation TEXT NOT NULL, name TEXT NOT NULL, value TEXT, PRIMARY KEY (invocation, name))`,
-            );
-          }
-          await sql.execute(`INSERT INTO ${STEPS} VALUES (?, ?, ?)`, [invocation, name, encodeStep(value)]);
-        },
-      });
-    } catch (error) {
-      // Not committed: the name is free for another try.
-      this.#steps.delete(name);
-      throw error;
-    }
-  }
-
-  /**
-   * `body` as one transaction of `db`, with `record`'s writes of its result,
-   * and the sends it made in the outbox. It begins before the body runs, or
-   * at the body's first statement (or once it resolves, if it runs none):
-   * until then the session is free, and other calls go first.
-   */
-  async #commit<T>(
-    db: Database,
-    body: (t: SqlTransaction) => Promise<T>,
-    {
-      begin: when,
-      record,
-    }: { begin: 'now' | 'at first statement'; record?: (sql: SqlDatabase, value: T) => Promise<void> },
-  ): Promise<T> {
+    const db = await this.#use();
     const sends: Outgoing['sends'] = [];
     let recording = true;
     const tx = sendClients(this.#ctx.defaultSerde, (send) => {
       if (!recording) throw new TerminalError('the transaction has ended: send from inside its body');
       sends.push(storedSend(send));
     });
-    const outcome = Promise.withResolvers<Outcome<T>>();
     let outgoing: Outgoing | undefined;
-    let begun: Promise<SqlDatabase> | undefined;
-    let committed: Promise<T> | undefined;
-    const begin = () =>
-      (begun ??= new Promise<SqlDatabase>((resolve, reject) => {
-        committed = this.#errors.transaction(db, async (sql, handle) => {
-          resolve(sql);
-          const value = settle(await outcome.promise);
-          await record?.(sql, value);
-          // The outbox as committed, but the sends stored since, and this
-          // transaction's: unchanged, it is not written again.
-          const outbox = await this.#unstored(db);
-          if (sends.length > 0) {
-            outgoing = { id: randomUUID(), sends };
-            outbox.push(outgoing);
-          }
-          handle.commitEffects(encodeOutbox(outbox));
-          return value;
-        });
-        committed.catch(reject);
-      }));
-    const sql: SqlDatabase & Pick<SqlSession, 'transaction'> = {
-      query: (statement, params) => begin().then((t) => t.query(statement, params)),
-      queryColumns: (statement, params) => begin().then((t) => t.queryColumns(statement, params)),
-      execute: (statement, params) => begin().then((t) => t.execute(statement, params)),
-      transaction: () => Promise.reject(new TerminalError('ctx.transaction already runs in a transaction')),
-    };
-    try {
-      if (when === 'now') await begin();
-      outcome.resolve({ value: await inBody.run(this, () => body({ db: sql, tx })) });
-    } catch (error) {
-      outcome.resolve({ error });
-      // A body that ran no SQL has no transaction to roll back.
-      if (begun === undefined) throw this.#errors.classify(error, db.isUsable());
-    } finally {
-      recording = false;
-    }
     let value: T;
     try {
-      await begin();
-      value = await committed!;
+      value = await this.#errors.transaction(db, async (sql, handle) => {
+        const nested = {
+          ...sql,
+          transaction: () => Promise.reject(new TerminalError('ctx.transaction already runs in a transaction')),
+        };
+        let result: T;
+        try {
+          result = await inBody.run(this, () => body({ db: nested, tx }));
+        } finally {
+          recording = false;
+        }
+        // The outbox as committed, but the sends stored since, and this
+        // transaction's: unchanged, it is not written again.
+        const outbox = await this.#unstored(db);
+        if (sends.length > 0) {
+          outgoing = { id: randomUUID(), sends };
+          outbox.push(outgoing);
+        }
+        handle.commitEffects(encodeOutbox(outbox));
+        return result;
+      });
     } catch (error) {
       throw this.#errors.classify(error, db.isUsable());
     }
-    if (record !== undefined) this.#stepsTable = true;
     if (outgoing !== undefined) this.#make(outgoing);
     return value;
-  }
-
-  /** Whether the table of steps exists. */
-  async #hasSteps(db: Database): Promise<boolean> {
-    this.#stepsTable ??=
-      (await this.#errors.track(db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, [STEPS])))
-        .length > 0;
-    return this.#stepsTable;
   }
 
   /** Make the sends of a committed transaction: each with an idempotency key of the transaction (or its own), so that making them again is dropped. */
@@ -548,19 +449,12 @@ export class SqlAttempt {
 
   /**
    * Empty the outbox, so that a later open does not make its sends again: a
-   * commit after them, which stores them first. Unless `keepSteps`, the same
-   * commit drops the table of steps: the invocation ends.
+   * commit after them, which stores them first.
    */
-  async #flush(db: Database, keepSteps: boolean) {
-    const sending = (await db.effects()).length > 0;
-    const dropping = !keepSteps && (await this.#hasSteps(db));
-    if (!sending && !dropping) return;
+  async #flush(db: Database) {
+    if ((await db.effects()).length === 0) return;
     const outbox = encodeOutbox(await this.#unstored(db));
-    await db.transaction(async (tx) => {
-      if (dropping) await tx.execute(`DROP TABLE ${STEPS}`);
-      tx.commitEffects(outbox);
-    });
-    this.#stepsTable = false;
+    await db.transaction(async (tx) => tx.commitEffects(outbox));
   }
 
   /** The session, for a call that is not from inside a body ({@link inBody}). */
@@ -640,19 +534,18 @@ export class SqlAttempt {
     if ('error' in outcome) {
       const error = this.#errors.classify(outcome.error, db.isUsable());
       // The handler's error stands: what it committed is stored, and an
-      // outbox left full is made again by the next open. Restate retries an
-      // error that is not terminal: the invocation goes on, with its steps.
-      await this.#save(db, !(error instanceof TerminalError)).catch(() => db.close().catch(() => {}));
+      // outbox left full is made again by the next open.
+      await this.#save(db).catch(() => db.close().catch(() => {}));
       throw error;
     }
-    await this.#save(db, false);
+    await this.#save(db);
     return outcome.value;
   }
 
-  /** Empty the outbox (and, unless `keepSteps`, drop the steps) and save the session; one a storage error ended only closes. */
-  async #save(db: Database, keepSteps: boolean) {
+  /** Empty the outbox and save the session; one a storage error ended only closes. */
+  async #save(db: Database) {
     if (!db.isUsable()) return db.close();
-    await this.#flush(db, keepSteps);
+    await this.#flush(db);
     await db.save();
   }
 }

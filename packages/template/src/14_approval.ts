@@ -1,12 +1,12 @@
 /**
- * 15 · A person in the loop
+ * 14 · A person in the loop
  *
  * A `signal` tool waits for a value from outside, such as a person's
  * approval, for as long as it takes: no process is held while it waits, and
  * a crash or a restart changes nothing. `pending` lists what the agent waits
  * for, and `signal` answers it.
  *
- *   node src/15_approval.ts                      # and register it (see 01)
+ *   node src/14_approval.ts                      # and register it (see 01)
  *   curl localhost:8080/support/alice/chat/send -d 'Order 103 arrived broken. Can I get my $30 back?'
  *   curl localhost:8080/support/alice/pending    # the approval it waits for
  *   curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'

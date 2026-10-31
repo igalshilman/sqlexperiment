@@ -1,5 +1,5 @@
 /**
- * 13 · An agent in your own object
+ * 12 · An agent in your own object
  *
  * `object` holds the agent's handlers (`pi.chat`, `pi.messages`) beside
  * handlers of your own, and a schema of your own: one database for the
@@ -7,7 +7,7 @@
  * it reaches that database too. Here, the agent remembers facts about the
  * user, and `facts` serves them, for a profile page say.
  *
- *   node src/13_memory.ts                       # and register it (see 01)
+ *   node src/12_memory.ts                       # and register it (see 01)
  *   curl localhost:8080/companion/alice/chat -d 'I am vegetarian, and I live in Lisbon.'
  *   curl localhost:8080/companion/alice/facts   # what it remembered
  */

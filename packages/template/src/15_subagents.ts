@@ -1,5 +1,5 @@
 /**
- * 16 · Agents that delegate
+ * 15 · Agents that delegate
  *
  * `subagent(agent)` makes another agent a tool: the model hands it a named
  * task, and gets its answer. Each task is a conversation of the other agent,
@@ -7,7 +7,7 @@
  * `researcher/alice.lisbon`), so the model can come back to it, and a crash
  * anywhere resumes where it stopped.
  *
- *   node src/16_subagents.ts                    # and register it (see 01)
+ *   node src/15_subagents.ts                    # and register it (see 01)
  *   curl localhost:8080/editor/alice/chat -d 'Write a short guide to Lisbon for a first visit.'
  *   curl localhost:8080/editor/alice/messages   # the tasks it handed out, and the guide
  */

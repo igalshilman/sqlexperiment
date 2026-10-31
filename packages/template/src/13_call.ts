@@ -1,11 +1,11 @@
 /**
- * 14 · Your objects as tools
+ * 13 · Your objects as tools
  *
  * `call(object, handler)` makes a handler of yours a tool: the model picks
  * the key (here, a product) and the agent calls it through Restate, once,
  * however often the agent's handler is retried.
  *
- *   node src/14_call.ts   # and register it (see 01)
+ *   node src/13_call.ts   # and register it (see 01)
  *   curl localhost:8080/inventory/apples/restock --json 12
  *   curl localhost:8080/clerk/alice/chat -d 'Do we have apples? And pears?'
  */
