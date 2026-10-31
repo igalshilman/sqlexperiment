@@ -51,7 +51,7 @@ import {
   modelOf,
   providerOf,
   nextPromptId,
-  onClear,
+  alsoClearing,
   settleSteering,
   type Steerable,
   toolCallEnded,
@@ -542,7 +542,9 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
  * what is new or changed since a cursor, from the log each change writes
  * (log.ts). It answers while a message is answered.
  */
-export const messages = () => messagesHandler();
+export const messages = () =>
+  // OpenCode's tables are in a database of their own, which `clear` empties too.
+  alsoClearing(messagesHandler(), (ctx) => database(ctx.db, DATABASE).transaction((tx) => reset(tx)));
 
 /** The session of `host`, as `messages` gives it. */
 const transcribe = async (host: Host) => {
@@ -570,8 +572,6 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) => {
-  // OpenCode's tables are in a database of their own, which `clear` empties too.
-  onClear(name, (ctx) => database(ctx.db, DATABASE).transaction((tx) => reset(tx)));
   return object({
     name,
     description,

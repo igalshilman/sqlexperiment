@@ -162,9 +162,25 @@ export const inBackground = (name: string) => void background.add(name);
 /** What each agent clears beside its database, by its object's name: see {@link onClear}. */
 const clearing = new Map<string, (ctx: restate.SessionContext) => Promise<void>>();
 
-/** When an agent of object `name` is cleared (`clear`), run `clear` too: for what it keeps apart, such as OpenCode's database. */
-export const onClear = (name: string, clear: (ctx: restate.SessionContext) => Promise<void>) =>
-  void clearing.set(name, clear);
+/** What a framework's `messages` view clears beside the agent's database: see {@link alsoClearing}. */
+const viewsClearing = new WeakMap<object, (ctx: restate.SessionContext) => Promise<void>>();
+
+/**
+ * The `messages` view `view` of a framework that keeps a conversation apart
+ * (OpenCode, in a database of its own): `clear` empties it too, as an agent
+ * with this view is cleared.
+ */
+export const alsoClearing = <V extends object>(view: V, clear: (ctx: restate.SessionContext) => Promise<void>) => {
+  viewsClearing.set(view, clear);
+  return view;
+};
+
+/** When the agent `name`, whose `messages` view is `view`, is cleared, clear what that view keeps apart too. */
+export const onClear = (name: string, view: object | undefined) => {
+  const clear = view === undefined ? undefined : viewsClearing.get(view);
+  if (clear === undefined) clearing.delete(name);
+  else clearing.set(name, clear);
+};
 
 /** Clear what the agent of `ctx` keeps beside its database ({@link onClear}). */
 export const cleared = async (ctx: restate.SessionContext) => clearing.get(ctx.request.target.service)?.(ctx);

@@ -2,12 +2,12 @@
 // with a fake context that records the calls they make.
 import * as restate from 'restate-session-objects';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
-import { type AttemptContext, contextOf } from 'restate-session-objects/internal';
-import { memoryDatabase } from 'restate-session-objects/test/support';
+import { type AttemptContext, contextOf, invoke } from 'restate-session-objects/internal';
+import { fakeContext, memoryDatabase } from 'restate-session-objects/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { settle } from '../src/calls.ts';
-import { Transcript } from '../src/common.ts';
+import { alsoClearing, messagesHandler, Transcript } from '../src/common.ts';
 
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
 const carts = restate.object({
@@ -287,5 +287,16 @@ describe('object', () => {
     expect(handlersOf(desk)).not.toContain('clear');
     expect(handlersOf(desk)).not.toContain('sync');
     expect(handlersOf(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));
+  });
+
+  it('clears what its `messages` view keeps apart, whatever its handlers are', async () => {
+    const cleared: string[] = [];
+    const agent = object({
+      name: 'keeper',
+      handlers: { chat: async () => '' },
+      views: { messages: alsoClearing(messagesHandler(), async (ctx) => void cleared.push(ctx.key)) },
+    });
+    await invoke(agent, 'erase', fakeContext({ map: new Map(), service: 'keeper', key: 'alice', answer: () => null }));
+    expect(cleared).toEqual(['alice']);
   });
 });

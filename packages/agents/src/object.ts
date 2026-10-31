@@ -3,6 +3,7 @@ import * as restate from 'restate-session-objects';
 import { reset } from 'restate-session-objects/internal';
 import {
   cleared,
+  onClear,
   inBackground,
   type Messages,
   type MessagesRequest,
@@ -287,6 +288,7 @@ export const object = <
     ]),
   );
   const messages = (views as Record<string, restate.Entry<restate.ViewContext>>).messages;
+  onClear(name, messages);
   const page = (typeof messages === 'function' ? messages : messages?.handler) as
     | ((ctx: restate.ViewContext, request: MessagesRequest) => Promise<Messages>)
     | undefined;
