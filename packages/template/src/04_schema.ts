@@ -1,31 +1,41 @@
 /**
- * 04 · A schema that grows
+ * 04 · Changing the schema
  *
- * `schema` is a list of steps, applied in order, once per key. To change the
- * tables, add a step: each key's database runs the steps it lacks the next
- * time it is used. A step that ran never changes.
+ * Alice's database already exists, so editing its CREATE TABLE statement
+ * would change nothing for her. That's why `schema` is a list of steps: to
+ * change the tables, add a step at the end. Each key's database runs the
+ * steps it hasn't run yet, the next time it is used. Never edit or remove a
+ * step that may have run somewhere; add a new one instead.
  *
- *   node src/04_schema.ts                                         # and register it (see 01)
- *   curl localhost:8080/greeter/alice/greet --json '"cheerful"'   # "Hello, alice! You look cheerful."
- *   curl localhost:8080/greeter/alice/history                     # the greetings of 02 and 03 have no mood
+ * Here, deposits get a note.
+ *
+ *   node src/04_schema.ts                                                             # and register it (see 01)
+ *   curl localhost:8080/wallet/alice/deposit --json '{"amount": 50, "note": "birthday"}'
+ *   curl localhost:8080/wallet/alice/history                                          # the earlier deposits have no note
  */
 import * as restate from 'restate-sessions';
 
-const greeter = restate.sessionObject({
-  name: 'greeter',
+const balanceOf = async (db: restate.DatabaseReader) =>
+  (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
+
+const wallet = restate.sessionObject({
+  name: 'wallet',
   schema: [
-    'CREATE TABLE greetings (at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)', // 02's
-    'ALTER TABLE greetings ADD COLUMN mood TEXT', // new: runs once on each key's database
+    'CREATE TABLE entries (amount INTEGER NOT NULL)', // from lesson 02
+    'ALTER TABLE entries ADD COLUMN note TEXT', // new: runs once on each wallet's database
   ],
   handlers: {
-    greet: async (ctx, mood: string) => {
-      await ctx.db.execute('INSERT INTO greetings (mood) VALUES (?)', [mood]);
-      return `Hello, ${ctx.key}! You look ${mood}.`;
+    deposit: async (ctx, { amount, note }: { amount: number; note?: string }) => {
+      await ctx.db.execute('INSERT INTO entries (amount, note) VALUES (?, ?)', [amount, note ?? null]);
+      return balanceOf(ctx.db);
     },
   },
   views: {
-    history: async (ctx) => ctx.db.query<{ at: string; mood: string }>('SELECT at, mood FROM greetings ORDER BY rowid'),
+    balance: async (ctx) => balanceOf(ctx.db),
+
+    history: async (ctx) =>
+      ctx.db.query<{ amount: number; note: string | null }>('SELECT amount, note FROM entries ORDER BY rowid'),
   },
 });
 
-await restate.serve({ services: [greeter], port: 9080 });
+await restate.serve({ services: [wallet], port: 9080 });

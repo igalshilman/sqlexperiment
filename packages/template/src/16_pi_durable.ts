@@ -1,23 +1,25 @@
 /**
- * 16 · pi-durable by hand
+ * 16 · Appendix: pi-durable by hand
  *
- * What `pi.prompt` (lesson 09) does, written out with pi-durable itself: for
- * what restate-agents' pi leaves out, such as extensions of your own,
- * compaction or forks. Three things make pi-durable durable in a handler:
+ * `pi.prompt` and `pi.chat` run pi-durable for you. When you need what they
+ * leave out, such as extensions of your own, compaction or forks, run it
+ * yourself. This lesson does what `pi.prompt` does, written out. Three
+ * things make pi-durable durable inside a handler:
  *
  * - Its storage is the key's database: `openSqlKvStorage(ctx.db)`. Each
- *   pi-durable commit is an SQL transaction there, stored with the object.
- * - The prompt is submitted with the invocation's id as its `requestId`. A
- *   retried attempt (a crash, a lost connection) opens the Harness again and
- *   finds the same submission, finished or still running, rather than ask the
- *   model twice.
- * - `restartLimit: Infinity`: work a crash cut off runs again however often.
- *   Restate's retry policy decides when to stop, not pi-durable (which would
- *   park it after 5 crashes in a row, and the prompt would never be answered).
+ *   pi-durable commit is an SQL transaction there.
+ * - The prompt is submitted with the request's id as its `requestId`. A
+ *   retried attempt opens the Harness again and finds the same submission,
+ *   finished or still running, instead of asking the model twice.
+ * - `restartLimit: Infinity`: work that a crash cut off runs again, however
+ *   often. Restate's retry policy decides when to give up. pi-durable's own
+ *   default parks the work after 5 crashes in a row, and the prompt would
+ *   never be answered.
  *
- * The Harness is opened for the attempt and closed at its end. The
- * conversation stays in the database: each message to the same key goes on
- * with it.
+ * The Harness is opened for each attempt and closed at its end. The
+ * conversation stays in the database, so each message to the same key
+ * continues it. This one is a separate object, `poet`, since it uses
+ * pi-durable with an extension of its own.
  *
  *   OPENAI_API_KEY=… node src/16_pi_durable.ts                        # and register it (see 01)
  *   curl localhost:8080/poet/alice/write --json '"the sea"'

@@ -1,40 +1,78 @@
 /**
- * 06 · Running twice, changing once
+ * 06 · Retries
  *
- * When a handler fails before it ends (a crash, a lost connection), Restate
- * retries it: the handler runs again from the start, against the database as
- * stored, so what the failed attempt committed is there. A handler that
- * records its request's id with its writes finds it the second time, and
- * changes nothing.
+ * When a handler fails partway, because the process crashed or a connection
+ * dropped, Restate runs it again from the first line. Whatever the failed
+ * attempt committed is still in the database, so every handler must be safe
+ * to run twice.
  *
- *   node src/06_retries.ts                                                          # and register it (see 01)
- *   curl localhost:8080/savings/alice/deposit --json '{"id": "d1", "amount": 10}'   # 10, though its first attempt failed (this process logs it)
- *   curl localhost:8080/savings/alice/deposit --json '{"id": "d1", "amount": 10}'   # 10: the same deposit, sent again
- *   curl localhost:8080/savings/alice/deposit --json '{"id": "d2", "amount": 5}'    # 15
+ * The way to do that is an id that is the same on every attempt. A deposit
+ * now comes with an id from the caller, and `INSERT OR IGNORE` skips a
+ * deposit whose id is already there: running it twice, or sending it twice,
+ * counts it once. Spending has no id from the caller, so it uses
+ * `ctx.request.id`, the id Restate gives each request, which also stays the
+ * same across attempts.
+ *
+ * To show it, this lesson fails the first attempt of every deposit right
+ * after the insert, the way a crash would. Restate retries it, and the
+ * balance still counts the deposit once.
+ *
+ *   node src/06_retries.ts                                                                         # and register it (see 01)
+ *   curl localhost:8080/wallet/alice/deposit --json '{"id": "d1", "amount": 10, "note": "refund"}'   # counted once, though the first attempt failed
+ *   curl localhost:8080/wallet/alice/deposit --json '{"id": "d1", "amount": 10, "note": "refund"}'   # sent again: the balance stays the same
  */
 import * as restate from 'restate-sessions';
 
+const balanceOf = async (db: restate.DatabaseReader) =>
+  (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
+
 const failed = new Set<string>();
 
-/** Fail the first attempt of each invocation, as a crash would: Restate retries it. */
+/** Fail the first attempt of a request, as a crash would. Restate then retries it. */
 function failFirstAttempt(ctx: restate.SessionContext) {
   if (failed.has(ctx.request.id)) return;
   failed.add(ctx.request.id);
-  throw new Error('A crash, after the deposit committed');
+  throw new Error('Simulated crash, after the deposit was committed');
 }
 
-const savings = restate.sessionObject({
-  name: 'savings',
-  schema: ['CREATE TABLE deposits (id TEXT PRIMARY KEY, amount INTEGER NOT NULL)'],
+const wallet = restate.sessionObject({
+  name: 'wallet',
+  schema: [
+    'CREATE TABLE entries (amount INTEGER NOT NULL)',
+    'ALTER TABLE entries ADD COLUMN note TEXT',
+    // New: an id per entry. Entries from earlier lessons have none, which a unique index allows.
+    'ALTER TABLE entries ADD COLUMN id TEXT',
+    'CREATE UNIQUE INDEX entries_by_id ON entries (id)',
+  ],
   handlers: {
-    deposit: async (ctx, { id, amount }: { id: string; amount: number }) => {
-      // The second time, the deposit's id is there already: OR IGNORE skips it.
-      await ctx.db.execute('INSERT OR IGNORE INTO deposits (id, amount) VALUES (?, ?)', [id, amount]);
+    deposit: async (ctx, { id, amount, note }: { id: string; amount: number; note?: string }) => {
+      await ctx.db.execute('INSERT OR IGNORE INTO entries (id, amount, note) VALUES (?, ?, ?)', [
+        id,
+        amount,
+        note ?? null,
+      ]);
       failFirstAttempt(ctx);
-      const deposits = await ctx.db.get<{ total: number }>('SELECT sum(amount) AS total FROM deposits');
-      return deposits?.total;
+      return balanceOf(ctx.db);
     },
+
+    spend: (ctx, { amount, note }: { amount: number; note?: string }) =>
+      ctx.db.transaction(async (tx) => {
+        await tx.execute('INSERT OR IGNORE INTO entries (id, amount, note) VALUES (?, ?, ?)', [
+          ctx.request.id,
+          -amount,
+          note ?? null,
+        ]);
+        const balance = await balanceOf(tx);
+        if (balance < 0) throw new restate.TerminalError('Not enough money');
+        return balance;
+      }),
+  },
+  views: {
+    balance: async (ctx) => balanceOf(ctx.db),
+
+    history: async (ctx) =>
+      ctx.db.query<{ amount: number; note: string | null }>('SELECT amount, note FROM entries ORDER BY rowid'),
   },
 });
 
-await restate.serve({ services: [savings], port: 9080 });
+await restate.serve({ services: [wallet], port: 9080 });

@@ -1,31 +1,40 @@
 /**
- * 03 · Reading beside the writer: views
+ * 03 · Views
  *
- * A key runs one handler at a time, so its writes never race. A view is the
- * exception: it runs whenever it is called, even while a handler of the key
- * runs, and reads the database as committed. It writes nothing.
+ * Handlers of one key run one at a time, so their writes never race. The
+ * price is that a slow handler makes every other request to that key wait.
+ * Reading doesn't need to wait: a view runs as soon as it is called, even
+ * while a handler of the same key is running, and reads what has been
+ * committed so far. A view can't write.
  *
- *   node src/03_views.ts                        # and register it (see 01)
- *   curl localhost:8080/greeter/alice/greet
- *   curl localhost:8080/greeter/alice/history   # when alice was greeted, 02's greetings too
+ *   node src/03_views.ts                               # and register it (see 01)
+ *   curl localhost:8080/wallet/alice/deposit --json 20
+ *   curl localhost:8080/wallet/alice/balance           # 20, plus what lesson 02 deposited
+ *   curl localhost:8080/wallet/alice/history           # every deposit, oldest first
  */
 import * as restate from 'restate-sessions';
 
-const greeter = restate.sessionObject({
-  name: 'greeter',
-  schema: ['CREATE TABLE greetings (at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)'], // 02's
+/** The sum of the entries. A `DatabaseReader` is any database you can read: a handler's, a view's or a transaction's. */
+const balanceOf = async (db: restate.DatabaseReader) =>
+  (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
+
+const wallet = restate.sessionObject({
+  name: 'wallet',
+  schema: ['CREATE TABLE entries (amount INTEGER NOT NULL)'],
   handlers: {
-    greet: async (ctx) => {
-      await ctx.db.execute('INSERT INTO greetings DEFAULT VALUES');
-      return `Hello, ${ctx.key}!`;
+    deposit: async (ctx, amount: number) => {
+      await ctx.db.execute('INSERT INTO entries (amount) VALUES (?)', [amount]);
+      return balanceOf(ctx.db);
     },
   },
   views: {
+    balance: async (ctx) => balanceOf(ctx.db),
+
     history: async (ctx) => {
-      const rows = await ctx.db.query<{ at: string }>('SELECT at FROM greetings ORDER BY rowid');
-      return rows.map(({ at }) => at);
+      const rows = await ctx.db.query<{ amount: number }>('SELECT amount FROM entries ORDER BY rowid');
+      return rows.map(({ amount }) => amount);
     },
   },
 });
 
-await restate.serve({ services: [greeter], port: 9080 });
+await restate.serve({ services: [wallet], port: 9080 });

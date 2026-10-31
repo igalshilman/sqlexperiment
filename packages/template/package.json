@@ -2,7 +2,7 @@
   "name": "template",
   "version": "0.1.0",
   "private": true,
-  "description": "A tutorial in files: virtual objects, then SQL in them, then agents, one concept at a time",
+  "description": "A tutorial in files: a wallet per user, from a SQL database per key to agents, one idea at a time",
   "type": "module",
   "dependencies": {
     "@earendil-works/chord": "1.4.0",

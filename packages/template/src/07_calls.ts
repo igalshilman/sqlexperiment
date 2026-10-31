@@ -1,45 +1,71 @@
 /**
  * 07 · Calling another object
  *
- * A handler calls another object's handler through Restate, and awaits its
- * answer. Each object keeps its own database: a nickname knows its owner, a
- * user knows their nicknames.
+ * Friends should be able to pay alice without knowing her wallet's key, so
+ * she picks a handle, such as @ace. Handles are a second session object:
+ * each handle is a key with its own database, which records the wallet that
+ * owns it. The first wallet to claim a handle gets it.
  *
- * A retried handler (06) makes its calls again. An idempotency key that is
- * the same on every attempt, the request's id and what the call is for,
- * makes Restate answer a repeated call with the first one's answer.
+ * `ctx.rpc(handle, name)` calls that object through Restate, and waits for
+ * the answer. A retried handler (06) makes its calls again, so a call that
+ * changes something gets an idempotency key that is the same on every
+ * attempt. Restate then answers a repeated call with the first call's
+ * result, instead of running it again.
  *
- *   node src/07_calls.ts                                   # and register it (see 01)
- *   curl localhost:8080/user/alice/rename --json '"ace"'   # "alice is now ace"
- *   curl localhost:8080/user/bob/rename --json '"ace"'     # fails: ace is alice's
+ *   node src/07_calls.ts                                    # and register it (see 01)
+ *   curl localhost:8080/wallet/alice/claim --json '"ace"'   # "alice is now @ace"
+ *   curl localhost:8080/wallet/bob/claim --json '"ace"'     # fails: @ace belongs to alice
+ *   curl localhost:8080/handle/ace/owner                    # "alice"
  */
 import * as restate from 'restate-sessions';
 
-const nickname = restate.sessionObject({
-  name: 'nickname',
-  schema: ['CREATE TABLE owner (user TEXT NOT NULL)'],
+const handle = restate.sessionObject({
+  name: 'handle',
+  schema: ['CREATE TABLE owner (wallet TEXT NOT NULL)'],
   handlers: {
-    /** The nickname's owner: `user`, unless someone claimed it first. */
-    claim: async (ctx, user: string) => {
-      await ctx.db.execute('INSERT INTO owner (user) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM owner)', [user]);
-      const owner = await ctx.db.get<{ user: string }>('SELECT user FROM owner');
-      return owner!.user; // the insert above made sure there is one
+    /** Give the handle to `wallet`, unless another wallet has it, and answer with its owner. */
+    claim: async (ctx, wallet: string) => {
+      await ctx.db.execute('INSERT INTO owner (wallet) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM owner)', [wallet]);
+      const owner = await ctx.db.get<{ wallet: string }>('SELECT wallet FROM owner');
+      return owner!.wallet; // there is one: the insert above made sure
     },
+  },
+  views: {
+    owner: async (ctx) => (await ctx.db.get<{ wallet: string }>('SELECT wallet FROM owner'))?.wallet ?? null,
   },
 });
 
-const user = restate.sessionObject({
-  name: 'user',
-  schema: ['CREATE TABLE nicknames (nickname TEXT NOT NULL)'],
+const balanceOf = async (db: restate.DatabaseReader) =>
+  (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
+
+const wallet = restate.sessionObject({
+  name: 'wallet',
+  schema: [
+    'CREATE TABLE entries (amount INTEGER NOT NULL)',
+    'ALTER TABLE entries ADD COLUMN note TEXT',
+    'ALTER TABLE entries ADD COLUMN id TEXT',
+    'CREATE UNIQUE INDEX entries_by_id ON entries (id)',
+  ],
   handlers: {
-    rename: async (ctx, name: string) => {
-      // A retry must not claim twice: the key is the same on every attempt.
-      const owner = await ctx.rpc(nickname, name, { idempotencyKey: `${ctx.request.id}:claim` }).claim(ctx.key);
-      if (owner !== ctx.key) throw new restate.TerminalError(`${name} is ${owner}'s`);
-      await ctx.db.execute('INSERT INTO nicknames (nickname) VALUES (?)', [name]);
-      return `${ctx.key} is now ${name}`;
+    deposit: async (ctx, { id, amount, note }: { id: string; amount: number; note?: string }) => {
+      await ctx.db.execute('INSERT OR IGNORE INTO entries (id, amount, note) VALUES (?, ?, ?)', [
+        id,
+        amount,
+        note ?? null,
+      ]);
+      return balanceOf(ctx.db);
     },
+
+    claim: async (ctx, name: string) => {
+      const options = { idempotencyKey: `${ctx.request.id}:claim` };
+      const owner = await ctx.rpc(handle, name, options).claim(ctx.key);
+      if (owner !== ctx.key) throw new restate.TerminalError(`@${name} belongs to ${owner}`);
+      return `${ctx.key} is now @${name}`;
+    },
+  },
+  views: {
+    balance: async (ctx) => balanceOf(ctx.db),
   },
 });
 
-await restate.serve({ services: [nickname, user], port: 9080 });
+await restate.serve({ services: [wallet, handle], port: 9080 });

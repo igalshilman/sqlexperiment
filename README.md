@@ -12,8 +12,8 @@ TypeScript SDK:
   supports pi, OpenCode, LangGraph, Claude and the DeepSeek Harness.
 
 If you are new to this, start with [the tutorial](packages/template/README.md).
-It introduces one idea per file, from a plain virtual object up to agents that
-hand work to each other.
+It builds a wallet one idea per file, from a plain virtual object up to an
+assistant that pays your friends and asks before large transfers.
 
 ## Session objects
 
