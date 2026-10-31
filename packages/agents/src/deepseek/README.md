@@ -44,8 +44,8 @@ deepseek.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // 
 A provider or model pi-ai does not know fails when the agent is defined; a
 missing or wrong key fails the invocation with a terminal error (424).
 
-For an object of your own, `deepseek.chat(options)` and
-`deepseek.messages()` are the handlers; `options` may be a function of the
+For an object of your own, `deepseek.chat(options)` is the handler and
+`deepseek.messages()` the view; `options` may be a function of the
 invocation's context (each user's system prompt, say). `deepseek.prompt(ctx,
 text, options)` answers a prompt in a handler of your own, once, however
 often the handler runs; each prompt of an invocation is a prompt of its own.

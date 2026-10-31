@@ -34,8 +34,8 @@ await serve(assistant);
 | `maxTokens` | The most tokens of each of the model's replies (default 16000): a reply cut off there fails its message (a terminal error)                                     |
 | `effort`    | How much effort the model puts into each reply: `low`, `medium`, `high`, `xhigh` or `max` (default: the model's)                                               |
 
-For an object of your own, `claude.chat(options)` and `claude.messages()`
-are the handlers; `options` may be a function of the
+For an object of your own, `claude.chat(options)` is the handler and
+`claude.messages()` the view; `options` may be a function of the
 invocation's context (each user's system prompt, say). `claude.prompt(ctx,
 text, options)` answers a prompt in a handler of your own, once, however
 often the handler runs; each prompt of an invocation is a prompt of its own.

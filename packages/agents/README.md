@@ -164,8 +164,8 @@ request too), and the agent does not go on: each framework stops its turn
 and records the cut-off tool calls as cancelled, in its own way, and the
 next message starts afresh. The calls its tools made (a wait for an
 approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
-uses Restate's explicit cancellation for this (`explicitCancellation`,
-`ctx.cancellation()` and `cancelPreviousCalls()`).
+uses Restate's explicit cancellation for this (`explicitCancellation: true`,
+with `cancelled(ctx)` and `cancelCalls(ctx)` of `restate-sessions/internal`).
 
 **Steer a turn.** `steer` adds to the message being answered, such as for
 a message typed while the agent works: the agent takes it at its next tool
@@ -191,7 +191,7 @@ loses nor repeats one.
 
 **Forget a conversation.** `clear` starts a key over, such as for a UI's
 New chat button: it stops the message being answered (as `stop`), then
-forgets the conversation, the key's database and state, and what its
+forgets the conversation, the key's database, and what its
 `signals` hold (waits, kept signals, steered messages). It answers as `stop`
 does. The next message starts anew; its ids and cursors go on from where
 the forgotten conversation got to, so a follower (`follow`, `sync`) reads on,
@@ -260,9 +260,9 @@ made so far.
 
 **What it is doing.** `status` says which message the agent answers, if
 any (its invocation id, to attach to its answer, and since when), and what
-its tools wait for ([Signals](#signals)). The message is in the object's
-state, `restate-agents.turn`, which `chat` sets when it starts and clears
-when it answers or fails for good (Restate's UI shows it):
+its tools wait for ([Signals](#signals)). The message is in the agent's
+`signals` object, which `chat` tells when it starts, and when it answers or
+fails for good (Restate's UI shows it there):
 
 ```sh
 curl localhost:8080/support/alice/status
@@ -393,8 +393,8 @@ the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
 if the input is the same (so a wait for an approval outlasts a restart), and
 so is a call that answered just before the crash, until the framework has
-stored its result. They keep these calls in the object's state,
-`restate-agents.calls`, for this. A tool of your own needs a way for the model to name the call it
+stored its result. They keep these calls in the object's database (the
+table `restate_agent_calls`) for this. A tool of your own needs a way for the model to name the call it
 retries (see their READMEs).
 
 **Tools for each invocation** (each user's, say) come with the options of
@@ -412,8 +412,8 @@ signal('approval', {
 });
 ```
 
-Every agent (every `object()`) has `pending`, which lists its waits, and a
-`signal` handler, which resolves one; both answer at once, while the agent
+Every agent (every `object()`) has the views `pending`, which lists its
+waits, and `signal`, which resolves one; both answer at once, while the agent
 waits. Each wait has an id, the signal's name, the model's `input` and when
 it started:
 

@@ -15,7 +15,7 @@ you ──▶ pair.ts (a terminal) ──▶ pair/<project> (pi) ──▶ WORKS
 
 | File                         | What                                                                                 |
 | ---------------------------- | ------------------------------------------------------------------------------------ |
-| [`pairing.ts`](pairing.ts)   | The pair and its reviewer, and the pair's handler of its own, `tasks`                |
+| [`pairing.ts`](pairing.ts)   | The pair and its reviewer, and the pair's view of its own, `tasks`                   |
 | [`tools.ts`](tools.ts)       | The plan: a table of the project's database, which the pair's tools write            |
 | [`shipping.ts`](shipping.ts) | The workflow that ships an approved change: CI, then a pull request (both stand-ins) |
 | [`pair.ts`](pair.ts)         | The terminal: what you type goes to the pair, and its messages show as it works      |

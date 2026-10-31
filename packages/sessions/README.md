@@ -125,7 +125,8 @@ otherwise.
 
 **Calls and sends.** `ctx.rpc(target, key?, options?)` is a client of a
 service, object or workflow definition, typed by it: its methods take their
-input, if any. An object or a workflow needs its key, a service has none.
+input, if any. An object or a workflow needs its key, a service has none
+(a `TerminalError` otherwise).
 `ctx.rpc({ service, key, handler, input })` calls a target known only at run
 time (JSON by default). `ctx.send` is the same, for sends, with a `delay`.
 The options go with the target, and apply to every call of the client:
@@ -380,9 +381,11 @@ readers, SQL errors, lost writes) without a server
 object's state in memory, through crashes and fencing; `restate-agents`'s
 tests use it too (`restate-sessions/test/support`). `restate-sessions/internal`
 has what the tests take apart: a handler run for one attempt over a context
-of their own (`invoke`), an attempt's session (`Attempt`, `withAttempt`), a
+of their own (`invoke`), a handler's or view's context over one
+(`contextOf`), an attempt's session (`Attempt`, `withAttempt`), a
 database over a store of their own (`open`, `asDatabase`), and the store's
 fault injection (`setStoreWrapper`). For this repository's libraries, it has
 `Schema` (tables a library owns, applied where it uses them), `database`
 (another database of the key), `reset` (empty the key's database in a
-transaction) and `cancelled`/`cancelCalls` (explicit cancellation).
+transaction) and `cancelled`/`cancelCalls` (explicit cancellation, for a
+handler with `explicitCancellation: true`).

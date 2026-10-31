@@ -96,7 +96,7 @@ and [the examples](packages/examples/README.md).
 
 A tool is a function with the object's `ctx`. This assistant keeps what it
 learns about you in a table of its own SQL database, next to its
-conversation, and a handler of yours serves that table, for a profile page
+conversation, and a view of yours serves that table, for a profile page
 say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
 
 ```ts

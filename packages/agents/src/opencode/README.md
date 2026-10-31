@@ -8,7 +8,7 @@ in the object's state beside `ctx.db` (`database` of restate-sessions): OpenCode
 boots only on a database that is empty or its own, so its tables are alone
 there, and `ctx.db` keeps the conversation's log and the tables of yours
 ([SQL in Restate virtual objects](../../../sessions/README.md)). The integration
-pins OpenCode 2.0.27 exactly, with the Effect release it is built on (4.0.1);
+pins OpenCode 2.0.32 exactly, with the Effect release it is built on (4.0.1);
 OpenCode needs Node 24.
 
 ## Use
@@ -30,9 +30,10 @@ await serve(coder);
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools` |
 | `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/intermediate/review.ts`](../../../examples/intermediate/review.ts))                                                                        |
 
-For an object of your own, `opencode.chat(options)` and
-`opencode.messages()` are the handlers; `options` may be a function of the
-invocation's context, such as a directory for each key:
+For an object of your own, `opencode.chat(options)` is the handler and
+`opencode.messages()` the view (with it, the agent's `clear` empties
+OpenCode's database too); `options` may be a function of the invocation's
+context, such as a directory for each key:
 
 ```ts
 chat: opencode.chat((ctx) => ({ workspace: `/work/${ctx.key}` })),
