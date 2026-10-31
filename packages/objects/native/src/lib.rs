@@ -1,31 +1,48 @@
-//! The Node.js addon: SQLite-compatible SQL over a key/value store the host
-//! implements in JavaScript, such as a Restate object's state.
+//! The Node.js addon of restate-objects: an object's SQLite-compatible
+//! database, kept in its Restate state, over a key/value store the host
+//! implements in JavaScript.
 //!
-//! Three modules, each on the one before; only the addon is public:
+//! One entry point, [`Database`]: [`Database::open`] opens a session of an
+//! object's database over its [`KvStore`], and every SQL commit is durable
+//! when its call returns. Inside, three private modules, each on the one
+//! before:
 //!
-//! - [`state`]: one paged file and the effects over the key/value store,
+//! - `state`: the database's file and its effects over the key/value store,
 //!   changed through a mutation that a flush makes durable at once
 //!   (`src/state/README.md`).
-//! - [`sql`]: the [`sql::Database`], SQLite-compatible SQL in the state's
-//!   file, each commit flushed with the effects (`src/sql/README.md`).
-//! - `node`: the napi bindings, around [`sql::Database`].
+//! - `sql`: the [`Database`], SQL on the state's file, each commit flushed
+//!   with the effects (`src/sql/README.md`).
+//! - `node`: the napi bindings, around [`Database`].
 //!
-//! With the feature `bench`, `state` and `sql` are public instead, for the
-//! benchmarks, and the addon is left out.
+//! With the feature `bench`, `simulation` is public too: the in-memory
+//! stores, fault injection and latency simulator the benchmarks run on.
 
 #[cfg(not(any(test, feature = "bench")))]
 mod node;
-
-#[cfg(feature = "bench")]
-#[doc(hidden)]
-pub mod sql;
-#[cfg(not(feature = "bench"))]
-#[allow(dead_code, unused_imports)]
 mod sql;
+mod state;
+
+pub use sql::{Database, Numeric, Open, Rows, Value};
+pub use state::{PageCache, PageCacheConfig, Result, StateOptions, blobs::BlobStore, kv::KvStore};
 
 #[cfg(feature = "bench")]
-#[doc(hidden)]
-pub mod state;
-#[cfg(not(feature = "bench"))]
-#[allow(dead_code, unused_imports)]
-mod state;
+pub use sql::IoStats;
+#[cfg(feature = "object-store")]
+pub use state::blobs::ObjectStoreBlobs;
+#[cfg(any(test, feature = "bench"))]
+pub use state::simulation;
+
+/// Return to the executor once, even when every awaited future is ready.
+async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}

@@ -1,10 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use restate_objects::sql::Database;
-use restate_objects::state::{
-    Result, State,
-    kv::KvStore,
-    simulation::{MemoryKv, Stats},
-};
+use restate_objects::simulation::{MemoryKv, Stats};
+use restate_objects::{Database, KvStore, Result};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -12,7 +8,7 @@ use std::{
 
 /// A session of the database in `store`.
 async fn open(store: Arc<impl KvStore + 'static>) -> Result<Database> {
-    Database::new(State::open(store).await?).await
+    Database::open(store).await
 }
 
 #[derive(Clone, Copy)]

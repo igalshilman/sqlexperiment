@@ -4,16 +4,17 @@
 //! `src/database.ts` builds from a store object `{ get, set, clear, sync, keys? }`. Every request
 //! goes through it in the order it was issued, so a read sees the writes
 //! before it. With `keys`, a checkpoint deletes the packs no checkpoint
-//! needs (see [`crate::state::State::collect_garbage`]); a store without keeps its
-//! garbage.
+//! needs; a store without keeps its garbage.
 //!
 //! `set` and `clear` queue a write; `sync` resolves once every write before it
 //! is stored. The object's state keeps writes in issue order, so a crash
-//! loses only a suffix of them (see [`crate::state::kv`]): a statement that
-//! commits queues its writes, then resolves at one `sync`. The session itself,
-//! its commits and the process-wide page cache, is [`crate::sql::Database`].
-use crate::sql::{Numeric, Value};
-use crate::state::kv::KvStore;
+//! loses only a suffix of them (see [`KvStore`]): a statement that commits
+//! queues its writes, then resolves at one `sync`.
+//!
+//! Every database of the process is kept warm in one page cache
+//! ([`page_cache`]); a session itself, and its commits, is a
+//! [`crate::Database`].
+use crate::{KvStore, Numeric, PageCache, PageCacheConfig, Value};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use napi::bindgen_prelude::*;
@@ -105,16 +106,33 @@ fn error(error: impl std::fmt::Display) -> Error {
     Error::from_reason(error.to_string())
 }
 
-/// One session of a namespace's database (see [`crate::sql::Database`]):
-/// every SQL commit is durable when its call resolves.
+/// One session of a namespace's database (see [`crate::Database`]): every
+/// SQL commit is durable when its call resolves.
 #[napi]
-pub struct Database(Arc<crate::sql::Database>);
+pub struct Database(crate::Database);
 
-/// Open the database of `namespace` over the store behind `dispatch`; see
-/// `src/database.ts` for the store object it is built from, and
-/// [`crate::sql::Database::open`] for a `reader`.
+/// The page cache shared by the process's databases: 256 MiB of memory and
+/// 1 GiB of disk, in a file under the temporary directory, or the file
+/// `RESTATE_SQL_CACHE_FILE` names.
+async fn page_cache() -> io::Result<PageCache> {
+    static CACHE: futures::lock::Mutex<Option<PageCache>> = futures::lock::Mutex::new(None);
+    let mut cache = CACHE.lock().await;
+    if let Some(cache) = &*cache {
+        return Ok(cache.clone());
+    }
+    let opened = PageCache::open(PageCacheConfig {
+        file: std::env::var_os("RESTATE_SQL_CACHE_FILE").map(std::path::PathBuf::from),
+        ..PageCacheConfig::new(256 << 20, 1 << 30)
+    })
+    .await?;
+    Ok(cache.insert(opened).clone())
+}
+
+/// Open the database of `namespace` over the store behind `dispatch`, kept
+/// warm in the process's page cache; see `src/database.ts` for the store
+/// object it is built from, and [`crate::Open::reader`] for a `reader`.
 #[napi(ts_return_type = "Promise<Database>")]
-pub fn open<'env>(
+pub(crate) fn open<'env>(
     env: &'env Env,
     namespace: String,
     dispatch: Function<'env, Args, Promise<Option<Uint8Array>>>,
@@ -127,8 +145,11 @@ pub fn open<'env>(
         .build()?;
     let store = Arc::new(JsQueue { dispatch });
     env.spawn_future(async move {
-        let database = crate::sql::Database::open(store, &namespace, reader.unwrap_or(false)).await;
-        Ok(Database(Arc::new(database.map_err(error)?)))
+        let mut open = crate::Database::open(store).cached(&page_cache().await?, &namespace);
+        if reader == Some(true) {
+            open = open.reader();
+        }
+        Ok(Database(open.await.map_err(error)?))
     })
 }
 
@@ -157,45 +178,45 @@ impl Database {
         })
     }
 
-    /// See [`crate::sql::Database::begin`].
+    /// See [`crate::Database::begin`].
     #[napi]
     pub async fn begin(&self) -> Result<()> {
         self.0.begin().await.map_err(error)
     }
 
-    /// See [`crate::sql::Database::commit`].
+    /// See [`crate::Database::commit`].
     #[napi]
     pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
         let effects = effects.map(|effects| Bytes::copy_from_slice(&effects));
         self.0.commit(effects).await.map_err(error)
     }
 
-    /// See [`crate::sql::Database::rollback`].
+    /// See [`crate::Database::rollback`].
     #[napi]
     pub async fn rollback(&self) -> Result<()> {
         self.0.rollback().await.map_err(error)
     }
 
-    /// See [`crate::sql::Database::is_usable`].
+    /// See [`crate::Database::is_usable`].
     #[napi]
     pub fn is_usable(&self) -> bool {
         self.0.is_usable()
     }
 
-    /// See [`crate::sql::Database::effects`].
+    /// See [`crate::Database::effects`].
     #[napi]
     pub async fn effects(&self) -> Result<Buffer> {
         let effects = self.0.effects().await.map_err(error)?;
         Ok(Buffer::from(effects.to_vec()))
     }
 
-    /// See [`crate::sql::Database::save`].
+    /// See [`crate::Database::save`].
     #[napi]
     pub async fn save(&self) -> Result<()> {
         self.0.save().await.map_err(error)
     }
 
-    /// See [`crate::sql::Database::close`].
+    /// See [`crate::Database::close`].
     #[napi]
     pub async fn close(&self) {
         self.0.close().await

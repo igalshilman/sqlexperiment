@@ -25,8 +25,8 @@ use std::{
 /// The head's key: the commit point. An open reads it first, so a host whose
 /// store can send keys ahead of the first read (Restate's eager state)
 /// should send this one.
-pub const HEAD_KEY: &str = "v22/head";
-pub const TAIL_PREFIX: &str = "v22/tail/";
+pub(crate) const HEAD_KEY: &str = "v22/head";
+pub(crate) const TAIL_PREFIX: &str = "v22/tail/";
 /// Where L1's packs are, in their store.
 pub(crate) const PACK_PREFIX: &str = "l1/";
 /// Where L0's packs are, in Restate ([`crate::state::blobs::KvBlobs`]).
@@ -38,11 +38,11 @@ const MANIFEST_MAGIC: &[u8; 4] = b"SM22";
 pub(crate) const PART_BYTES: usize = 1 << 20;
 
 /// Bytes of a record's value.
-pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes of a record's or file's name.
-pub const MAX_NAME_BYTES: usize = 255;
+pub(super) const MAX_NAME_BYTES: usize = 255;
 /// Bytes of a paged file: 10 GiB.
-pub const MAX_FILE_BYTES: u64 = 10 << 30;
+pub(crate) const MAX_FILE_BYTES: u64 = 10 << 30;
 /// Most pages a frame holds: 1 MiB.
 pub(crate) const MAX_FRAME_PAGES: u64 = 256;
 /// Files and records a state may name.
@@ -92,15 +92,15 @@ pub(crate) struct Reading<'a> {
 }
 
 impl<'a> Reading<'a> {
-    pub fn new(bytes: &'a [u8], what: &'static str) -> Self {
+    pub(super) fn new(bytes: &'a [u8], what: &'static str) -> Self {
         Self { bytes, at: 0, what }
     }
 
-    pub fn invalid(&self) -> io::Error {
+    pub(super) fn invalid(&self) -> io::Error {
         invalid(self.what)
     }
 
-    pub fn varint(&mut self) -> io::Result<u64> {
+    pub(super) fn varint(&mut self) -> io::Result<u64> {
         let mut n = 0u64;
         for shift in (0..64).step_by(7) {
             let byte = *self.bytes.get(self.at).ok_or_else(|| self.invalid())?;
@@ -119,7 +119,7 @@ impl<'a> Reading<'a> {
     }
 
     /// A varint of at most `max`.
-    pub fn bounded(&mut self, max: u64) -> io::Result<u64> {
+    pub(super) fn bounded(&mut self, max: u64) -> io::Result<u64> {
         Some(self.varint()?)
             .filter(|&n| n <= max)
             .ok_or_else(|| self.invalid())
@@ -131,7 +131,7 @@ impl<'a> Reading<'a> {
         Ok(self.bounded(left)? as usize)
     }
 
-    pub fn bytes(&mut self) -> io::Result<&'a [u8]> {
+    pub(super) fn bytes(&mut self) -> io::Result<&'a [u8]> {
         let len = self.varint()? as usize;
         let end = (self.at.checked_add(len))
             .filter(|&end| end <= self.bytes.len())
@@ -150,7 +150,7 @@ impl<'a> Reading<'a> {
     }
 
     /// Fail unless every byte was read.
-    pub fn end(&self) -> io::Result<()> {
+    pub(super) fn end(&self) -> io::Result<()> {
         match self.at == self.bytes.len() {
             true => Ok(()),
             false => Err(self.invalid()),
@@ -192,17 +192,17 @@ pub(crate) struct PackId {
 
 impl PackId {
     /// Its name: `<version>-<nonce>`, its manifest's.
-    pub fn name(self) -> String {
+    pub(crate) fn name(self) -> String {
         format!("{:016x}-{:016x}", self.version, self.nonce)
     }
 
     /// Its pack's key, in its tier's store: `l0/<name>` or `l1/<name>`.
-    pub fn key(self) -> String {
+    pub(crate) fn key(self) -> String {
         format!("{}{}", self.tier.prefix(), self.name())
     }
 
     /// The pack id named `name`, in `tier`.
-    pub fn parse_name(name: &str, tier: Tier) -> Option<Self> {
+    pub(crate) fn parse_name(name: &str, tier: Tier) -> Option<Self> {
         let (version, nonce) = name.split_once('-')?;
         Some(Self {
             version: u64::from_str_radix(version, 16).ok()?,
@@ -212,12 +212,12 @@ impl PackId {
     }
 
     /// The version a manifest named `name` (`<version>-<nonce>`) holds.
-    pub fn manifest_version(name: &str) -> Option<u64> {
+    pub(crate) fn manifest_version(name: &str) -> Option<u64> {
         u64::from_str_radix(name.split_once('-')?.0, 16).ok()
     }
 
     /// The pack id whose pack's key is `key`.
-    pub fn parse(key: &str) -> Option<Self> {
+    pub(crate) fn parse(key: &str) -> Option<Self> {
         [Tier::L0, Tier::L1]
             .into_iter()
             .find_map(|tier| Self::parse_name(key.strip_prefix(tier.prefix())?, tier))
@@ -234,7 +234,7 @@ pub(crate) struct Checkpoint {
 
 impl Checkpoint {
     /// The version whose state it holds.
-    pub fn version(&self) -> u64 {
+    pub(crate) fn version(&self) -> u64 {
         self.pack.version
     }
 
@@ -293,7 +293,7 @@ pub(crate) struct Head {
 
 impl Head {
     /// The head of an empty database.
-    pub fn new(id: u64, frame_pages: u64) -> Self {
+    pub(crate) fn new(id: u64, frame_pages: u64) -> Self {
         Self {
             id,
             frame_pages,
@@ -306,16 +306,16 @@ impl Head {
         }
     }
 
-    pub fn frame_bytes(&self) -> u64 {
+    pub(crate) fn frame_bytes(&self) -> u64 {
         self.frame_pages * PAGE
     }
 
     /// The version of the head's checkpoint; 0 without one.
-    pub fn checkpointed(&self) -> u64 {
+    pub(crate) fn checkpointed(&self) -> u64 {
         self.checkpoint.map_or(0, |c| c.version())
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub(crate) fn encode(&self) -> Bytes {
         let mut out = HEAD_MAGIC.to_vec();
         out.extend_from_slice(&self.id.to_le_bytes());
         put_varint(&mut out, self.frame_pages);
@@ -330,7 +330,7 @@ impl Head {
         out.into()
     }
 
-    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+    pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
         let body = (bytes.strip_prefix(HEAD_MAGIC)).ok_or_else(|| invalid("head"))?;
         let (id, body) = body.split_first_chunk().ok_or_else(|| invalid("head"))?;
         let mut r = Reading::new(body, "head");
@@ -370,7 +370,7 @@ impl Head {
     }
 
     /// The parts of version `version`'s tail entry.
-    pub fn parts_of(&self, version: u64) -> u32 {
+    pub(crate) fn parts_of(&self, version: u64) -> u32 {
         (version.checked_sub(self.tail_first))
             .and_then(|at| self.parts.get(at as usize))
             .copied()
@@ -378,7 +378,7 @@ impl Head {
     }
 
     /// The keys of the parts of version `version`'s tail entry.
-    pub fn entry_keys(&self, version: u64) -> Vec<String> {
+    pub(crate) fn entry_keys(&self, version: u64) -> Vec<String> {
         (0..self.parts_of(version))
             .map(|part| tail_key(version, part))
             .collect()
@@ -404,7 +404,7 @@ pub(crate) struct Entry {
 impl Entry {
     /// The entry, in parts of at most [`PART_BYTES`]; an error past the
     /// 1 GiB a decode takes.
-    pub fn encode(&self) -> io::Result<Vec<Bytes>> {
+    pub(super) fn encode(&self) -> io::Result<Vec<Bytes>> {
         let mut out = ENTRY_MAGIC.to_vec();
         put_varint(&mut out, self.records.len() as u64);
         for (name, value) in &self.records {
@@ -435,7 +435,7 @@ impl Entry {
     }
 
     /// The entry of `parts`, in order.
-    pub fn decode(parts: &[Bytes]) -> io::Result<Self> {
+    pub(super) fn decode(parts: &[Bytes]) -> io::Result<Self> {
         let joined;
         let bytes = match parts {
             [one] => one,
@@ -492,7 +492,7 @@ pub(crate) struct Location {
 }
 
 impl Location {
-    pub fn range(&self) -> Range<u64> {
+    pub(crate) fn range(&self) -> Range<u64> {
         self.offset..self.offset + self.len
     }
 }
@@ -527,7 +527,7 @@ pub(crate) struct Manifest {
 
 impl Manifest {
     /// Every location it names.
-    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+    pub(crate) fn locations(&self) -> impl Iterator<Item = &Location> {
         let frames = (self.files.values())
             .flat_map(|file| file.frames.iter().flatten().chain(file.patches.values()));
         let values = (self.records.values()).filter_map(|value| match value {
@@ -539,7 +539,7 @@ impl Manifest {
 
     /// Every location it names, to change.
     #[cfg(any(test, feature = "bench"))]
-    pub fn locations_mut(&mut self) -> impl Iterator<Item = &mut Location> {
+    pub(crate) fn locations_mut(&mut self) -> impl Iterator<Item = &mut Location> {
         let frames = (self.files.values_mut()).flat_map(|file| {
             file.frames
                 .iter_mut()
@@ -554,7 +554,7 @@ impl Manifest {
     }
 
     /// Point what it names at `moved` to where it moved.
-    pub fn relocate(&mut self, moved: &HashMap<Location, Location>) {
+    pub(crate) fn relocate(&mut self, moved: &HashMap<Location, Location>) {
         let mut relocate = |at: &mut Location| {
             if let Some(to) = moved.get(at) {
                 *at = *to;
@@ -572,12 +572,12 @@ impl Manifest {
     }
 
     /// The packs it names.
-    pub fn packs(&self) -> BTreeSet<PackId> {
+    pub(crate) fn packs(&self) -> BTreeSet<PackId> {
         self.locations().map(|at| at.pack).collect()
     }
 
     /// The manifest; an error past the 1 GiB a decode takes.
-    pub fn encode(&self) -> io::Result<Bytes> {
+    pub(crate) fn encode(&self) -> io::Result<Bytes> {
         let packs: Vec<PackId> = self.sizes.keys().copied().collect();
         let index: HashMap<PackId, usize> =
             packs.iter().enumerate().map(|(i, &p)| (p, i)).collect();
@@ -643,7 +643,7 @@ impl Manifest {
         Ok(out.into())
     }
 
-    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+    pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
         let frame = (bytes.strip_prefix(MANIFEST_MAGIC)).ok_or_else(|| invalid("manifest"))?;
         let body = zstd::decompress_sized(frame, &[], MAX_DECODED)?;
         let mut r = Reading::new(&body, "manifest");

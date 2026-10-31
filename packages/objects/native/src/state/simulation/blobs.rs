@@ -6,9 +6,8 @@
 //! a garbage collection runs. [`MemoryBlobs::faults`] makes requests fail in each of
 //! these ways; a write whose future is dropped once sent lands later too.
 //! What lands later waits for [`MemoryBlobs::land_late`].
-use super::yield_now;
 use crate::state::blobs::BlobStore;
-use crate::state::format::PACK_PREFIX;
+use crate::yield_now;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
@@ -57,7 +56,6 @@ struct Inner {
     gets: u64,
     lists: u64,
     /// Puts of a blob key that held a value.
-    overwrites: u64,
     /// Puts left to accept before the store fails every put.
     puts_before_failing: Option<u64>,
     faults: Option<BlobFaults>,
@@ -90,10 +88,7 @@ impl Inner {
             Some(value) => {
                 self.puts += 1;
                 self.uploaded += value.len() as u64;
-                let pack = key.starts_with(PACK_PREFIX);
-                if self.values.insert(key, value).is_some() && pack {
-                    self.overwrites += 1;
-                }
+                self.values.insert(key, value);
             }
             None => {
                 self.values.remove(&key);
@@ -191,11 +186,6 @@ impl MemoryBlobs {
         self.inner.lock().unwrap().lists
     }
 
-    /// Puts of a pack's key that held a value: what no two attempts may do.
-    pub fn overwrites(&self) -> u64 {
-        self.inner.lock().unwrap().overwrites
-    }
-
     /// Accept `puts` more puts, then fail every put; `None` accepts them all.
     pub fn fail_after(&self, puts: Option<u64>) {
         self.inner.lock().unwrap().puts_before_failing = puts;
@@ -209,11 +199,6 @@ impl MemoryBlobs {
     /// Requests the faults failed.
     pub fn failed(&self) -> u64 {
         self.inner.lock().unwrap().failed
-    }
-
-    /// Writes waiting to land.
-    pub fn in_flight(&self) -> usize {
-        self.inner.lock().unwrap().late.len()
     }
 
     /// Writes that landed late.

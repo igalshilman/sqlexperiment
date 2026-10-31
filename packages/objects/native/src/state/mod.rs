@@ -81,11 +81,11 @@
 //! to return what was stored; decoding checks structure and bounds, and
 //! zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. The simulated stores
-//! ([`simulation`]) are in tests, and with the crate's `bench` feature.
-pub mod blobs;
+//! (`simulation`) are in tests, and with the crate's `bench` feature.
+pub(crate) mod blobs;
 mod cache;
 mod format;
-pub mod kv;
+pub(crate) mod kv;
 #[cfg(any(test, feature = "bench"))]
 pub mod simulation;
 mod store;
@@ -93,8 +93,13 @@ mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub use format::{HEAD_KEY, MAX_FILE_BYTES, MAX_RECORD_BYTES, TAIL_PREFIX};
-pub use store::{Checkpointed, FlushReport};
+pub(crate) use format::{MAX_FILE_BYTES, MAX_RECORD_BYTES};
+pub(crate) use store::FlushReport;
+#[cfg(test)]
+pub(crate) use {
+    format::{HEAD_KEY, TAIL_PREFIX},
+    store::Checkpointed,
+};
 
 use crate::state::blobs::BlobStore;
 use crate::state::cache::{Backoff, NamespaceCache, ParkedValue};
@@ -116,7 +121,7 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Bytes of a page of the [`File`].
-pub const PAGE_SIZE: usize = 4096;
+pub(crate) const PAGE_SIZE: usize = 4096;
 
 /// The name the format stores the database's file under.
 const DB: &str = "db";
@@ -124,10 +129,10 @@ const DB: &str = "db";
 const EFFECTS: &str = "effects";
 
 /// A page's 4096 bytes.
-pub type Page = Bytes;
+pub(crate) type Page = Bytes;
 
 /// Default [`StateOptions::frame_pages`].
-pub const FRAME_PAGES: u64 = 4;
+pub(crate) const FRAME_PAGES: u64 = 4;
 
 /// How a state flushes and reads. Only [`Self::frame_pages`] is stored, when
 /// the namespace is made; the others never change the stored format.
@@ -144,7 +149,7 @@ pub struct StateOptions {
     /// Every frame and patch of a file of at most this many
     /// pages, is fetched at open, alongside the manifest's values.
     pub prefetch_pages: u64,
-    /// A flush checkpoints first ([`Mutation::flush`]) once the tail holds
+    /// A flush checkpoints first once the tail holds
     /// this many entries since the last checkpoint; 0 never does by count.
     pub checkpoint_entries: u64,
     /// ... or this many bytes; 0 never does by size. A checkpoint into L0
@@ -153,7 +158,7 @@ pub struct StateOptions {
     /// though a round trip or two too. One into L1 (S3) is due at exactly
     /// these.
     pub checkpoint_bytes: u64,
-    /// With packs in S3 ([`Open::checkpoints`]), a checkpoint's pack goes to
+    /// With packs in S3 ([`crate::Open::checkpoints`]), a checkpoint's pack goes to
     /// L0, in Restate, until the packs there hold this many bytes; the
     /// checkpoint after that puts its pack in S3, and moves everything L0
     /// holds into it. 0 puts every checkpoint in S3; without S3, every
@@ -183,7 +188,7 @@ impl Default for StateOptions {
 /// owner's requests before opening it; a reader ([`Open::reader`]) may open
 /// beside the owner.
 #[derive(Clone)]
-pub struct State {
+pub(crate) struct State {
     shared: Arc<Shared>,
 }
 
@@ -193,17 +198,14 @@ struct Shared {
     snapshot: Mutex<Arc<Snapshot>>,
     /// Where the state is stored: the head, the tail, the packs.
     tail: Arc<Tiered>,
-    options: StateOptions,
     cache: Option<NamespaceCache>,
     /// What was parked at the state this one opened on, until taken
     /// ([`State::take_parked`]).
     parked: Mutex<Option<ParkedValue>>,
     /// A reader's ([`Open::reader`]): it never flushes.
-    reader: AtomicBool,
+    reader: bool,
     /// A flush failed or was cancelled: its outcome is unknown.
     poisoned: AtomicBool,
-    /// A flush is running.
-    flushing: AtomicBool,
     /// When the next checkpoint may be tried, after some failed: the
     /// cache's, which the namespace's next states share, if it has one.
     backoff: Mutex<Backoff>,
@@ -253,9 +255,7 @@ impl Drop for Collecting<'_> {
             return;
         }
         self.shared.poisoned.store(true, Ordering::SeqCst);
-        if let Some(cache) =
-            (self.shared.cache.as_ref()).filter(|_| !self.shared.reader.load(Ordering::SeqCst))
-        {
+        if let Some(cache) = (self.shared.cache.as_ref()).filter(|_| !self.shared.reader) {
             cache.forget();
         }
     }
@@ -283,7 +283,6 @@ impl Flushing<'_> {
 
 impl Drop for Flushing<'_> {
     fn drop(&mut self) {
-        self.shared.flushing.store(false, Ordering::SeqCst);
         if !self.done {
             self.shared.poisoned.store(true, Ordering::SeqCst);
         }
@@ -298,7 +297,7 @@ impl Drop for Flushing<'_> {
 impl Drop for Shared {
     fn drop(&mut self) {
         // What was parked and not taken goes back, if nothing changed.
-        let Some(cache) = self.cache.as_ref().filter(|_| !*self.reader.get_mut()) else {
+        let Some(cache) = self.cache.as_ref().filter(|_| !self.reader) else {
             return;
         };
         let version = self.snapshot().version();
@@ -332,7 +331,7 @@ impl State {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn open(store: Arc<dyn KvStore>) -> Open {
+    pub(crate) fn open(store: Arc<dyn KvStore>) -> Open {
         Open {
             store,
             packs: None,
@@ -351,7 +350,7 @@ impl State {
             reader,
         } = open;
         let tail = Arc::new(Tiered::new(store, packs));
-        let snapshot = Snapshot::open(tail.clone(), options.clone(), cache.clone(), reader);
+        let snapshot = Snapshot::open(tail.clone(), options, cache.clone(), reader);
         let snapshot = snapshot.await?;
         let parked = match &cache {
             Some(cache) if snapshot.unchanged => cache.take_parked(),
@@ -366,31 +365,24 @@ impl State {
             shared: Arc::new(Shared {
                 snapshot: Mutex::new(Arc::new(snapshot)),
                 tail,
-                options,
                 cache,
                 parked: Mutex::new(parked),
-                reader: AtomicBool::new(reader),
+                reader,
                 poisoned: AtomicBool::new(false),
-                flushing: AtomicBool::new(false),
                 backoff: Mutex::new(backoff),
             }),
         })
     }
 
-    /// The options this state opened with.
-    pub fn options(&self) -> &StateOptions {
-        &self.shared.options
-    }
-
     /// The effects, as last flushed: empty if never set.
-    pub fn effects(&self) -> Bytes {
+    pub(crate) fn effects(&self) -> Bytes {
         let snapshot = self.shared.snapshot();
         snapshot.records().get(EFFECTS).cloned().unwrap_or_default()
     }
 
     /// The database's file: 4 KiB pages, read here and written in a
     /// mutation (see [`File`]).
-    pub fn file(&self) -> File {
+    pub(crate) fn file(&self) -> File {
         File {
             shared: self.shared.clone(),
         }
@@ -399,7 +391,7 @@ impl State {
     /// What was parked ([`Self::park`]) at the end of the owner's previous
     /// state, if nothing changed since and it is a `T`; one of another type
     /// stays parked.
-    pub fn take_parked<T: Any + Send>(&self) -> Option<T> {
+    pub(crate) fn take_parked<T: Any + Send>(&self) -> Option<T> {
         let mut parked = self.shared.parked.lock().unwrap();
         if !parked.as_ref()?.value.is::<T>() {
             return None;
@@ -410,7 +402,7 @@ impl State {
 
     /// Whether [`Self::park`] would keep a value now: the state has a
     /// [`PageCache`] and is at the owner's last durable flush.
-    pub fn can_park(&self) -> bool {
+    pub(crate) fn can_park(&self) -> bool {
         let Some(cache) = &self.shared.cache else {
             return false;
         };
@@ -426,7 +418,11 @@ impl State {
     /// budget is not kept. `value` must hold no handle of this state (the
     /// [`File`], the [`State`]), which would keep it open meanwhile, on a
     /// state whose packs later flushes delete.
-    pub fn park<T: Any + Send>(&self, value: T, weight: usize) -> std::result::Result<(), T> {
+    pub(crate) fn park<T: Any + Send>(
+        &self,
+        value: T,
+        weight: usize,
+    ) -> std::result::Result<(), T> {
         if !self.can_park() {
             return Err(value);
         }
@@ -444,7 +440,7 @@ impl State {
     /// effects set in it ([`Mutation::write`], [`Mutation::set_effects`])
     /// become durable together at [`Mutation::flush`]; dropping it discards
     /// them.
-    pub fn mutation(&self) -> Mutation {
+    pub(crate) fn mutation(&self) -> Mutation {
         Mutation {
             shared: self.shared.clone(),
             records: Default::default(),
@@ -455,22 +451,22 @@ impl State {
 
     /// The namespace's version: the flushes ever made, as this state holds
     /// it (opened on, or flushed itself).
-    pub fn version(&self) -> u64 {
+    pub(crate) fn version(&self) -> u64 {
         self.shared.snapshot().version()
     }
 
     /// Whether the state opened in a [`PageCache`] ([`Open::cached`]).
-    pub fn is_cached(&self) -> bool {
+    pub(crate) fn is_cached(&self) -> bool {
         self.shared.cache.is_some()
     }
 
     /// Whether this is a reader ([`Open::reader`]): its mutations never flush.
-    pub fn is_reader(&self) -> bool {
-        self.shared.reader.load(Ordering::SeqCst)
+    pub(crate) fn is_reader(&self) -> bool {
+        self.shared.reader
     }
 
     /// Whether the state can flush: a failed or cancelled flush ends it.
-    pub fn is_usable(&self) -> bool {
+    pub(crate) fn is_usable(&self) -> bool {
         !self.shared.poisoned.load(Ordering::SeqCst)
     }
 
@@ -484,7 +480,8 @@ impl State {
     /// head needs is one its head names, or newer than its previous
     /// checkpoint. A failure, or dropping the future midway, ends the state,
     /// as a failed flush does.
-    pub async fn collect_garbage(&self) -> Result<usize> {
+    #[cfg(test)]
+    pub(crate) async fn collect_garbage(&self) -> Result<usize> {
         if self.shared.poisoned.load(Ordering::SeqCst) {
             return Err(ENDED.into());
         }
@@ -493,8 +490,8 @@ impl State {
 
     /// The packs the head's checkpoints need: those its checkpoint and the
     /// one before name. Others are garbage.
-    #[cfg(any(test, feature = "bench"))]
-    pub async fn needed_packs(&self) -> Result<std::collections::BTreeSet<String>> {
+    #[cfg(test)]
+    pub(crate) async fn needed_packs(&self) -> Result<std::collections::BTreeSet<String>> {
         let head = self.shared.snapshot().head().clone();
         let needed = self.shared.tail.needed(&head).await?;
         Ok(needed.iter().map(|pack| pack.key()).collect())
@@ -502,8 +499,8 @@ impl State {
 
     /// The manifests the head names, by name: its checkpoint's and the one
     /// before's. Others are garbage.
-    #[cfg(any(test, feature = "bench"))]
-    pub fn needed_manifests(&self) -> std::collections::BTreeSet<String> {
+    #[cfg(test)]
+    pub(crate) fn needed_manifests(&self) -> std::collections::BTreeSet<String> {
         let head = self.shared.snapshot().head().clone();
         (head.checkpoint.iter().chain(&head.previous))
             .map(|checkpoint| checkpoint.pack.name())
@@ -513,7 +510,7 @@ impl State {
 
 /// How to open a [`State`] ([`State::open`]): await it to open.
 #[must_use = "a state opens when awaited"]
-pub struct Open {
+pub(crate) struct Open {
     store: Arc<dyn KvStore>,
     packs: Option<Arc<dyn BlobStore>>,
     options: StateOptions,
@@ -523,14 +520,14 @@ pub struct Open {
 
 impl Open {
     /// Flush and read with `options` rather than the defaults.
-    pub fn options(self, options: StateOptions) -> Self {
+    pub(crate) fn options(self, options: StateOptions) -> Self {
         Self { options, ..self }
     }
 
     /// Keep the bulk of the checkpoints in `packs`, S3 say
-    /// ([`blobs::ObjectStoreBlobs`]), as L1: the latest few go to Restate
+    /// (`ObjectStoreBlobs`), as L1: the latest few go to Restate
     /// first ([`StateOptions::l0_bytes`]). Every state of the namespace must.
-    pub fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
+    pub(crate) fn checkpoints(self, packs: Arc<dyn BlobStore>) -> Self {
         Self {
             packs: Some(packs),
             ..self
@@ -542,7 +539,7 @@ impl Open {
     /// uses for another (an object's key, say). With nothing changed since
     /// this process last flushed it, the next open reads no pages and gets
     /// back what was parked there ([`State::park`]).
-    pub fn cached(self, cache: &PageCache, namespace: &str) -> Self {
+    pub(crate) fn cached(self, cache: &PageCache, namespace: &str) -> Self {
         Self {
             cache: Some(cache.namespace(namespace)),
             ..self
@@ -550,11 +547,10 @@ impl Open {
     }
 
     /// Open a reader of a namespace that another owns, alongside it: a
-    /// state whose mutations refuse to flush (it may still collect garbage,
-    /// [`State::collect_garbage`]). It reads the state as of open, whatever the owner flushes meanwhile,
+    /// state whose mutations refuse to flush. It reads the state as of open, whatever the owner flushes meanwhile,
     /// until the owner's second checkpoint after it. With a cache
     /// ([`Self::cached`]), it reads the ranges of packs the owner cached.
-    pub fn reader(self) -> Self {
+    pub(crate) fn reader(self) -> Self {
         Self {
             reader: true,
             ..self
@@ -575,7 +571,7 @@ impl IntoFuture for Open {
 /// [`State::mutation`] made it, in memory, which [`Self::flush`] makes
 /// durable together, atomically. There is no other way to change the state.
 /// A mutation dropped discards its writes.
-pub struct Mutation {
+pub(crate) struct Mutation {
     shared: Arc<Shared>,
     /// The effects, under their name in the format.
     records: store::Records,
@@ -587,23 +583,22 @@ pub struct Mutation {
 
 impl Mutation {
     /// Whether nothing was set or written.
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty() && self.files.is_empty()
     }
 
     /// Have [`Self::flush`] checkpoint first, however short the tail, if it
     /// writes anything: the checkpoint holds every flush before this one.
-    pub fn checkpoint(&mut self) {
+    #[cfg(test)]
+    pub(crate) fn checkpoint(&mut self) {
         self.checkpoint = true;
     }
 
     /// Replace the effects with this mutation's flush. Refused, before the
     /// mutation changes, are effects past [`MAX_RECORD_BYTES`].
-    pub fn set_effects(&mut self, effects: Bytes) -> Result<()> {
-        if effects.len() > MAX_RECORD_BYTES {
-            let (len, max) = (effects.len(), MAX_RECORD_BYTES);
-            return Err(format!("effects of {len} bytes exceed {max}").into());
-        }
+    pub(crate) fn set_effects(&mut self, effects: Bytes) -> Result<()> {
+        check_effects(&effects)?;
         self.records.insert(EFFECTS.to_owned(), effects);
         Ok(())
     }
@@ -612,7 +607,7 @@ impl Mutation {
     /// with this mutation's flush, which grows the file to include it if it is
     /// shorter then. Refused, before the mutation changes, is a page past the
     /// largest file.
-    pub fn write(&mut self, page: u64, image: Option<Page>) -> Result<()> {
+    pub(crate) fn write(&mut self, page: u64, image: Option<Page>) -> Result<()> {
         if image.as_ref().is_some_and(|image| image.len() != PAGE_SIZE) {
             return Err("a page is 4096 bytes".into());
         }
@@ -631,7 +626,7 @@ impl Mutation {
     /// flush, whatever its length is then: pages wholly past it become holes,
     /// so regrowing it reads zeros. Bytes of a last, partial page past `len`
     /// stay as written.
-    pub fn set_len(&mut self, len: u64) -> Result<()> {
+    pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
         if !len.is_multiple_of(512) || len > MAX_FILE_BYTES {
             return Err(format!("invalid file length {len}").into());
         }
@@ -663,36 +658,32 @@ impl Mutation {
         f(written);
     }
 
-    /// Make every page written and the effects set durable: as
-    /// a tail entry, then the head, then one sync, in one round trip. Nothing changed: nothing is written. It is refused while another flush of the state
-    /// runs, and for writes the state cannot store; a refused flush writes
-    /// nothing, and the state goes on. `Ok`
-    /// holds what it wrote; any other error (one refused because another
-    /// state flushed since included), or dropping the future, ends the
-    /// state: open it again.
+    /// Make every page written and the effects set durable: as a tail
+    /// entry, then the head, then one sync, in one round trip. Nothing
+    /// changed: nothing is written. Refused, for writes the state cannot
+    /// store, a flush writes nothing, and the state goes on. `Ok` holds what
+    /// it wrote; any other error (one refused because another state flushed
+    /// since included), or dropping the future, ends the state: open it
+    /// again. One flush of a state runs at a time: its owner's calls hold
+    /// its session.
     ///
     /// Once the tail passes [`StateOptions::checkpoint_entries`] or
     /// [`StateOptions::checkpoint_bytes`], a flush first checkpoints the
     /// durable state: it puts a pack, which its head names; then it
-    /// collects garbage ([`State::collect_garbage`]). A checkpoint that
+    /// deletes the packs and manifests no checkpoint the head names needs. A checkpoint that
     /// fails changes nothing: the flush goes on, and a later one
     /// checkpoints. A collection that fails ends the state, though the
     /// flush landed.
-    pub async fn flush(mut self) -> Result<FlushReport> {
+    pub(crate) async fn flush(mut self) -> Result<FlushReport> {
         let shared = self.shared.clone();
-        if shared.reader.load(Ordering::SeqCst) {
+        if shared.reader {
             return Err("a reader writes nothing".into());
-        }
-        if shared.flushing.swap(true, Ordering::SeqCst) {
-            return Err("a flush of this state is running".into());
         }
         let mut running = Flushing {
             shared: &shared,
             returned: false,
             done: false,
         };
-        // Read once no other flush runs: one that ended before this one
-        // started is in the snapshot, so this one builds on it.
         if shared.poisoned.load(Ordering::SeqCst) {
             return running.refuse(ENDED.into());
         }
@@ -749,7 +740,7 @@ impl Mutation {
 ///
 /// Two handles are equal (and hash alike) when they are of the same state.
 #[derive(Clone)]
-pub struct File {
+pub(crate) struct File {
     shared: Arc<Shared>,
 }
 
@@ -769,23 +760,28 @@ impl std::hash::Hash for File {
 
 impl File {
     /// Bytes in the file, as last flushed.
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.shared.snapshot().file_size(DB)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Page `page` as the state holds it; `None` for zeros (a hole, or past
     /// its end).
-    pub async fn read(&self, page: u64) -> Result<Option<Page>> {
+    pub(crate) async fn read(&self, page: u64) -> Result<Option<Page>> {
         let snapshot = self.shared.snapshot();
         if page.saturating_mul(PAGE) >= snapshot.file_size(DB) {
             return Ok(None);
         }
         Ok(snapshot.read(DB, page).await?)
     }
+}
+
+/// Refuse effects past [`MAX_RECORD_BYTES`].
+pub(crate) fn check_effects(effects: &[u8]) -> Result<()> {
+    if effects.len() > MAX_RECORD_BYTES {
+        let (len, max) = (effects.len(), MAX_RECORD_BYTES);
+        return Err(format!("effects of {len} bytes exceed {max}").into());
+    }
+    Ok(())
 }
 
 /// Bytes of a page, as the `u64` that offsets and sizes are.

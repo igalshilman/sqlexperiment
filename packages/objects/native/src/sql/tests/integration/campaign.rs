@@ -526,7 +526,9 @@ impl Campaign {
                         }
                     };
                     let what = format!("transaction {statements:?}, commits: {commits}");
-                    let (hit, ended) = self.call(4, &what, session.transaction(body)).await;
+                    let (hit, ended) = self
+                        .call(4, &what, super::host::transaction(&session, body))
+                        .await;
                     (hit, ended.map(|()| Vec::new()), Some(expected))
                 }
                 2 => {

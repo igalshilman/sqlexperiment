@@ -48,9 +48,10 @@ ephemeral one.
 every tail entry and pack, and a session's first read is the head
 (`v22/head`): a round trip, cached or not.
 
-**Then:** with lazy state still on, whitelist `v22/head` (`state::HEAD_KEY`);
-the server ships it with the invocation (best effort, within its
-eager-state size limit), and the open starts with it. Tail entries and packs
+**Then:** with lazy state still on, whitelist `v22/head` (`HEAD_KEY`, in
+`packages/objects/native/src/state/format.rs`); the server ships it with the
+invocation (best effort, within its eager-state size limit), and the open
+starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be
 listed. The options are `sqlOptions` in `restate-objects`
 (`packages/objects/src/index.ts`); its `TODO:` marks them.

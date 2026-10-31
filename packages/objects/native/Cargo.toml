@@ -40,6 +40,10 @@ foyer = "=0.22.3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 object_store = { version = "0.14", optional = true, default-features = false }
 
+[lints.rust]
+# Public is what the crate root exports; anything else says how far it reaches.
+unreachable_pub = "warn"
+
 [build-dependencies]
 napi-build = "2"
 

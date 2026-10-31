@@ -1,5 +1,5 @@
 //! Where checkpoints' packs are: L0 in Restate's state itself ([`KvBlobs`]),
-//! and L1 in a [`BlobStore`], S3 through [`ObjectStoreBlobs`] (the feature
+//! and L1 in a [`BlobStore`], S3 through `ObjectStoreBlobs` (the feature
 //! `object-store`), if the state has one.
 //!
 //! ```rust,ignore
@@ -8,7 +8,7 @@
 //! ```
 //!
 //! A pack is put once, under a name no other put uses, read in ranges, and
-//! deleted once no checkpoint needs it ([`crate::state::State::collect_garbage`]):
+//! deleted once no checkpoint needs it (by a later checkpoint's flush):
 //! a store needs no conditional put, and no fencing.
 use crate::state::kv::KvStore;
 use bytes::{Bytes, BytesMut};
@@ -16,8 +16,7 @@ use futures::future::{BoxFuture, try_join_all};
 use std::{collections::BTreeSet, io, ops::Range, sync::Arc};
 
 /// A store of blobs: S3, say, through the feature `object-store`
-/// ([`ObjectStoreBlobs`]). A blob is durable once its put returns, or, in
-/// [`KvBlobs`], with the next sync of the head that names it.
+/// (`ObjectStoreBlobs`). A blob is durable once its put returns.
 pub trait BlobStore: Send + Sync {
     /// Bytes `range` of the value of `key`; `None` if absent.
     fn get_range<'a>(
@@ -34,10 +33,10 @@ pub trait BlobStore: Send + Sync {
 }
 
 /// Where [`KvBlobs::new`] keeps its blobs' parts: L0's packs, in Restate.
-pub const KV_PREFIX: &str = "v22/pack/";
+pub(crate) const KV_PREFIX: &str = "v22/pack/";
 /// Where checkpoints' manifests are kept, in Restate wherever the packs
 /// are, in parts of 64 KiB.
-pub const MANIFEST_PREFIX: &str = "v22/manifest/";
+pub(crate) const MANIFEST_PREFIX: &str = "v22/manifest/";
 /// Bytes of a part of a blob in [`KvBlobs`]: a range read gets the parts it
 /// overlaps.
 pub(crate) const KV_PART: u64 = 64 << 10;
@@ -48,14 +47,14 @@ pub(crate) const KV_PART: u64 = 64 << 10;
 /// A put only queues its parts: they are durable with the store's next sync.
 /// That is enough for a checkpoint, as a [`KvStore`] keeps its writes in
 /// order: the head naming the pack, put after it, is never durable without it.
-pub struct KvBlobs {
+pub(crate) struct KvBlobs {
     store: Arc<dyn KvStore>,
     prefix: &'static str,
 }
 
 impl KvBlobs {
     /// L0's packs, under [`KV_PREFIX`].
-    pub fn new(store: Arc<dyn KvStore>) -> Self {
+    pub(crate) fn new(store: Arc<dyn KvStore>) -> Self {
         Self {
             store,
             prefix: KV_PREFIX,
@@ -247,7 +246,7 @@ mod object {
             })
         }
 
-        /// One request up to [`UPLOAD_PART`]; a multipart upload past it.
+        /// One request up to `UPLOAD_PART` bytes; a multipart upload past it.
         fn put<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
             Box::pin(async move {
                 let path = self.path(key);

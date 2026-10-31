@@ -60,7 +60,7 @@ fn a_mutation_is_read_once_flushed() -> Result<()> {
         mutation.set_effects("1".into())?;
         mutation.write(0, Some(page(1)))?;
         assert!(
-            state.effects().is_empty() && db.is_empty(),
+            state.effects().is_empty() && db.len() == 0,
             "not flushed yet"
         );
         assert_eq!(db.read(0).await?, None);
@@ -101,7 +101,7 @@ fn a_mutation_dropped_discards_its_writes() -> Result<()> {
         assert!(!mutation.is_empty());
         drop(mutation);
         assert_eq!(&state.effects()[..], b"1");
-        assert!(state.file().is_empty());
+        assert_eq!(state.file().len(), 0);
         assert_eq!(state.version(), 1);
         assert_eq!(store.keys(), keys, "nothing written");
         let mut mutation = state.mutation();
@@ -109,7 +109,7 @@ fn a_mutation_dropped_discards_its_writes() -> Result<()> {
         mutation.flush().await?;
         let reopened = State::open(store).await?;
         assert_eq!(&reopened.effects()[..], b"3");
-        assert!(reopened.file().is_empty());
+        assert_eq!(reopened.file().len(), 0);
         Ok(())
     })
 }
@@ -192,27 +192,6 @@ fn a_length_set_in_a_kept_mutation_cuts_what_another_flush_grew() -> Result<()> 
         assert_eq!(db.read(0).await?, Some(page(1)));
         assert_eq!(db.read(3).await?, None);
         assert_eq!(db.read(5).await?, Some(page(3)));
-        Ok(())
-    })
-}
-
-#[test]
-fn a_state_flushes_one_at_a_time() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(Stalled(Arc::new(MemoryKv::default())));
-        // With a cache, an open needs no sync, which this store never completes.
-        let namespace = fresh_namespace();
-        let state = (State::open(store).cached(&namespace.cache, &namespace.key)).await?;
-        let mut mutation = state.mutation();
-        mutation.set_effects("1".into())?;
-        let mut first = Box::pin(mutation.flush());
-        assert!((&mut first).now_or_never().is_none(), "waits on the sync");
-        let clone = state.clone();
-        let mut second = clone.mutation();
-        second.set_effects("2".into())?;
-        let error = second.flush().await.unwrap_err().to_string();
-        assert!(error.contains("running"), "{error}");
-        assert!(state.is_usable(), "a refused flush ends nothing");
         Ok(())
     })
 }

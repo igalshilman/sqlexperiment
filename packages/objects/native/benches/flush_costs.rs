@@ -18,12 +18,10 @@
 //! store, and the rows are what S3 would bill:
 //! requests and bytes per flush, and dollars per million flushes and per
 //! month stored, at S3 Standard's and S3 Express One Zone's prices.
-use restate_objects::sql::{Database, Value};
-use restate_objects::state::{
-    Result, State, StateOptions,
-    kv::KvStore,
-    simulation::{LatencyKv, MemoryBlobs, MemoryKv, Namespace, cache_config, open_cache},
+use restate_objects::simulation::{
+    LatencyKv, MemoryBlobs, MemoryKv, Namespace, cache_config, open_cache,
 };
+use restate_objects::{Database, KvStore, Result, StateOptions, Value};
 use std::sync::Arc;
 
 type Store = Arc<LatencyKv<MemoryKv>>;
@@ -99,14 +97,14 @@ struct Stores {
 
 async fn open(stores: &Stores, cache: &Option<Namespace>) -> Result<Database> {
     let kv: Arc<dyn KvStore> = stores.restate.clone();
-    let mut open = State::open(kv).options(options());
+    let mut open = Database::open(kv).options(options());
     if let Some(s3) = &stores.s3 {
         open = open.checkpoints(Arc::new(s3.clone()));
     }
     if let Some(ns) = cache {
         open = open.cached(&ns.cache, &ns.key);
     }
-    Database::new(open.await?).await
+    open.await
 }
 
 #[derive(Clone, Copy)]

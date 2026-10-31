@@ -4,8 +4,8 @@ use crate::state::{
     blobs::{KV_PART, KV_PREFIX, MANIFEST_PREFIX},
     format::{HEAD_KEY, Head, Manifest, PackId, TAIL_PREFIX, parse_tail_key},
     kv::KvStore,
-    simulation::yield_now,
 };
+use crate::yield_now;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{

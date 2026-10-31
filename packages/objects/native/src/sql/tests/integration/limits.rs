@@ -1,6 +1,6 @@
 //! Memory limits: private changes and result rows.
 use super::host::Db;
-use crate::sql::SqlOptions;
+use crate::sql::Limits;
 use crate::state::{Result, StateOptions, simulation::MemoryKv};
 use std::sync::Arc;
 
@@ -9,9 +9,9 @@ fn private_changes_are_bounded() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let options = StateOptions::default;
-        let limits = || SqlOptions {
+        let limits = || Limits {
             max_private_bytes: 1 << 20,
-            ..SqlOptions::default()
+            ..Limits::default()
         };
         let db = Db::open_with(store.clone(), options(), limits()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
@@ -40,9 +40,9 @@ fn private_changes_are_bounded() -> Result<()> {
 fn result_rows_are_bounded() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let limits = SqlOptions {
+        let limits = Limits {
             max_result_bytes: 64 << 10,
-            ..SqlOptions::default()
+            ..Limits::default()
         };
         let db = Db::open_with(store, StateOptions::default(), limits).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
@@ -64,9 +64,9 @@ fn result_rows_are_bounded() -> Result<()> {
 fn a_transaction_within_the_limit_flushes() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let limits = SqlOptions {
+        let limits = Limits {
             max_private_bytes: 1 << 20,
-            ..SqlOptions::default()
+            ..Limits::default()
         };
         let db = Db::open_with(store.clone(), StateOptions::default(), limits).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
@@ -76,7 +76,7 @@ fn a_transaction_within_the_limit_flushes() -> Result<()> {
         db.execute("INSERT INTO t SELECT value, randomblob(100000) FROM (WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 6) SELECT value FROM n)")
             .await?;
         db.save().await?;
-        let db = Db::open_with(store, StateOptions::default(), SqlOptions::default()).await?;
+        let db = Db::open_with(store, StateOptions::default(), Limits::default()).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(6)

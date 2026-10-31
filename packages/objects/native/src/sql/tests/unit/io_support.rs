@@ -9,6 +9,37 @@ pub(super) struct Fault {
 }
 
 impl KvIo {
+    /// Open the namespace's state, and an adapter over its file.
+    pub(crate) async fn mount(store: Arc<dyn crate::state::kv::KvStore>) -> io::Result<Arc<Self>> {
+        Self::mount_with_options(store, crate::state::StateOptions::default()).await
+    }
+
+    /// [`Self::mount`] with explicit state options.
+    pub(crate) async fn mount_with_options(
+        store: Arc<dyn crate::state::kv::KvStore>,
+        options: crate::state::StateOptions,
+    ) -> io::Result<Arc<Self>> {
+        let state = crate::state::State::open(store).options(options).await;
+        let state = state.map_err(io::Error::other)?;
+        let io = Self::new(
+            state.file(),
+            crate::sql::Limits::default().max_private_bytes,
+        );
+        *io.state.lock().unwrap() = Some(state);
+        Ok(io)
+    }
+
+    /// Flush the private pages, in one mutation of the state of [`Self::mount`].
+    pub(crate) async fn publish(&self) -> io::Result<crate::state::FlushReport> {
+        let state = self.state.lock().unwrap().clone();
+        let state = state.ok_or_else(|| invalid("not mounted"))?;
+        let mut mutation = state.mutation();
+        self.flush_into(&mut mutation)?;
+        let report = mutation.flush().await.map_err(io::Error::other)?;
+        self.settle_flushed();
+        Ok(report)
+    }
+
     pub(crate) fn arm_fault(
         &self,
         at: usize,

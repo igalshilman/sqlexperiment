@@ -1,7 +1,7 @@
 //! Exercises the normal library with an immediately-ready backend: no simulator,
 //! instrumentation, forced yields or checkpoint fault hooks are required.
 use crate::sql::Database;
-use crate::state::{Result, State, kv::KvStore};
+use crate::state::{Result, kv::KvStore};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use std::{
@@ -37,12 +37,12 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let db = require_send(Database::new(State::open(store.clone()).await?)).await?;
+        let db = require_send(Database::open(store.clone())).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
         require_send(db.save()).await?;
-        let db = Database::new(State::open(store.clone()).await?).await?;
+        let db = Database::open(store.clone()).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -50,7 +50,7 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         db.begin().await?;
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let db = Database::new(State::open(store).await?).await?;
+        let db = Database::open(store).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -71,18 +71,15 @@ fn a_commit_with_effects_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let db = Database::new(State::open(store.clone()).await?).await?;
+        let db = Database::open(store.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
-        require_send(
-            db.transaction(async |db| db.execute("INSERT INTO t VALUES (1, 'hello')").await),
-        )
-        .await?;
-        db.begin().await?;
+        db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
+        require_send(db.begin()).await?;
         db.execute("INSERT INTO t VALUES (2, 'world')").await?;
         require_send(db.commit(Some(Bytes::from_static(b"two rows")))).await?;
         drop(db);
-        let db = Database::new(State::open(store).await?).await?;
+        let db = Database::open(store).await?;
         assert_eq!(db.effects().await?, &b"two rows"[..]);
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),

@@ -113,7 +113,8 @@ All of it is one Rust crate, the addon, of two private modules: `state`
 [architecture](src/state/docs/ARCHITECTURE.md), [design](src/state/docs/DESIGN.md)
 and [format](src/state/docs/FORMAT.md)), the storage of one file and the
 effects, and `sql` ([`src/sql`](src/sql/README.md)), the `Database` on it.
-[`src/node.rs`](src/node.rs) is the napi bindings, around `sql::Database`.
+Its one public type is `Database` (`src/lib.rs`), and
+[`src/node.rs`](src/node.rs) is the napi bindings, around it.
 
 ## Build and test
 

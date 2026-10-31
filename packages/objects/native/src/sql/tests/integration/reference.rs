@@ -12,7 +12,7 @@ use std::{
 use turso_core::{Connection, IO, MemoryIO, SqliteDialect, StepResult};
 
 /// A new, empty reference engine.
-pub fn oracle() -> Arc<Connection> {
+pub(super) fn oracle() -> Arc<Connection> {
     // The engine keeps a process-wide registry of databases by path.
     static DATABASES: AtomicU64 = AtomicU64::new(0);
     let path = format!("oracle-{}.db", DATABASES.fetch_add(1, Ordering::Relaxed));
@@ -26,7 +26,7 @@ pub fn oracle() -> Arc<Connection> {
 /// Run `sql` (one or more statements) on the reference engine, as
 /// [`crate::sql::Database::query`] does: the rows of its last statement, or the first error,
 /// after which no statement runs.
-pub fn run(connection: &Arc<Connection>, sql: &str) -> std::result::Result<Rows, String> {
+pub(super) fn run(connection: &Arc<Connection>, sql: &str) -> std::result::Result<Rows, String> {
     let mut remaining = sql;
     let mut rows = Vec::new();
     loop {
@@ -52,7 +52,7 @@ pub fn run(connection: &Arc<Connection>, sql: &str) -> std::result::Result<Rows,
 }
 
 /// A reference engine that ran `statements` in order, errors and all.
-pub fn replay(statements: &[String]) -> Arc<Connection> {
+pub(super) fn replay(statements: &[String]) -> Arc<Connection> {
     let connection = oracle();
     for sql in statements {
         let _ = run(&connection, sql);
@@ -62,7 +62,7 @@ pub fn replay(statements: &[String]) -> Arc<Connection> {
 
 /// Rows as text, to compare and print: a long value as its start, length
 /// and hash.
-pub fn text(rows: &Rows) -> Vec<String> {
+pub(super) fn text(rows: &Rows) -> Vec<String> {
     let value = |value: &Value| {
         let text = format!("{value:?}");
         if text.len() <= 60 {
@@ -92,7 +92,7 @@ fn tables(schema: &Rows) -> Vec<String> {
 
 /// The schema and every table's rows of the database `query` runs SQL on,
 /// as text.
-pub async fn dump_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result<String> {
+pub(super) async fn dump_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result<String> {
     let schema = query(SCHEMA).await?;
     let mut state = text(&schema);
     for table in tables(&schema) {
@@ -104,12 +104,12 @@ pub async fn dump_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result
 }
 
 /// [`dump_of`] a session's database.
-pub async fn dump(db: &crate::sql::Database) -> Result<String> {
+pub(super) async fn dump(db: &crate::sql::Database) -> Result<String> {
     dump_of(async |query| db.query(query).await).await
 }
 
 /// [`dump`] of the reference engine.
-pub fn reference_dump(connection: &Arc<Connection>) -> String {
+pub(super) fn reference_dump(connection: &Arc<Connection>) -> String {
     let schema = run(connection, SCHEMA).unwrap();
     let mut state = text(&schema);
     for query in tables(&schema) {
@@ -120,6 +120,6 @@ pub fn reference_dump(connection: &Arc<Connection>) -> String {
 }
 
 /// `PRAGMA integrity_check` of a session's database: "ok" when it is.
-pub async fn integrity(db: &crate::sql::Database) -> Result<String> {
+pub(super) async fn integrity(db: &crate::sql::Database) -> Result<String> {
     Ok(db.query("PRAGMA integrity_check").await?[0][0].to_string())
 }

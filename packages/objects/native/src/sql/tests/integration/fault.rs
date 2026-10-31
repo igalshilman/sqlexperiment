@@ -12,7 +12,7 @@ use std::{
 };
 
 /// The failpoint at the `nth` `operation` on a key that starts with `prefix`.
-pub fn failpoint(
+pub(super) fn failpoint(
     operation: Operation,
     prefix: &str,
     nth: usize,
@@ -29,7 +29,7 @@ pub fn failpoint(
 }
 
 /// How a call under a failpoint ended.
-pub enum Ended<T> {
+pub(super) enum Ended<T> {
     Returned(Result<T>),
     /// Dropped once the failpoint signalled.
     Cancelled,
@@ -37,7 +37,7 @@ pub enum Ended<T> {
 
 impl<T> Ended<T> {
     /// Whether the call failed: returned an error, or was cancelled.
-    pub fn failed(&self) -> bool {
+    pub(super) fn failed(&self) -> bool {
         !matches!(self, Ended::Returned(Ok(_)))
     }
 }
@@ -45,7 +45,7 @@ impl<T> Ended<T> {
 /// Run `call` with `plan` armed on `store`, dropping it once the failpoint
 /// signals if `plan` cancels; disarmed after. Whether the failpoint was hit,
 /// and how the call ended.
-pub async fn under<T>(
+pub(super) async fn under<T>(
     store: &FaultKv,
     plan: Failpoint,
     call: impl Future<Output = Result<T>>,
@@ -65,7 +65,7 @@ pub async fn under<T>(
 }
 
 /// The requests `call` issues to `store`, and its result.
-pub async fn probe<T>(
+pub(super) async fn probe<T>(
     store: &FaultKv,
     call: impl Future<Output = Result<T>>,
 ) -> (Vec<Event>, Result<T>) {
@@ -84,7 +84,7 @@ pub async fn probe<T>(
 
 /// A failpoint at each request of `events`, each effect, cancelling or not:
 /// every way one of those requests can fail.
-pub fn every_failure(events: &[Event]) -> Vec<Failpoint> {
+pub(super) fn every_failure(events: &[Event]) -> Vec<Failpoint> {
     let mut plans = Vec::new();
     for (i, event) in events.iter().enumerate() {
         let nth = (events[..=i].iter())
@@ -101,7 +101,7 @@ pub fn every_failure(events: &[Event]) -> Vec<Failpoint> {
 
 /// Poll `future` at most `polls` times, each time once it is woken: its
 /// output if it finished by then; otherwise it is dropped, pending.
-pub fn poll_at_most<F: Future>(future: F, polls: usize) -> Option<F::Output> {
+pub(super) fn poll_at_most<F: Future>(future: F, polls: usize) -> Option<F::Output> {
     struct Unpark(Thread);
     impl Wake for Unpark {
         fn wake(self: Arc<Self>) {

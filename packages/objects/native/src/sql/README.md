@@ -16,14 +16,14 @@ layers](../../README.md#inside-the-layers).
 
 ## API
 
-A host implements `state::kv::KvStore` over its store (the addon, over the
-JavaScript one), then:
+`Database` is the crate's one entry point. A host implements `KvStore` over
+its store (the addon, over the JavaScript one), then:
 
 ```rust,ignore
-use crate::sql::Database;
+use restate_objects::Database;
 
 // Kept warm in the process's page cache under the namespace's stable key.
-let db = Database::open(store, "object-42", false).await?;
+let db = Database::open(store).cached(&cache, "object-42").await?;
 db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?; // durable now
 db.begin().await?;                                  // one transaction, with effects
 db.execute("INSERT INTO shipments VALUES(7)").await?;
@@ -31,13 +31,16 @@ db.commit(Some("shipped 7".into())).await?;         // the row and the effects, 
 db.save().await?;                                   // ends the session, leaving its engine warm
 ```
 
-`transaction(body)` runs `body` between `begin` and `commit`, or rolls it
-back when it fails; a statement in the body that ends its transaction
-(`COMMIT`, `END`, `ROLLBACK`) ends the session rather than commit the body
-halfway. Bind values with `query_with`/`execute_with` rather than formatting
-them into SQL. `SqlOptions` caps a session's private changes and a
-statement's result rows. `Database::new(state)` opens a session on a state
-opened otherwise, as the tests and benchmarks do.
+`Database::open` returns a builder: `.options(StateOptions)` sets how the
+state flushes and reads, `.checkpoints(blobs)` keeps the bulk of the
+checkpoints in S3, and `.reader()` opens a reader beside the owner, as a
+shared handler does. The host's `transaction(body)` (`src/database.ts`) runs
+`body` between `begin` and `commit`, or `rollback` when it fails; a statement
+in the body that ends its transaction (`COMMIT`, `END`, `ROLLBACK`) ends the
+session rather than commit the body halfway. Bind values with
+`query_with`/`execute_with` rather than formatting them into SQL. A session
+holds at most 256 MiB of changes not yet committed, and a statement returns
+at most 64 MiB of rows: past either, the session ends.
 
 An SQL error (syntax, a constraint, a missing table) undoes just that statement,
 as in SQLite, and the session goes on. A storage error, a cancelled call or a

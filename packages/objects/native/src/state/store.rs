@@ -97,7 +97,7 @@ pub(crate) struct Written {
 
 impl Written {
     /// The file's size after the flush, the file being `current` bytes now.
-    pub fn size_after(&self, current: u64) -> u64 {
+    pub(super) fn size_after(&self, current: u64) -> u64 {
         match self.sized {
             true => self.size,
             false => self.size.max(current),
@@ -117,7 +117,7 @@ pub(crate) enum Is {
 
 impl Is {
     /// Refuse the name `name`, held as `self`, as `wanted`.
-    pub fn refuse(self, name: &str, wanted: Is) -> String {
+    pub(crate) fn refuse(self, name: &str, wanted: Is) -> String {
         format!("{name:?} is {}, not {}", self.article(), wanted.article())
     }
 
@@ -131,11 +131,10 @@ impl Is {
 
 /// What a flush wrote.
 #[derive(Clone, Debug, Default)]
-pub struct FlushReport {
+pub(crate) struct FlushReport {
     /// Bytes of its tail entry: the records and pages it wrote.
+    #[cfg(test)]
     pub entry_bytes: usize,
-    /// Bytes of the head it put; 0 when nothing changed.
-    pub head_bytes: usize,
     /// What the checkpoint its head names did, if it named a new one
     /// ([`crate::state::StateOptions::checkpoint_entries`]).
     pub checkpoint: Option<Checkpointed>,
@@ -147,7 +146,7 @@ pub struct FlushReport {
 
 /// What a checkpoint did ([`FlushReport::checkpoint`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Checkpointed {
+pub(crate) struct Checkpointed {
     /// The version it holds the state of.
     pub version: u64,
     /// Frames it wrote, rebuilt from the overlay.
@@ -163,7 +162,7 @@ pub struct Checkpointed {
     pub manifest_bytes: usize,
     /// Packs mostly dead, whose live frames and values it moved into its own.
     pub compacted: usize,
-    /// Packs its garbage collection deleted ([`crate::state::State::collect_garbage`]).
+    /// Packs the garbage collection after it deleted.
     pub deleted: usize,
     /// Its pack went to L1 (S3), and everything L0 held with it.
     pub promoted: bool,
@@ -280,7 +279,7 @@ pub(crate) struct Durable {
 impl Durable {
     /// About the bytes it takes in memory: the values and pages it holds,
     /// and the manifest's locations.
-    pub fn estimated_bytes(&self) -> usize {
+    pub(crate) fn estimated_bytes(&self) -> usize {
         const LOCATION: usize = 40;
         let files = (self.manifest.files.values())
             .map(|file| (file.frames.len() + file.patches.len()) * LOCATION)
@@ -296,7 +295,7 @@ impl Durable {
     }
 
     /// The state of `head` with nothing in it.
-    pub fn empty(head: Head) -> Self {
+    pub(crate) fn empty(head: Head) -> Self {
         Self {
             head,
             manifest: Arc::default(),
@@ -353,7 +352,7 @@ impl Durable {
             .collect()
     }
 
-    pub fn is(&self, name: &str) -> Option<Is> {
+    pub(crate) fn is(&self, name: &str) -> Option<Is> {
         if self.records.contains_key(name) {
             Some(Is::Record)
         } else {
@@ -452,7 +451,7 @@ impl Snapshot {
     /// Open the namespace: see the module documentation. An owner without a
     /// cache, or whose last flush had an unknown outcome, syncs alongside, so
     /// that what it reads is durable; a `reader` reads what is stored.
-    pub async fn open(
+    pub(super) async fn open(
         tiered: Arc<Tiered>,
         options: StateOptions,
         cache: Option<NamespaceCache>,
@@ -558,19 +557,19 @@ impl Snapshot {
         Ok(durable)
     }
 
-    pub fn version(&self) -> u64 {
+    pub(super) fn version(&self) -> u64 {
         self.durable.head.version
     }
 
-    pub fn head(&self) -> &Head {
+    pub(super) fn head(&self) -> &Head {
         &self.durable.head
     }
 
-    pub fn records(&self) -> &Records {
+    pub(super) fn records(&self) -> &Records {
         &self.durable.records
     }
 
-    pub fn file_size(&self, name: &str) -> u64 {
+    pub(super) fn file_size(&self, name: &str) -> u64 {
         self.durable.files.get(name).map_or(0, |file| file.size)
     }
 
@@ -581,7 +580,7 @@ impl Snapshot {
 
     /// Page `page` of the file `name`; `None` for zeros (a hole, or past its
     /// end).
-    pub async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
+    pub(super) async fn read(&self, name: &str, page: u64) -> io::Result<Option<Page>> {
         if !self.durable.files.contains_key(name) {
             return Ok(None);
         }
@@ -1004,8 +1003,8 @@ impl Snapshot {
             cache.flushed(head_bytes.clone(), next.head.version, next.clone());
         }
         let report = FlushReport {
+            #[cfg(test)]
             entry_bytes,
-            head_bytes: head_bytes.len(),
             checkpoint: staged.map(|staged| staged.report),
             checkpoint_failed: None,
         };

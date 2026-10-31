@@ -7,7 +7,7 @@ use std::sync::{
 use turso_core::{Buffer, Completion, IO, OpenFlags};
 
 #[test]
-fn concurrent_drivers_preserve_submission_order() -> Result<()> {
+fn one_driver_at_a_time_in_submission_order() -> Result<()> {
     futures::executor::block_on(async {
         let io = KvIo::mount(Arc::new(MemoryKv::default())).await?;
         let file = MountedIo(io.clone()).open_file(DB_PATH, OpenFlags::Create, false)?;
@@ -19,20 +19,9 @@ fn concurrent_drivers_preserve_submission_order() -> Result<()> {
         }
         let mut first = Box::pin(io.drive());
         assert!(futures::poll!(first.as_mut()).is_pending());
-        let mut second = Box::pin(io.drive());
-        assert!(futures::poll!(second.as_mut()).is_pending());
-        // Let the second caller run while the first request is suspended.
-        let second_done = match futures::poll!(second.as_mut()) {
-            std::task::Poll::Ready(result) => {
-                result?;
-                true
-            }
-            std::task::Poll::Pending => false,
-        };
+        // Only the call holding the session drives: a second is refused.
+        assert!(io.drive().await.is_err());
         first.await?;
-        if !second_done {
-            second.await?;
-        }
         assert!(writes.iter().all(Completion::succeeded));
         let output = Arc::new(Buffer::new_temporary(1));
         let read = file.pread(0, Completion::new_read(output.clone(), |_| None))?;

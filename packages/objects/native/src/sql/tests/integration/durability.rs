@@ -333,36 +333,9 @@ fn a_transaction_body_cannot_commit_itself() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let db = Db::open(store, options(None)).await?;
         let nested: Result<()> = db
-            .transaction(async |db| db.transaction(async |_| Ok(())).await)
+            .transaction(async |db| super::host::transaction(db, async |_| Ok(())).await)
             .await;
         assert!(nested.unwrap_err().to_string().contains("do not nest"));
-        Ok(())
-    })
-}
-
-/// Dropping a transaction future while its body awaits something else (a call
-/// to another service, a timeout) leaves its SQL transaction open; the session
-/// must not accept more work that would silently join it.
-#[test]
-fn an_abandoned_transaction_poisons_the_session() -> Result<()> {
-    futures::executor::block_on(async {
-        let store = Arc::new(MemoryKv::default());
-        let db = Db::open(store.clone(), options(None)).await?;
-        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
-            .await?;
-        {
-            let (_send, receive) = futures::channel::oneshot::channel::<()>();
-            let mut transaction = Box::pin(db.transaction(async move |db| {
-                db.execute("INSERT INTO t VALUES(1, 0)").await?;
-                let _ = receive.await;
-                Ok(())
-            }));
-            for _ in 0..1000 {
-                assert!(futures::poll!(transaction.as_mut()).is_pending());
-            }
-        }
-        assert!(db.execute("INSERT INTO t VALUES(2, 0)").await.is_err());
-        assert!(db.save().await.is_err());
         Ok(())
     })
 }

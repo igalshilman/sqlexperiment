@@ -18,13 +18,8 @@ use futures::{
     future::BoxFuture,
     task::{ArcWake, waker},
 };
-use restate_objects::sql::{Database, Value};
-use restate_objects::state::{
-    Result, State,
-    blobs::BlobStore,
-    kv::KvStore,
-    simulation::{MemoryBlobs, MemoryKv},
-};
+use restate_objects::simulation::{MemoryBlobs, MemoryKv};
+use restate_objects::{BlobStore, Database, KvStore, Result, StateOptions, Value};
 use std::{
     io,
     ops::Range,
@@ -226,9 +221,9 @@ impl Stores {
     }
 
     async fn open(&self) -> Result<Database> {
-        let mut open = State::open(self.restate.clone());
+        let mut open = Database::open(self.restate.clone());
         if let Ok(bytes) = std::env::var("L0_BYTES") {
-            open = open.options(restate_objects::state::StateOptions {
+            open = open.options(StateOptions {
                 l0_bytes: bytes.parse()?,
                 ..Default::default()
             });
@@ -236,7 +231,7 @@ impl Stores {
         if let Some((_, s3)) = &self.s3 {
             open = open.checkpoints(s3.clone());
         }
-        Database::new(open.await?).await
+        open.await
     }
 
     /// Requests so far: Restate's gets, S3's GETs.

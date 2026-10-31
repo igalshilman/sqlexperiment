@@ -523,7 +523,7 @@ impl<S: KvStore> MonitorKv<S> {
     }
 
     /// Read checkpoints' packs from `packs`, where the state keeps them
-    /// ([`crate::state::Open::checkpoints`]).
+    /// ([`crate::Open::checkpoints`]).
     pub fn packs(self, packs: &MemoryBlobs) -> Self {
         self.known.lock().unwrap().external = Some(packs.clone());
         self

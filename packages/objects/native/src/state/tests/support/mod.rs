@@ -8,14 +8,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// A deterministic random source (splitmix64).
-pub struct Rng(u64);
+pub(super) struct Rng(u64);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
+    pub(super) fn new(seed: u64) -> Self {
         Self(seed)
     }
 
-    pub fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -24,33 +24,33 @@ impl Rng {
     }
 
     /// A number below `n` (0 when `n` is 0).
-    pub fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         if n == 0 { 0 } else { self.next() % n }
     }
 
     /// True `percent` times in a hundred.
-    pub fn percent(&mut self, percent: u64) -> bool {
+    pub(super) fn percent(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
 
-    pub fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+    pub(super) fn pick<T: Copy>(&mut self, items: &[T]) -> T {
         items[self.below(items.len() as u64) as usize]
     }
 
-    pub fn bytes(&mut self, len: usize) -> Vec<u8> {
+    pub(super) fn bytes(&mut self, len: usize) -> Vec<u8> {
         (0..len).map(|_| self.next() as u8).collect()
     }
 }
 
 /// A page numbered `n` in its first eight bytes, zeros after: compressible.
-pub fn page(n: u64) -> Page {
+pub(super) fn page(n: u64) -> Page {
     let mut page = vec![0; PAGE_SIZE];
     page[..8].copy_from_slice(&n.to_le_bytes());
     page.into()
 }
 
 /// A page of mixed entropy: random bytes for a random part of it.
-pub fn varied(rng: &mut Rng) -> Page {
+pub(super) fn varied(rng: &mut Rng) -> Page {
     let mut page = page(rng.next()).to_vec();
     let noisy = rng.below(PAGE_SIZE as u64) as usize;
     let at = rng.below((PAGE_SIZE - noisy) as u64 + 1) as usize;
@@ -60,7 +60,7 @@ pub fn varied(rng: &mut Rng) -> Page {
 
 /// A change to a state (in a mutation) and to its model alike.
 #[derive(Clone, Debug)]
-pub enum Op {
+pub(super) enum Op {
     /// Set the effects.
     Effects(Bytes),
     /// Write a page of the file, or a hole.
@@ -72,7 +72,7 @@ pub enum Op {
 impl Op {
     /// A random change: effects small and over an inline budget of a few
     /// hundred bytes, pages written, holes, and lengths shrunk and grown.
-    pub fn random(rng: &mut Rng) -> Self {
+    pub(super) fn random(rng: &mut Rng) -> Self {
         let len = |rng: &mut Rng| match rng.below(4) {
             0 => 0,
             1 => rng.below(40) as usize,
@@ -92,19 +92,19 @@ impl Op {
 }
 
 /// A state and a handle on its file.
-pub struct Session {
+pub(super) struct Session {
     pub state: State,
     file: File,
 }
 
 impl Session {
     /// Open the state.
-    pub async fn open(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
+    pub(super) async fn open(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
         Ok(Self::of(setup.into().open(store).await?))
     }
 
     /// Open a reader beside the owner (see [`crate::state::Open::reader`]).
-    pub async fn reader(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
+    pub(super) async fn reader(store: Arc<dyn KvStore>, setup: impl Into<Setup>) -> Result<Self> {
         Ok(Self::of(setup.into().open(store).reader().await?))
     }
 
@@ -113,12 +113,12 @@ impl Session {
         Self { state, file }
     }
 
-    pub fn file(&self) -> &File {
+    pub(super) fn file(&self) -> &File {
         &self.file
     }
 
     /// Make the change `op` in `mutation`, a mutation of this state.
-    pub fn apply(&self, mutation: &mut Mutation, op: &Op) -> Result<()> {
+    pub(super) fn apply(&self, mutation: &mut Mutation, op: &Op) -> Result<()> {
         match op {
             Op::Effects(value) => mutation.set_effects(value.clone()),
             Op::Write(index, image) => mutation.write(*index, image.clone()),
@@ -127,7 +127,7 @@ impl Session {
     }
 
     /// Flush `ops`, in a mutation of their own.
-    pub async fn flush(&self, ops: &[Op]) -> Result<FlushReport> {
+    pub(super) async fn flush(&self, ops: &[Op]) -> Result<FlushReport> {
         let mut mutation = self.state.mutation();
         for op in ops {
             self.apply(&mut mutation, op)?;
@@ -139,7 +139,7 @@ impl Session {
 /// What a state should hold, as last flushed: its effects, and its file's
 /// length and pages; an absent page is a hole.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Model {
+pub(super) struct Model {
     effects: Bytes,
     len: u64,
     pages: BTreeMap<u64, Page>,
@@ -148,7 +148,7 @@ pub struct Model {
 const PAGE: u64 = PAGE_SIZE as u64;
 
 impl Model {
-    pub fn apply(&mut self, op: &Op) {
+    pub(super) fn apply(&mut self, op: &Op) {
         match op {
             Op::Effects(value) => self.effects = value.clone(),
             Op::Write(index, image) => {
@@ -166,7 +166,7 @@ impl Model {
         }
     }
 
-    pub fn applied(&self, ops: &[Op]) -> Self {
+    pub(super) fn applied(&self, ops: &[Op]) -> Self {
         let mut model = self.clone();
         for op in ops {
             model.apply(op);
@@ -175,24 +175,24 @@ impl Model {
     }
 
     /// What reading page `index` of the file returns.
-    pub fn page(&self, index: u64) -> Option<Page> {
+    pub(super) fn page(&self, index: u64) -> Option<Page> {
         if index * PAGE >= self.len {
             return None;
         }
         self.pages.get(&index).cloned()
     }
 
-    pub fn len(&self) -> u64 {
+    pub(super) fn len(&self) -> u64 {
         self.len
     }
 
-    pub fn effects(&self) -> Bytes {
+    pub(super) fn effects(&self) -> Bytes {
         self.effects.clone()
     }
 
     /// How `session` differs from the model; `None` when it reads the same.
     /// A session reads its state as last flushed, so compare after a flush.
-    pub async fn differs(&self, session: &Session) -> Result<Option<String>> {
+    pub(super) async fn differs(&self, session: &Session) -> Result<Option<String>> {
         let held = session.state.effects();
         if held != self.effects {
             return Ok(Some(format!("effects: {} bytes", held.len())));
@@ -215,7 +215,7 @@ impl Model {
     }
 
     /// Whether `session` reads as the model.
-    pub async fn matches(&self, session: &Session) -> Result<bool> {
+    pub(super) async fn matches(&self, session: &Session) -> Result<bool> {
         Ok(self.differs(session).await?.is_none())
     }
 }

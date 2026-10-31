@@ -413,8 +413,8 @@ query is a round trip per level the cache does not hold: 2 to 6.
 
 ### Garbage collection
 
-After every flush that checkpoints, and whenever anyone calls
-`State::collect_garbage` (a reader may too):
+After every flush that checkpoints (and in the tests, whenever one calls
+`State::collect_garbage`, as a reader may too):
 
 1. **List** Restate's keys, once (Restate's `getKeys()`): the manifests
    and L0. List S3 too only if the head's checkpoint or the previous one

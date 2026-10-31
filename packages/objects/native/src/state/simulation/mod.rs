@@ -5,16 +5,19 @@ mod fault;
 mod latency;
 mod memory;
 mod monitor;
-mod restate;
+#[cfg(test)]
+mod setup;
 pub use blobs::{BlobFaults, MemoryBlobs};
 pub use fault::{Effect, Event, Failpoint, FaultKv, Operation};
 pub use latency::LatencyKv;
-pub use memory::{MemoryKv, Stats, Traffic, object_kind};
+pub use memory::{MemoryKv, object_kind};
+#[cfg(feature = "bench")]
+pub use memory::{Stats, Traffic};
 pub use monitor::MonitorKv;
-pub use restate::Restate;
+#[cfg(test)]
+pub(crate) use setup::Setup;
 
-use crate::state::{Open, PageCache, PageCacheConfig, State, StateOptions, kv::KvStore};
-use std::sync::Arc;
+use crate::state::{PageCache, PageCacheConfig};
 use std::sync::{
     OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
@@ -42,7 +45,7 @@ pub fn shared_cache() -> &'static PageCache {
     CACHE.get_or_init(|| open_cache(cache_config(64 << 20, 256 << 20)))
 }
 
-/// A namespace of a page cache: what [`Open::cached`] takes, as one value.
+/// A namespace of a page cache: what [`crate::Open::cached`] takes, as one value.
 #[derive(Clone)]
 pub struct Namespace {
     pub cache: PageCache,
@@ -71,61 +74,3 @@ pub(crate) fn fresh_namespace_cache() -> crate::state::cache::NamespaceCache {
     let namespace = fresh_namespace();
     namespace.cache.namespace(&namespace.key)
 }
-
-/// How a test opens a state: its options, the namespace it keeps warm in,
-/// if any, and where its checkpoints are, if not in the store.
-#[derive(Clone, Default)]
-pub struct Setup {
-    pub options: StateOptions,
-    pub cache: Option<Namespace>,
-    pub packs: Option<MemoryBlobs>,
-}
-
-impl Setup {
-    /// Open a state over `store` this way.
-    pub fn open(&self, store: Arc<dyn KvStore>) -> Open {
-        let mut open = State::open(store).options(self.options.clone());
-        if let Some(namespace) = &self.cache {
-            open = open.cached(&namespace.cache, &namespace.key);
-        }
-        if let Some(packs) = &self.packs {
-            open = open.checkpoints(Arc::new(packs.clone()));
-        }
-        open
-    }
-}
-
-impl From<StateOptions> for Setup {
-    fn from(options: StateOptions) -> Self {
-        Self {
-            options,
-            ..Self::default()
-        }
-    }
-}
-
-/// Return to the executor once, even when every awaited future is ready.
-pub(crate) async fn yield_now() {
-    let mut yielded = false;
-    std::future::poll_fn(move |cx| {
-        if yielded {
-            std::task::Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
-        }
-    })
-    .await
-}
-
-/// The key of the part `part` of the tail entry of `version`.
-pub fn tail_key(version: u64, part: u32) -> String {
-    crate::state::format::tail_key(version, part)
-}
-
-/// Where the tail's entries are.
-pub const TAIL_PREFIX: &str = crate::state::format::TAIL_PREFIX;
-
-/// Where checkpoints' packs are named, in a blob store.
-pub const PACK_PREFIX: &str = crate::state::format::PACK_PREFIX;

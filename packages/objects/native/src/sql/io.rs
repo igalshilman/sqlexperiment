@@ -21,14 +21,14 @@
 //! Read buffers are staged privately until the read succeeds. `Completing` retires
 //! in-flight accounting and aborts incomplete engine callbacks even if a dequeued
 //! future is never polled. Ordinary read errors drain their batch; cancellation
-//! aborts the dequeued batch. A [`crate::sql::Sql`] treats either as fatal and drops
-//! its private view.
+//! aborts the dequeued batch. The engine treats either as fatal: its session
+//! ends, with its private view.
 //!
 //! The host task runs both engine steps and completion callbacks, separated by
 //! async backend waits. There is no cross-thread completion queue. `pending_count`
-//! includes queued and executing requests, so publication cannot race them.
+//! includes queued and executing requests, so a commit cannot race them.
 //!
-//! Sql open preloads the database header page asynchronously. The engine's
+//! Opening the engine preloads the database header page asynchronously. The engine's
 //! synchronous metadata helpers may then read resident header/overlay/WAL bytes
 //! through `IO::step`. That method never polls KV futures: a nonresident read,
 //! file mutation or wait with no queued work returns an error instead of blocking
@@ -56,11 +56,13 @@ use turso_core::{
 };
 
 /// Logical database-page and overlay-block size; encoded KV values may be smaller.
-pub const BLOCK_SIZE: usize = crate::state::PAGE_SIZE;
+pub(super) const BLOCK_SIZE: usize = crate::state::PAGE_SIZE;
 /// Engine-visible virtual database name, not a filesystem or KV key.
-pub const DB_PATH: &str = "object.db";
+pub(super) const DB_PATH: &str = "object.db";
 /// Engine-visible private WAL name; this file is never fetched from KV.
 const WAL_PATH: &str = "object.db-wal";
+/// The error of a second driver of the queue.
+const DRIVING: &str = "the engine's I/O is being driven";
 /// Maximum number of engine reads driven concurrently.
 const MAX_READS_IN_FLIGHT: usize = 16;
 /// The virtual files, by number: the index of [`DB`] and [`WAL`] here.
@@ -251,33 +253,38 @@ impl Drop for Completing<'_> {
     }
 }
 
-/// Shared virtual-file adapter; prefer [`crate::sql::Sql`] for SQL and durability.
+/// The engine's virtual files, over the state's file: its `IO`, and the
+/// shared part of its `File`s ([`MountedIo`]).
 ///
-/// The queue lock orders engine mutations; it does not implement a
-/// distributed ownership lock.
-pub struct KvIo {
+/// turso's `IO` and `File` take `&self` and must be `Send + Sync`, so the
+/// adapter keeps its state behind locks and atomics. None is contended: the
+/// call holding the session is the one using the engine (see the ownership
+/// model in [`crate::sql`]).
+pub(super) struct KvIo {
     /// The state's file `db`; replaced when a warm engine continues on a
     /// new state, and `None` while the engine is parked.
     file: Mutex<Option<StateFile>>,
-    /// See [`crate::sql::SqlOptions::max_private_bytes`].
+    /// See [`crate::sql::Limits::max_private_bytes`].
     max_private_bytes: AtomicUsize,
     private: Mutex<Private>,
     queue: Mutex<VecDeque<Pending>>,
+    /// Held while the queue is drained ([`Self::drive`], [`IO::step`]),
+    /// across the awaits of a drive, so its guard must be `Send`.
     driver: futures::lock::Mutex<()>,
     progress: Mutex<Progress>,
     /// A request or synchronous engine read failed: the engine's state after
     /// the error is unknown.
     failed: AtomicBool,
-    /// The state of [`Self::mount`], which [`Self::publish`] flushes.
-    #[cfg(any(test, feature = "bench"))]
+    /// The state the tests' `mount` opened, which their `publish` flushes.
+    #[cfg(test)]
     state: Mutex<Option<crate::state::State>>,
     #[cfg(test)]
-    fault: Mutex<Option<test_faults::Fault>>,
+    fault: Mutex<Option<test_support::Fault>>,
 }
 
 impl KvIo {
     /// An adapter over `file`, the state's file `db`.
-    pub fn new(file: StateFile, max_private_bytes: usize) -> Arc<Self> {
+    pub(super) fn new(file: StateFile, max_private_bytes: usize) -> Arc<Self> {
         let private = Private {
             sizes: [file.len(), 0],
             ..Private::default()
@@ -290,43 +297,11 @@ impl KvIo {
             driver: futures::lock::Mutex::new(()),
             progress: Mutex::default(),
             failed: AtomicBool::default(),
-            #[cfg(any(test, feature = "bench"))]
+            #[cfg(test)]
             state: Mutex::new(None),
             #[cfg(test)]
             fault: Mutex::new(None),
         })
-    }
-
-    /// Open the namespace's state, and an adapter over its file `db`.
-    #[cfg(any(test, feature = "bench"))]
-    pub async fn mount(store: Arc<dyn crate::state::kv::KvStore>) -> io::Result<Arc<Self>> {
-        Self::mount_with_options(store, crate::state::StateOptions::default()).await
-    }
-
-    /// [`Self::mount`] with explicit state options.
-    #[cfg(any(test, feature = "bench"))]
-    pub async fn mount_with_options(
-        store: Arc<dyn crate::state::kv::KvStore>,
-        options: crate::state::StateOptions,
-    ) -> io::Result<Arc<Self>> {
-        let state = crate::state::State::open(store).options(options).await;
-        let state = state.map_err(io::Error::other)?;
-        let file = state.file();
-        let io = Self::new(file, crate::sql::MAX_PRIVATE_BYTES);
-        *io.state.lock().unwrap() = Some(state);
-        Ok(io)
-    }
-
-    /// Flush the private pages, in one mutation of the state of [`Self::mount`].
-    #[cfg(any(test, feature = "bench"))]
-    pub async fn publish(&self) -> io::Result<crate::state::FlushReport> {
-        let state = self.state.lock().unwrap().clone();
-        let state = state.ok_or_else(|| invalid("not mounted"))?;
-        let mut mutation = state.mutation();
-        self.flush_into(&mut mutation)?;
-        let report = mutation.flush().await.map_err(io::Error::other)?;
-        self.settle_flushed();
-        Ok(report)
     }
 
     /// Let go of the state while the engine is parked: it reads nothing
@@ -386,7 +361,7 @@ impl KvIo {
 
     /// Snapshot local database/WAL traffic counters; these are not durable KV bytes.
     #[cfg(any(test, feature = "bench"))]
-    pub fn stats(&self) -> crate::sql::IoStats {
+    pub(crate) fn stats(&self) -> crate::sql::IoStats {
         let private = self.private.lock().unwrap();
         crate::sql::IoStats {
             database_bytes_written: private.written[DB],
@@ -443,7 +418,7 @@ impl KvIo {
     }
 
     /// Count unfinished queued and executing engine requests.
-    pub fn pending_count(&self) -> usize {
+    pub(super) fn pending_count(&self) -> usize {
         self.progress.lock().unwrap().inflight
     }
 
@@ -518,7 +493,7 @@ impl KvIo {
         if file == WAL && held + total + 2 * BLOCK_SIZE > limit {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                "private changes exceed SqlOptions::max_private_bytes",
+                "private changes exceed Limits::max_private_bytes",
             ));
         }
         let end = pos
@@ -603,13 +578,14 @@ impl KvIo {
     ///
     /// Adjacent reads overlap in batches of at most 16 requests. Writes,
     /// truncation and sync are barriers: all preceding reads finish before a
-    /// mutation, and subsequent reads observe its result. Concurrent drivers
-    /// share one queue-order lock. These are private file mutations, not KV puts.
+    /// mutation, and subsequent reads observe its result. These are private
+    /// file mutations, not KV puts. One call drives at a time, the one
+    /// holding the session: a second driver is refused, not queued.
     ///
     /// A read error drains the already submitted batch before returning. Cancelling
     /// the pump aborts every dequeued completion; the session must be discarded.
-    pub async fn drive(&self) -> io::Result<usize> {
-        let _driver = self.driver.lock().await;
+    pub(super) async fn drive(&self) -> io::Result<usize> {
+        let _driver = (self.driver.try_lock()).ok_or_else(|| io::Error::other(DRIVING))?;
         let mut completed = 0;
         loop {
             let pending = self.queue.lock().unwrap().pop_front();
@@ -663,7 +639,7 @@ impl KvIo {
                 return Ok(0);
             }
             #[cfg(any(test, feature = "bench"))]
-            crate::sql::yield_now().await;
+            crate::yield_now().await;
             #[cfg(test)]
             let fault_operation = self.fault_operation();
             #[cfg(test)]
@@ -804,10 +780,7 @@ impl IO for KvIo {
     fn step(&self) -> turso_core::Result<()> {
         // Synchronous engine helpers may read resident metadata, but they must
         // never wait for async KV. Unknown blocking paths fail explicitly.
-        let _driver = self
-            .driver
-            .try_lock()
-            .ok_or_else(|| self.engine_error("I/O driver is active"))?;
+        let _driver = (self.driver.try_lock()).ok_or_else(|| self.engine_error(DRIVING))?;
         let mut progressed = false;
         loop {
             let pending = self.queue.lock().unwrap().pop_front();
@@ -852,7 +825,7 @@ impl IO for KvIo {
 /// The engine's `IO`: opens [`DB_PATH`] and the private WAL as handles on the
 /// one shared [`KvIo`], which owns queue ordering, private bytes and file
 /// access. A separate type, since a handle needs the adapter's `Arc`.
-pub struct MountedIo(pub Arc<KvIo>);
+pub(super) struct MountedIo(pub Arc<KvIo>);
 impl Clock for MountedIo {
     fn current_time_monotonic(&self) -> MonotonicInstant {
         self.0.current_time_monotonic()
@@ -965,8 +938,8 @@ fn buffers(bytes: &[u8]) -> Vec<Arc<Buffer>> {
 mod completion_tests;
 
 #[cfg(test)]
-#[path = "tests/unit/io_faults.rs"]
-mod test_faults;
+#[path = "tests/unit/io_support.rs"]
+mod test_support;
 
 #[cfg(test)]
 #[path = "tests/unit/parallel_reads.rs"]

@@ -41,7 +41,7 @@ pub(crate) struct Tiered {
 }
 
 impl Tiered {
-    pub fn new(restate: Arc<dyn KvStore>, l1: Option<Arc<dyn BlobStore>>) -> Self {
+    pub(super) fn new(restate: Arc<dyn KvStore>, l1: Option<Arc<dyn BlobStore>>) -> Self {
         Self {
             l0: KvBlobs::new(restate.clone()),
             l1,
@@ -51,7 +51,7 @@ impl Tiered {
     }
 
     /// Whether there is an L1 for packs to move to.
-    pub fn has_l1(&self) -> bool {
+    pub(super) fn has_l1(&self) -> bool {
         self.l1.is_some()
     }
 
@@ -63,12 +63,12 @@ impl Tiered {
         }
     }
 
-    pub async fn head(&self) -> io::Result<Option<Bytes>> {
+    pub(super) async fn head(&self) -> io::Result<Option<Bytes>> {
         self.restate.get(HEAD_KEY).await
     }
 
     /// The tail entries of `head` from `first` on, fetched together.
-    pub async fn tail(&self, head: &Head, first: u64) -> io::Result<Vec<Entry>> {
+    pub(super) async fn tail(&self, head: &Head, first: u64) -> io::Result<Vec<Entry>> {
         let first = first.max(head.tail_first);
         let gets = (first..=head.version).map(|version| async move {
             let keys = head.entry_keys(version);
@@ -83,7 +83,7 @@ impl Tiered {
     }
 
     /// Bytes `range` of `pack`.
-    pub async fn get(&self, pack: PackId, range: Range<u64>) -> io::Result<Bytes> {
+    pub(super) async fn get(&self, pack: PackId, range: Range<u64>) -> io::Result<Bytes> {
         let key = pack.key();
         (self.store(pack.tier)?.get_range(&key, range).await?).ok_or_else(|| {
             io::Error::other(format!(
@@ -94,13 +94,13 @@ impl Tiered {
 
     /// Bytes of the unit a read of `pack` fetches whole, where there is
     /// one: a part, for a pack in L0.
-    pub fn block(&self, pack: PackId) -> Option<u64> {
+    pub(super) fn block(&self, pack: PackId) -> Option<u64> {
         (pack.tier == Tier::L0).then_some(KV_PART)
     }
 
     /// Block `index` of `pack`, in L0 (see [`Self::block`]): shorter at the
     /// pack's end.
-    pub async fn get_block(&self, pack: PackId, index: u64) -> io::Result<Bytes> {
+    pub(super) async fn get_block(&self, pack: PackId, index: u64) -> io::Result<Bytes> {
         let key = pack.key();
         (self.l0.part(&key, index).await?).ok_or_else(|| {
             io::Error::other(format!(
@@ -109,12 +109,12 @@ impl Tiered {
         })
     }
 
-    pub async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
+    pub(super) async fn manifest(&self, checkpoint: &Checkpoint) -> io::Result<Manifest> {
         Manifest::decode(&self.encoded_manifest(checkpoint).await?)
     }
 
     /// The manifest of `checkpoint`, as stored.
-    pub async fn encoded_manifest(&self, checkpoint: &Checkpoint) -> io::Result<Bytes> {
+    pub(super) async fn encoded_manifest(&self, checkpoint: &Checkpoint) -> io::Result<Bytes> {
         let name = checkpoint.pack.name();
         let bytes = self
             .manifests
@@ -129,17 +129,17 @@ impl Tiered {
 
     /// Queue the manifest of the checkpoint whose pack is `pack`: like the
     /// tail entry, it is durable with the head that names it.
-    pub async fn put_manifest(&self, pack: PackId, manifest: Bytes) -> io::Result<()> {
+    pub(super) async fn put_manifest(&self, pack: PackId, manifest: Bytes) -> io::Result<()> {
         self.manifests.put(&pack.name(), manifest).await
     }
 
-    pub async fn put_pack(&self, pack: PackId, body: Bytes) -> io::Result<()> {
+    pub(super) async fn put_pack(&self, pack: PackId, body: Bytes) -> io::Result<()> {
         self.store(pack.tier)?.put(&pack.key(), body).await
     }
 
     /// Put a flush's tail entry (`parts`) and its head, and delete the tail
     /// entries `deletes`; then sync.
-    pub async fn write(
+    pub(super) async fn write(
         &self,
         head: &Head,
         parts: Vec<Bytes>,
@@ -156,7 +156,7 @@ impl Tiered {
     }
 
     /// The packs `head`'s checkpoints need: those their manifests name.
-    pub async fn needed(&self, head: &Head) -> io::Result<BTreeSet<PackId>> {
+    pub(super) async fn needed(&self, head: &Head) -> io::Result<BTreeSet<PackId>> {
         let checkpoints: Vec<Checkpoint> = [head.checkpoint, head.previous]
             .into_iter()
             .flatten()
@@ -181,7 +181,7 @@ impl Tiered {
     /// billed) only when the head's checkpoint or the previous one is in L1,
     /// or with `all`: a checkpoint into L0 lists Restate alone. What L0's
     /// checkpoints leave dead in L1 waits for the next promotion.
-    pub async fn collect_garbage(&self, head: &Head, all: bool) -> io::Result<usize> {
+    pub(super) async fn collect_garbage(&self, head: &Head, all: bool) -> io::Result<usize> {
         let Some(previous) = head.previous else {
             return Ok(0);
         };

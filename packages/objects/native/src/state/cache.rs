@@ -72,8 +72,7 @@ pub struct PageCacheConfig {
     /// not kept for long.
     pub namespace_bytes: usize,
     /// Bytes of the values parked for the next session of their
-    /// namespace (see [`crate::state::State::park`]), as they weigh it: SQL's
-    /// engine, say. Least recently parked go first.
+    /// namespace, as they weigh it: SQL's engine, say. Least recently parked go first.
     pub parked_bytes: usize,
 }
 
@@ -213,7 +212,7 @@ impl PageCache {
 
 /// One namespace's view of a [`PageCache`]; clones share it.
 #[derive(Clone)]
-pub struct NamespaceCache {
+pub(crate) struct NamespaceCache {
     shared: Arc<Shared>,
     parked: Weak<Mutex<Parked>>,
     key: String,

@@ -8,12 +8,8 @@
 //! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
-use restate_objects::sql::Database;
-use restate_objects::state::{
-    PageCache, Result, State,
-    kv::KvStore,
-    simulation::{LatencyKv, MemoryKv, cache_config, open_cache},
-};
+use restate_objects::simulation::{LatencyKv, MemoryKv, cache_config, open_cache};
+use restate_objects::{Database, KvStore, PageCache, Result};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{
@@ -54,7 +50,7 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 async fn baseline() -> Result<(MemoryKv, u64)> {
     let store = MemoryKv::default();
     let kv: Arc<dyn KvStore> = Arc::new(store.clone());
-    let db = Database::new(State::open(kv.clone()).await?).await?;
+    let db = Database::open(kv.clone()).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, doc TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -65,11 +61,7 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
     ))
     .await?;
     db.save().await?;
-    let pages = Database::new(State::open(kv).await?)
-        .await?
-        .io_stats()
-        .database_len
-        / 4096;
+    let pages = Database::open(kv).await?.io_stats().database_len / 4096;
     Ok((store, pages))
 }
 
@@ -88,7 +80,7 @@ fn row(state: &mut u64) -> u64 {
 
 async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let db = Database::new(State::open(kv).cached(cache, "bench").await?).await?;
+    let db = Database::open(kv).cached(cache, "bench").await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db
