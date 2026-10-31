@@ -387,15 +387,29 @@ async function submit(host: Host, messageId: string, text: string) {
   );
 }
 
-/** The outcome of prompt `messageId`, once its turn has ended. */
+/** How long a prompt's turn may be neither running nor ended: one resumed at boot starts well within it. */
+const STALLED_MS = 5_000;
+
+/**
+ * The outcome of prompt `messageId`, once its turn has ended. A turn that
+ * neither runs nor ends for {@link STALLED_MS} (OpenCode lost it) fails the
+ * attempt: the retry boots OpenCode again, which resumes the turns it claimed.
+ */
 async function settled(host: Host, messageId: string): Promise<Outcome> {
-  for (;;) {
+  for (let idleSince = Date.now(); ; ) {
     const now = await outcome(host, messageId);
     if (now.state !== 'running') return now;
     await startInbox(host);
     await host.call(host.client.session.wait({ sessionID: SESSION as never }));
+    if (await active(host)) {
+      idleSince = Date.now();
+      continue;
+    }
+    if (Date.now() - idleSince > STALLED_MS) {
+      throw new Error(`prompt ${messageId}: its turn has neither run nor ended for ${STALLED_MS / 1000} s`);
+    }
     // A turn resumed at boot may not have started yet.
-    if (!(await active(host))) await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
 
