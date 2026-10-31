@@ -1,8 +1,8 @@
 // Test only: fake pi-ai models, whose replies a function computes from the
 // conversation, so that an agent runs without an API key, deterministically.
 //
-//   vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
-//     anthropicProvider: () => fakeProvider('anthropic', 'claude-sonnet-5-5', (context) => say('hi')),
+//   vi.mock('@earendil-works/pi-ai/providers/all', () => ({
+//     builtinProviders: () => [fakeProvider('anthropic', 'claude-sonnet-5-5', (context) => say('hi'))],
 //   }));
 //
 // `respond(context)` gets each model call's context (its `messages`) and

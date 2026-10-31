@@ -25,11 +25,11 @@ const respond =
       .trim();
     return say(`${model} (${persona}): ${said.join(' / ')}`);
   };
-vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
-  openaiProvider: () => fakeProvider('openai', 'gpt-6-sol', respond('gpt')),
-}));
-vi.mock('@earendil-works/pi-ai/providers/anthropic', () => ({
-  anthropicProvider: () => fakeProvider('anthropic', 'claude-sonnet-5-5', respond('claude')),
+vi.mock('@earendil-works/pi-ai/providers/all', () => ({
+  builtinProviders: () => [
+    fakeProvider('openai', 'gpt-6-sol', respond('gpt')),
+    fakeProvider('anthropic', 'claude-sonnet-5-5', respond('claude')),
+  ],
 }));
 
 interface Settings {

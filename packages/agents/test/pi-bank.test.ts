@@ -8,9 +8,9 @@ import * as pi from 'restate-agents/pi';
 import { prompt } from './pi.ts';
 
 // The default model's provider, OpenAI's, is the teller.
-vi.mock('@earendil-works/pi-ai/providers/openai', async () => {
+vi.mock('@earendil-works/pi-ai/providers/all', async () => {
   const { fakeProvider, teller } = await import('./fakes/pi.ts');
-  return { openaiProvider: () => fakeProvider('openai', 'gpt-6-sol', teller) };
+  return { builtinProviders: () => [fakeProvider('openai', 'gpt-6-sol', teller)] };
 });
 
 /** The bank agent, after making a table of yours named as one of pi-durable's. */

@@ -19,8 +19,8 @@ const PLAN = { summary: 'A calculator', parts: ['parser', 'history'] };
 // the prompt, only then; chattily, with a sentence
 // around it; asked lazily, in prose, then in a code fence once told; asked to
 // refuse, in prose always.
-vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
-  openaiProvider: () =>
+vi.mock('@earendil-works/pi-ai/providers/all', () => ({
+  builtinProviders: () => [
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const asked = textOf(messages.at(-1)!.content);
       const prompted = textOf(messages.find((m) => m.role === 'user')!.content);
@@ -40,6 +40,7 @@ vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
       if (first === 'Plan wrongly') return say(JSON.stringify({ summary: 1 }));
       return say('A plan, in prose');
     }),
+  ],
 }));
 
 vi.mock('@anthropic-ai/sdk', () => import('./fakes/claude.ts'));

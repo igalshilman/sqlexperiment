@@ -5,7 +5,7 @@
 //
 // An agent's import of a model's module gets the teller's module instead
 // (the unit tests do the same with vi.mock):
-// - pi-ai's provider `teller`: pi.ts;
+// - pi-ai's providers, with the teller as the provider `teller`: pi-providers.ts;
 // - @anthropic-ai/sdk, of the Claude agent: claude.ts;
 // - @langchain/openai and @langchain/anthropic: langgraph.ts;
 // - DeepSeek's provider plugin: deepseek.ts;
@@ -18,7 +18,7 @@ const here = new URL('./', import.meta.url).href;
 const fake = (path: string) => new URL(path, import.meta.url).href;
 /** The fakes of packages, by specifier. */
 const packages: Record<string, string> = {
-  '@earendil-works/pi-ai/providers/teller': fake('pi.ts'),
+  '@earendil-works/pi-ai/providers/all': fake('pi-providers.ts'),
   '@anthropic-ai/sdk': fake('claude.ts'),
   '@langchain/openai': fake('langgraph.ts'),
   '@langchain/anthropic': fake('langgraph.ts'),

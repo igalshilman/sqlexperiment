@@ -12,8 +12,8 @@ import { sqlAttempt } from './support.ts';
 
 // Told "remember X", it calls remember; asked what it knows, it calls recall;
 // given a tool's result, it says it.
-vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
-  openaiProvider: () =>
+vi.mock('@earendil-works/pi-ai/providers/all', () => ({
+  builtinProviders: () => [
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const last = messages.at(-1)!;
       if (last.role === 'toolResult') return say(textOf(last.content));
@@ -21,6 +21,7 @@ vi.mock('@earendil-works/pi-ai/providers/openai', () => ({
       if (text.startsWith('remember ')) return callTools([['remember', { fact: text.slice('remember '.length) }]]);
       return callTools([['recall', {}]]);
     }),
+  ],
 }));
 
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS facts (fact TEXT PRIMARY KEY)';

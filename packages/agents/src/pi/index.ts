@@ -37,6 +37,7 @@ import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } 
 import { mkdir } from 'node:fs/promises';
 import { type Message, type MutableModels, Type } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import {
   AssistantEntry,
   createRegistry,
@@ -58,6 +59,7 @@ import {
   type Configure,
   configured,
   messagesHandler,
+  ModelError,
   modelOf,
   providerOf,
   nextPromptId,
@@ -112,18 +114,13 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 /** OpenAI's service tiers (its Responses API's `service_tier`). */
 export type ServiceTier = 'auto' | 'default' | 'fast' | 'flex' | 'priority';
 
-/** A registry of `provider`'s models, such as anthropicProvider() from @earendil-works/pi-ai/providers/anthropic. */
-async function modelsOf(provider: string): Promise<MutableModels> {
+/** A registry of `provider`'s models, such as anthropicProvider() of @earendil-works/pi-ai/providers/anthropic. */
+function modelsOf(provider: string): MutableModels {
+  // All of pi-ai's providers, imported as they are named: one a bundler sees.
+  const known = builtinProviders().find((p) => p.id === provider);
+  if (!known) throw new ModelError(`pi knows no model provider "${provider}": ${CHECK_MODEL}`);
   const models = createModels();
-  let module: Record<string, () => Parameters<MutableModels['setProvider']>[0]>;
-  try {
-    module = await import(`@earendil-works/pi-ai/providers/${provider}`);
-  } catch {
-    throw new restate.TerminalError(`pi knows no model provider "${provider}": ${CHECK_MODEL}`);
-  }
-  // amazon-bedrock: amazonBedrockProvider
-  const name = `${provider.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())}Provider`;
-  models.setProvider(module[name]!());
+  models.setProvider(known);
   return models;
 }
 
@@ -191,7 +188,7 @@ export const withPi = async <T>(
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
-  models ??= await modelsOf(providerOf(model)[0]);
+  models ??= modelsOf(providerOf(model)[0]);
   // A tool's error fails the attempt, which Restate retries (pi-durable would
   // hand it to the model): the work is cancelled, so the tool call stores no
   // result, and the retry runs it again with the same call id.
