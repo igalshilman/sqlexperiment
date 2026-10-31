@@ -211,3 +211,18 @@ pnpm --filter e2e bench                       # SQL in objects: latency, through
 ```
 
 To run an example, see [Run an example](packages/examples/README.md#run-an-example).
+
+### Packages
+
+In the workspace, node runs each package's TypeScript as it is. Packed
+(`pnpm pack`), `restate-objects` and `restate-agents` are JavaScript and its
+types, compiled into `dist/` (`pnpm --filter <package> build:ts`), ESM only,
+each module a file of its own; restate-objects carries its addon.
+restate-agents has each framework's packages as optional peer dependencies:
+a project installs those of the frameworks it imports
+([which](packages/agents/README.md#choose-a-framework)).
+
+```sh
+pnpm --filter restate-objects build:dist   # the addon a package ships: smaller and whole-program optimized (minutes)
+pnpm --filter e2e packaging                # both packed, linted, and installed as a user's project with pi alone
+```
