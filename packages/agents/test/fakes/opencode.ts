@@ -7,7 +7,8 @@
 // running gets an "interrupted" result, and OpenCode asks the model to
 // continue. The teller then retries such a transfer with `retryOf` naming the
 // call, so it moves the money once; reports a result that came before the
-// crash; and otherwise answers the prompt again.
+// crash; and otherwise answers the prompt again (as a retry of a transfer
+// whose input OpenCode had not stored in full, which may have run).
 //
 // It is the model `teller/teller` of OpenCode booted with `tellerPlugin`, as
 // `withTeller(openOpenCode)` does: with MODEL=teller/teller, an
@@ -61,6 +62,7 @@ export function reply(prompt: LanguageModelV3Message[], tools: string[]): Reply 
   // tools with new ids.
   const id = `call_${randomUUID()}`;
   let text = textOf(last);
+  let retryOf: string | undefined;
   if (CONTINUE.test(text)) {
     // The interrupted prompt, and the last tool result since.
     const at = prompt.findLastIndex((m) => m.role === 'user' && !CONTINUE.test(textOf(m)));
@@ -72,13 +74,14 @@ export function reply(prompt: LanguageModelV3Message[], tools: string[]): Reply 
         .findLast((c) => c.type === 'tool-call' && c.toolCallId === part.toolCallId);
       if (call?.type !== 'tool-call') throw new Error(`no tool call ${part.toolCallId}`);
       const input = { ...(call.input as Record<string, unknown>) };
-      // OpenCode stores a tool call when its input starts: one a crash
-      // interrupted before the input was complete never ran, so the prompt
-      // is answered again.
       if (call.toolName !== 'transfer' || 'amount' in input) {
         if (call.toolName === 'transfer') input.retryOf ??= call.toolCallId;
         return { call: { id, name: call.toolName, input } };
       }
+      // OpenCode stores a tool call when its input starts, and its whole
+      // input once the call runs: a crash between them leaves a call that
+      // may have run. The prompt is answered again, as a retry of it.
+      retryOf = call.toolCallId;
     } else if (result) {
       return { text: `Done: ${textOf(result)}` };
     }
@@ -87,7 +90,7 @@ export function reply(prompt: LanguageModelV3Message[], tools: string[]): Reply 
   const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
   if (move) {
     const [amount, from, to] = move.slice(1).map(Number);
-    return { text: 'On it.', call: { id, name: 'transfer', input: { from, to, amount } } };
+    return { text: 'On it.', call: { id, name: 'transfer', input: { from, to, amount, ...(retryOf && { retryOf }) } } };
   }
   if (/audit/i.test(text)) return { call: { id, name: 'audit', input: {} } };
   return { text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' };
