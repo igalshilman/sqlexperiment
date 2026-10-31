@@ -38,7 +38,7 @@ const recall = tool({
 // An object of your own: the agent's handler and view, and yours beside them.
 const assistant = object({
   name: 'assistant',
-  // A table of your own, beside the agent's: the facts, in each user's database.
+  // Your own table, in each user's database next to the agent's tables.
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],
   handlers: {
     chat: pi.chat({
@@ -53,7 +53,7 @@ const assistant = object({
   views: {
     messages: pi.messages(),
 
-    /** What the assistant knows about the user: a view, so it answers while a message is answered. */
+    /** What the assistant knows about the user. A view, so it answers even while the agent is busy. */
     facts: async (ctx) => {
       const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
       return rows.map(({ fact }) => fact);

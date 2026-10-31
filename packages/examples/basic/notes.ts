@@ -12,7 +12,7 @@ import * as restate from 'restate-sessions';
 
 const notes = restate.sessionObject({
   name: 'notes',
-  // The schema of each key's database: its steps, applied once per key (a step added later runs then).
+  // Creates each key's database. Each statement runs once per key; append new ones later as needed.
   schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
     add: async (ctx, note: string) => {
@@ -20,7 +20,7 @@ const notes = restate.sessionObject({
     },
   },
   views: {
-    /** A view: it reads while `add` writes; a key with no notes yet has none. */
+    /** A view only reads, so it can run while `add` is writing. */
     list: async (ctx) => {
       const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
       return rows.map(({ text }) => text);

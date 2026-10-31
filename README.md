@@ -1,24 +1,25 @@
 # Session objects and agents on Restate
 
-Two layers, the second on the first:
+This repository adds two libraries to the [Restate](https://restate.dev)
+TypeScript SDK:
 
-1. **[Session objects](#session-objects)**, sessions in short: Restate virtual
-   objects whose handlers run without journal replay, so a retried attempt
-   runs again against the state as stored, each key with its own
-   SQLite-compatible database, stored in the object's state
-   ([`restate-sessions`](packages/sessions/README.md)).
-2. **[AI agents](#ai-agents)** in those sessions, their conversation in the
-   session's database: pi, OpenCode, LangGraph, Claude and more
-   ([`restate-agents`](packages/agents/README.md)).
+- **[`restate-sessions`](packages/sessions/README.md)** gives every key of a
+  virtual object its own SQL database. We call these _session objects_, or
+  _sessions_ for short. The database lives in Restate's state, so there is no
+  separate database to run.
+- **[`restate-agents`](packages/agents/README.md)** runs AI agents inside
+  sessions, with each conversation stored in its session's database. It
+  supports pi, OpenCode, LangGraph, Claude and the DeepSeek Harness.
 
-New to them? [The tutorial](packages/template/README.md) goes one concept per
-file, from a virtual object to agents that delegate.
+If you are new to this, start with [the tutorial](packages/template/README.md).
+It introduces one idea per file, from a plain virtual object up to agents that
+hand work to each other.
 
 ## Session objects
 
-Each key of a session object, a Restate virtual object, has a SQLite database
-of its own, up to 10 GiB, kept in the object's state: no database to run.
-`restate-sessions` is the Restate SDK with sessions, `restate.sessionObject`
+A session object is a virtual object with a `schema` and a database,
+`ctx.db`. Each key (`alice`, `bob`, …) gets its own SQLite-compatible
+database of up to 10 GiB. This one keeps notes per user
 ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
@@ -26,7 +27,7 @@ import * as restate from 'restate-sessions';
 
 const notes = restate.sessionObject({
   name: 'notes',
-  // The schema of each key's database: its steps, applied once per key (a step added later runs then).
+  // Creates each key's database. Each statement runs once per key; append new ones later as needed.
   schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
     add: async (ctx, note: string) => {
@@ -34,7 +35,7 @@ const notes = restate.sessionObject({
     },
   },
   views: {
-    /** A view: it reads while `add` writes; a key with no notes yet has none. */
+    /** A view only reads, so it can run while `add` is writing. */
     list: async (ctx) => {
       const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
       return rows.map(({ text }) => text);
@@ -50,17 +51,30 @@ curl localhost:8080/notes/alice/add --json '"Buy milk"'
 curl localhost:8080/notes/alice/list
 ```
 
-A statement is durable when it returns. `ctx.db.transaction` groups
-statements, and the sends made in it (`tx.send`), into one commit. See
-[`restate-sessions`](packages/sessions/README.md).
+Handlers run one at a time per key, and they are the only ones that write.
+Views can run at any time, even while a handler is running, and only read
+what has been committed.
 
-## AI agents
+Each statement is durable once it returns. To commit several statements at
+once, put them in `ctx.db.transaction(tx => …)`. Messages you send with
+`tx.send` inside a transaction go out only if it commits.
 
-An agent is a session: its conversation is in its own database, so
-a crash, or a manager who takes a day, changes nothing. This one's tools are
-Restate itself: it looks an order up with a service, waits for a manager's
-approval, and refunds with a workflow
-([`examples/intermediate/support.ts`](packages/examples/intermediate/support.ts)):
+Session handlers don't replay a journal after a failure. Restate simply runs
+the handler again from the start, against whatever the database holds by
+then. That means a handler should be safe to run twice, for example by
+recording a request or transfer id with its writes. The
+[`restate-sessions` README](packages/sessions/README.md) covers this, and
+how the storage works.
+
+## Agents
+
+An agent is a session whose conversation is stored in its database. If the
+process crashes, or a tool waits a day for a person to answer, the agent
+picks up where it left off.
+
+Tools can be Restate itself. This support agent looks up orders with a
+service, waits for a manager to approve a refund, and runs the refund as a
+workflow ([`examples/intermediate/support.ts`](packages/examples/intermediate/support.ts)):
 
 ```ts
 const support = pi.agent({
@@ -88,16 +102,20 @@ curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get m
 curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
 ```
 
-The same agent runs on pi, OpenCode, LangGraph, Claude (the Anthropic SDK)
-or the DeepSeek Harness: see [`restate-agents`](packages/agents/README.md)
-and [the examples](packages/examples/README.md).
+The same agent runs on any of the supported frameworks. See
+[`restate-agents`](packages/agents/README.md) and
+[the examples](packages/examples/README.md).
 
-### Tools of its own
+### Your own tools and tables
 
-A tool is a function with the session's `ctx`. This assistant keeps what it
-learns about you in a table of its own SQL database, next to its
-conversation, and a view of yours serves that table, for a profile page
-say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
+A tool is a function that gets the session's `ctx`, so it can use the same
+database as the agent. This assistant stores what it learns about each user
+in a `facts` table next to the conversation, and exposes the table through a
+view that a profile page could call
+([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)). It is
+defined with `object` from `restate-agents`, which is `restate.sessionObject`
+plus the handlers every agent has (`status`, `stop`, `signal` and a few
+more):
 
 ```ts
 import { object, serve, tool } from 'restate-agents';
@@ -126,7 +144,7 @@ const recall = tool({
 
 const assistant = object({
   name: 'assistant',
-  // A table of your own, beside the agent's: the facts, in each user's database.
+  // Your own table, in each user's database next to the agent's tables.
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],
   handlers: {
     chat: pi.chat({
@@ -137,7 +155,7 @@ const assistant = object({
   views: {
     messages: pi.messages(),
 
-    /** What the assistant knows about the user: a view, so it answers while a message is answered. */
+    /** What the assistant knows about the user. A view, so it answers even while the agent is busy. */
     facts: async (ctx) => {
       const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
       return rows.map(({ fact }) => fact);
@@ -154,33 +172,33 @@ curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
 curl localhost:8080/assistant/alice/facts
 ```
 
-## Where things are
+## Repository layout
 
-A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
-packages, each with its README, and its tests in its `test/` directory:
+This is a pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) with
+five packages. Each has its own README, and its unit tests in `test/`.
 
-- [`packages/sessions`](packages/sessions/README.md): `restate-sessions`, session
-  objects (a SQL database per key, `ctx.db`) on the published SDK, with
-  its storage in a Rust addon, [`native/`](packages/sessions/native/README.md):
-  [the layers](packages/sessions/native/README.md#inside-the-layers), from
-  Restate's key/value store up to `ctx.db`.
-- [`packages/agents`](packages/agents/README.md): `restate-agents`,
-  pi, OpenCode, LangGraph, Claude and the DeepSeek Harness in sessions.
-- [`packages/template`](packages/template/README.md): a tutorial, one concept
-  per file: a virtual object, then a session, then agents.
-- [`packages/examples`](packages/examples/README.md): the examples, each a
-  small file you run with node.
-- [`packages/e2e`](packages/e2e/README.md): the tests against a real Restate
-  server: the agents and sessions through crashes, the context without
-  journal replay, Restate's own agent tools, and the SQL benchmark; and the
-  packages as a user installs them.
+- [`packages/sessions`](packages/sessions/README.md): `restate-sessions`.
+  The storage is a Rust addon in
+  [`native/`](packages/sessions/native/README.md), whose README walks through
+  [the layers](packages/sessions/native/README.md#inside-the-layers) from
+  Restate's key/value state up to `ctx.db`.
+- [`packages/agents`](packages/agents/README.md): `restate-agents`, with an
+  integration per framework.
+- [`packages/template`](packages/template/README.md): the tutorial.
+- [`packages/examples`](packages/examples/README.md): small examples, each a
+  single file you run with Node.
+- [`packages/e2e`](packages/e2e/README.md): tests against a real Restate
+  server (crashes, concurrency, Restate's own agent tools, a benchmark), and
+  a check that the packages install and work as a user would get them.
 
 ## Requirements
 
-|                | Version                                                                      |
-| -------------- | ---------------------------------------------------------------------------- |
-| Restate server | 1.8 or later                                                                 |
-| TypeScript SDK | 1.17.4, as published, with [`restate-sessions`](packages/sessions/README.md) |
+- Restate server 1.8 or later.
+- The published TypeScript SDK, version 1.17.4. `restate-sessions` pins it,
+  because it relies on some of the SDK's internals
+  ([why](packages/sessions/README.md#concurrent-awaits)).
+
+To run Restate in Docker:
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -189,48 +207,49 @@ docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-g
 
 ## Build and test
 
-Node 24 or later (the examples and tests are TypeScript that node runs as it
-is, and OpenCode needs 24), pnpm, and Rust for the addon:
+You need Node 24 or later (the code is TypeScript that Node runs directly,
+and OpenCode requires 24), pnpm, and Rust for the addon.
 
 ```sh
 pnpm install
-pnpm build        # the addon, with the state and SQL inside
-pnpm test         # every package's tests, which need no Restate server
+pnpm build        # builds the Rust addon
+pnpm test         # unit tests of every package; no Restate server needed
 pnpm lint         # tsc, oxlint, oxfmt --check, rustfmt and clippy
 pnpm format
 ```
 
-`pnpm --filter <package> test` runs one package's tests (add a filter, such
-as `langgraph`). The `e2e` package's scripts run against a Restate server:
-the 1.8.0 release that `@restatedev/restate-server` installs, or the binary
-`RESTATE_SERVER` names.
+`pnpm --filter <package> test` runs a single package's tests, and you can
+add a filter such as `langgraph`. The `e2e` scripts start a Restate server
+themselves: the 1.8.0 release from `@restatedev/restate-server`, or the binary
+in `RESTATE_SERVER` if you set it.
 
 ```sh
 pnpm --filter restate-agents test langgraph   # one framework's agent tests
-pnpm --filter e2e crash                       # the agents and sessions through crashes
-pnpm --filter e2e concurrency                 # the context without journal replay
+pnpm --filter e2e crash                       # agents and sessions through crashes
+pnpm --filter e2e concurrency                 # concurrent awaits without journal replay
 pnpm --filter e2e tools                       # Restate's own agent tools
-pnpm --filter e2e bench                       # SQL in sessions: latency, throughput and stored bytes
+pnpm --filter e2e bench                       # latency, throughput and storage size
 ```
 
 To run an example, see [Run an example](packages/examples/README.md#run-an-example).
 
-### Packages
+### Packaging
 
-In the workspace, node runs each package's TypeScript as it is. Packed
-(`pnpm pack`), `restate-sessions` and `restate-agents` are JavaScript and its
-types, compiled into `dist/` (`pnpm --filter <package> build:ts`), ESM only,
-each module a file of its own. restate-sessions' addon is a package per
-platform (`restate-sessions-<platform>`, in `packages/sessions/npm`), which it
-depends on optionally: a package manager installs its machine's alone. CI
-builds them for Linux (x64 and arm64, glibc 2.35 or later) and macOS on Apple
-silicon, packs every package, and installs them on each
-([`packages.yml`](.github/workflows/packages.yml)).
-restate-agents has each framework's packages as optional peer dependencies:
-a project installs those of the frameworks it imports
-([which](packages/agents/README.md#choose-a-framework)).
+Inside the workspace, Node runs each package's TypeScript sources directly.
+The published packages are compiled to ESM JavaScript with type declarations
+in `dist/` (`pnpm --filter <package> build:ts`).
+
+The addon ships as one npm package per platform
+(`restate-sessions-<platform>`, in `packages/sessions/npm`), and
+`restate-sessions` lists them as optional dependencies, so a package manager
+installs only the one for its machine. CI builds them for Linux (x64 and
+arm64, glibc 2.35 or later) and macOS on Apple silicon, and installs the
+packed packages on each
+([`packages.yml`](.github/workflows/packages.yml)). `restate-agents` lists
+each framework as an optional peer dependency, so a project installs only
+the frameworks it uses ([which ones](packages/agents/README.md#choose-a-framework)).
 
 ```sh
-pnpm --filter restate-sessions build:dist   # this machine's addon as it ships: smaller and whole-program optimized (minutes)
-pnpm --filter e2e packaging                # both packed, linted, and installed as a user's project with pi alone
+pnpm --filter restate-sessions build:dist   # the addon as published: smaller and fully optimized (takes minutes)
+pnpm --filter e2e packaging                 # pack, lint and install both packages into a fresh project
 ```
