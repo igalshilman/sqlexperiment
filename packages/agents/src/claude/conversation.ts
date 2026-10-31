@@ -59,7 +59,16 @@ export class Conversation {
    */
   async cancel(id: string, text: string): Promise<void> {
     this.#closed = true;
-    const calls = toolUses((await this.messages()).at(-1));
+    await this.close(id, text);
+  }
+
+  /**
+   * Close prompt `id` with `text` as its last reply and its answer, after
+   * `reply` if given (a reply that cannot go on: cut off, or declined): first
+   * a result of `text` for each tool call of the last reply that has none.
+   */
+  async close(id: string, text: string, reply?: MessageParam): Promise<void> {
+    const calls = toolUses(reply ?? (await this.messages()).at(-1));
     const results = calls.map((call) => ({
       type: 'tool_result' as const,
       tool_use_id: call.id,
@@ -67,7 +76,7 @@ export class Conversation {
       is_error: true,
     }));
     const closing: MessageParam[] = results.length > 0 ? [{ role: 'user', content: results }] : [];
-    await this.#store(id, [...closing, { role: 'assistant', content: text }], text);
+    await this.#store(id, [...(reply ? [reply] : []), ...closing, { role: 'assistant', content: text }], text);
   }
 
   /** Store `messages` of prompt `id`, and its `answer` if given, in one transaction. */

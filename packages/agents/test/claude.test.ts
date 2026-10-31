@@ -268,6 +268,24 @@ describe('the Claude agent', () => {
     expect(c.ledger.transfers.size).toBe(1);
   });
 
+  it('ends a prompt whose reply was cut off at maxTokens, its tool calls not run', async () => {
+    const c = conversation(claude.chat({ tools: bank('ClaudeAgent'), maxTokens: 100 }), 'cut');
+    const reply = teller.reply;
+    teller.reply = (messages) => ({ ...reply(messages), stop_reason: 'max_tokens' });
+    let failed: unknown;
+    try {
+      failed = await c.attempt('inv1', 'Please move 5 from 1 to 2').catch((error: unknown) => error);
+    } finally {
+      teller.reply = reply;
+    }
+    expect(failed).toBeInstanceOf(restate.TerminalError);
+    expect((failed as Error).message).toMatch(/maxTokens \(100\)/);
+    expect(c.ledger.calls).toEqual([]);
+    // The next message is answered, not the one cut off again.
+    expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(c.ledger.calls).toEqual([]);
+  });
+
   it('finishes an interrupted prompt before starting the next one', async () => {
     const c = conversation(prompt, 'c');
     await c.crash('inv1', 'Please move 1 from 0 to 1');

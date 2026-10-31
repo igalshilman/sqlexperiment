@@ -396,7 +396,7 @@ const STALLED_MS = 5_000;
  * attempt: the retry boots OpenCode again, which resumes the turns it claimed.
  */
 async function settled(host: Host, messageId: string): Promise<Outcome> {
-  for (let idleSince = Date.now(); ; ) {
+  for (let idleSince = Date.now(); ;) {
     const now = await outcome(host, messageId);
     if (now.state !== 'running') return now;
     await startInbox(host);

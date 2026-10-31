@@ -21,6 +21,8 @@
 //   runner hands it to the model as the tool's result).
 // - A message is answered once per invocation: its answer is stored with the
 //   model's last reply, and a retried attempt returns it.
+// - A reply cut off at `maxTokens`, or declined, ends the prompt: its tool
+//   calls do not run, and the handler fails with a terminal error.
 import * as restate from 'restate-objects';
 import type { SqlSession } from 'restate-objects';
 import Anthropic from '@anthropic-ai/sdk';
@@ -129,6 +131,12 @@ async function run(
   }
   for await (const message of runner) {
     const reply: Anthropic.Beta.Messages.BetaMessageParam = { role: 'assistant', content: message.content };
+    // A reply that cannot go on ends the prompt, whose tool calls do not run.
+    const stopped = stoppedShort(message, maxTokens);
+    if (stopped) {
+      await conversation.close(id, stopped.text, reply);
+      throw new restate.TerminalError(stopped.error);
+    }
     if (!message.content.some((c) => c.type === 'tool_use')) {
       await conversation.append(id, [reply], textOf(message.content));
       return;
@@ -141,6 +149,27 @@ async function run(
     if (results) await conversation.append(id, [results]);
     await toolCallEnded(ctx);
   }
+}
+
+/**
+ * Why the model's `message` stopped short of a reply to go on from: cut off
+ * at `maxTokens` (its text, or a tool call's input, unfinished), or declined.
+ */
+function stoppedShort(message: Anthropic.Beta.Messages.BetaMessage, maxTokens: number) {
+  if (message.stop_reason === 'max_tokens') {
+    return {
+      text: `Cut off: the reply reached ${maxTokens} tokens before it ended.`,
+      error: `the model's reply reached maxTokens (${maxTokens}) before it ended: raise the agent's maxTokens`,
+    };
+  }
+  if (message.stop_reason === 'refusal') {
+    const category = message.stop_details?.category;
+    return {
+      text: 'Declined: the model did not answer.',
+      error: `the model declined to answer${category ? ` (${category})` : ''}`,
+    };
+  }
+  return undefined;
 }
 
 /** `t` as a tool of the Anthropic SDK's tool runner: `t.run` checks the model's arguments itself. */
@@ -166,7 +195,10 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   tools?: (AnyTool | BetaRunnableTool)[];
   /** The client of the Anthropic API: by default one with ANTHROPIC_API_KEY. */
   client?: Anthropic;
-  /** The most tokens of each of the model's replies (default 4096). */
+  /**
+   * The most tokens of each of the model's replies (default 16000). A reply
+   * cut off there ends its prompt, which fails (a terminal error).
+   */
   maxTokens?: number;
   /** How much effort the model puts into each reply: more is more thorough, and slower (default: the model's). */
   effort?: Effort;
@@ -191,7 +223,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
 const answerOnce = async (
   ctx: restate.ObjectContext,
   text: string,
-  { model: named, system, tools = [], client, maxTokens = 4096, effort }: Options,
+  { model: named, system, tools = [], client, maxTokens = 16_000, effort }: Options,
 ): Promise<string> => {
   const agent = {
     client: client ?? (shared ??= new Anthropic()),

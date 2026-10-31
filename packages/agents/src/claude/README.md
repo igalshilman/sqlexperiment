@@ -31,7 +31,7 @@ await serve(assistant);
 | `tools`     | `tool()`s and Restate's tools of `restate-agents`, or the SDK's runnable tools (such as `betaZodTool`)                                                         |
 | `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
 | `client`    | The Anthropic client (a base URL or a proxy of your own, say); by default one with `ANTHROPIC_API_KEY`                                                         |
-| `maxTokens` | The most tokens of each of the model's replies (default 4096)                                                                                                  |
+| `maxTokens` | The most tokens of each of the model's replies (default 16000): a reply cut off there fails its message (a terminal error)                                     |
 | `effort`    | How much effort the model puts into each reply: `low`, `medium`, `high`, `xhigh` or `max` (default: the model's)                                               |
 
 For an object of your own, `claude.chat(options)` and `claude.messages()`
