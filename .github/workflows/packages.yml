@@ -1,0 +1,106 @@
+# The packages as published: restate-objects' addon built for each platform it
+# ships (packages/objects/src/platform.ts), each into its package
+# (restate-objects-<platform>), then every package packed and installed with
+# npm on each platform (packages/e2e/packaging.ts).
+#
+# The tarballs are the run's `packages` artifact; nothing is published yet.
+# Run it by hand from the Actions tab (workflow_dispatch).
+name: packages
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - packages/objects/**
+      - packages/agents/**
+      - packages/e2e/packaging.ts
+      - package.json
+      - pnpm-workspace.yaml
+      - pnpm-lock.yaml
+      - .github/workflows/packages.yml
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The addon, as its package ships it (cargo's `dist` profile), each on a
+  # runner of its platform. Linux builds on Ubuntu 22.04: it runs on glibc
+  # 2.35 or later.
+  addon:
+    strategy:
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            runner: ubuntu-22.04
+          - platform: linux-arm64-gnu
+            runner: ubuntu-22.04-arm
+          - platform: darwin-arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/objects/native
+      - run: cargo build --locked --profile dist --manifest-path packages/objects/native/Cargo.toml
+      - run: cp packages/objects/native/target/dist/librestate_objects.$([ "$RUNNER_OS" = macOS ] && echo dylib || echo so) objects.node
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ matrix.platform }}
+          path: objects.node
+          if-no-files-found: error
+
+  # Every package packed, each platform's addon in its own.
+  pack:
+    needs: addon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: addon-*
+          path: addons
+      - name: Each addon into its package
+        run: |
+          for addon in addons/addon-*; do mv "$addon/objects.node" "packages/objects/npm/${addon#addons/addon-}/"; done
+          for package in packages/objects/npm/*/; do test -f "$package/objects.node" || { echo "no addon in $package"; exit 1; }; done
+      - run: pnpm --filter restate-objects --filter restate-agents --filter './packages/objects/npm/*' pack --pack-destination "$PWD/packages-out"
+      - run: ls -l packages-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages-out/*.tgz
+          if-no-files-found: error
+
+  # The tarballs installed with npm into a new project, on each platform: npm
+  # picks its addon, which opens a database (packages/e2e/packaging.ts).
+  install:
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-14]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages-out
+      - run: PACKAGES="$PWD/packages-out" pnpm --filter e2e packaging
