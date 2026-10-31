@@ -411,7 +411,7 @@ test("calls: a typed one takes its handler's serdes; a literal one JSON, or thos
   const ctx = contextOf(sdk, memoryDatabase());
   await ctx.rpc(bytes, 'b').echo(new Uint8Array([1]));
   await ctx.rpc({ service: 'bytes', key: 'b', handler: 'echo', input: 'x' });
-  await ctx.rpc({ service: 'bytes', key: 'b', handler: 'echo', input: 'y', inputSerde: restate.serde.binary as never });
+  await ctx.rpc({ service: 'bytes', key: 'b', handler: 'echo', input: 'y', inputSerde: restate.serde.binary });
   assert.deepEqual(
     made.map((c) => [c.inputSerde, c.outputSerde]),
     [
