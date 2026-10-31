@@ -299,8 +299,8 @@ together with the others (`pnpm --filter e2e serve`, or
 9080, or `PORT`:
 
 - [`ledger.ts`](test/ledger.ts): accounts and transfers, deduped by transfer id.
-- [`shop.ts`](test/shop.ts): a Warehouse object per SKU and an Orders object per
-  order, each with its own database, over RPC. Placing an order reserves stock
+- [`shop.ts`](test/shop.ts): two session objects calling each other, a
+  Warehouse per SKU and Orders per order, each key with its own database. Placing an order reserves stock
   (a call) and schedules its expiry (a delayed send); paying commits the
   stock, and an unpaid order releases it when it expires.
 
