@@ -18,3 +18,7 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
   scripted model (`pnpm --filter e2e tools`).
 - [`bench.ts`](bench.ts): SQL in objects: latency, throughput and stored
   bytes, for databases up to 100 MB (`pnpm --filter e2e bench [out.json]`).
+- [`packaging.ts`](packaging.ts): the packages as a user installs them,
+  without a Restate server: packed, linted (publint, Are the Types Wrong?),
+  and installed with npm into a project with pi alone, whose agent runs and
+  type-checks (`pnpm --filter e2e packaging`).
