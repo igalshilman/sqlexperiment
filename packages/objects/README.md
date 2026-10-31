@@ -71,14 +71,14 @@ service, is retried.
 **The schema.** `schema` in `restate.object` is the steps that make each
 key's database, in order: statements, or async functions of the transaction
 (to move data). They are applied once per key, in one transaction, when a
-handler of the key first opens its database; the table `restate_schema`
-keeps how far each database got, so a step added later (a column, an index)
-runs on each key's database once, as that key is next opened. A step never
-changes once it ran: a change is a step of its own. A shared handler applies
-the steps its key lacks in its own session, which stores nothing: a key never
-written reads as empty tables. Tables whose names start with `restate_` are
-Restate's (`restate_schema`, and those of the agents of restate-agents): name
-yours otherwise.
+handler of the key first opens its database. How far each database got is
+a record beside its tables, in none of them, committed with the steps, so a
+step added later (a column, an index) runs on each key's database once, as
+that key is next opened. A step never changes once it ran: a change is a
+step of its own. A shared handler applies the steps its key lacks in its own
+session, which stores nothing: a key never written reads as empty tables.
+The database holds your tables, and those of the libraries you run in it:
+restate-agents names its agents' tables `restate_…`, so name yours otherwise.
 
 **Sends that commit with the SQL.** A send made with `tx`, the transaction's
 send clients, is made once the transaction commits, and only then:

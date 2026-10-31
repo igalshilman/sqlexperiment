@@ -2,9 +2,9 @@
 // steps, applied once per key by the handlers that open its database.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
-import { Schema } from 'restate-objects/internal';
+import { open, Schema } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
-import { sqlAttempt } from './support.ts';
+import { memoryStore, sqlAttempt } from './support.ts';
 
 /** A new object's name, its schema `steps`. */
 const objectWith = (...steps: restate.Step[]) => {
@@ -14,6 +14,16 @@ const objectWith = (...steps: restate.Step[]) => {
 };
 
 const NOTES = 'CREATE TABLE notes (text TEXT NOT NULL)';
+
+/** How many steps of the schema `name` the database in `map` has, as stored: its record. */
+async function stepsOf(map: Map<string, Uint8Array>, name: string) {
+  const db = await open(`schema-${randomUUID()}`, memoryStore(map));
+  const record = await db.record(`schema/${name}`);
+  await db.close();
+  return new TextDecoder().decode(record);
+}
+
+const TABLES = "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name";
 
 /** A step of data: the notes so far are done. */
 const done = (tx: restate.SqlDatabase) => tx.execute('UPDATE notes SET done = 1');
@@ -25,7 +35,10 @@ describe("an object's schema", () => {
     const first = sqlAttempt({ map, service });
     await first.end(() => first.db.execute("INSERT INTO notes VALUES ('milk')"));
     const later = sqlAttempt({ map, service, id: 'later' });
-    expect(await later.end(() => later.db.query('SELECT name, version FROM restate_schema'))).toEqual([[service, 1]]);
+    // The database holds the object's tables, and only them: how far the
+    // schema got is a record beside them.
+    expect(await later.end(() => later.db.query(TABLES))).toEqual([['notes']]);
+    expect(await stepsOf(map, service)).toBe('1');
   });
 
   it('runs a step added later on each existing database, once', async () => {
@@ -65,15 +78,20 @@ describe("a library's schema", () => {
     const service = objectWith(NOTES);
     const map = new Map<string, Uint8Array>();
     const attempt = sqlAttempt({ map, service });
-    const versions = await attempt.end(async () => {
+    const tables = await attempt.end(async () => {
       await LIBRARY.ensure(attempt.db);
       await attempt.db.execute("INSERT INTO library_items VALUES ('a')");
-      return attempt.db.query('SELECT name, version FROM restate_schema ORDER BY name');
+      return attempt.db.query(TABLES);
     });
-    expect(versions).toEqual([
-      ['library', 1],
-      [service, 1],
-    ]);
+    expect(tables).toEqual([['library_items'], ['notes']]);
+    expect([await stepsOf(map, 'library'), await stepsOf(map, service)]).toEqual(['1', '1']);
+  });
+
+  it('is applied once when ensured twice at once', async () => {
+    const map = new Map<string, Uint8Array>();
+    const attempt = sqlAttempt({ map });
+    await attempt.end(() => Promise.all([LIBRARY.ensure(attempt.db), LIBRARY.ensure(attempt.db)]));
+    expect(await stepsOf(map, 'library')).toBe('1');
   });
 
   it('is a shared handler’s own: empty, and stored nowhere', async () => {
