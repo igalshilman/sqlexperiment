@@ -602,7 +602,7 @@ impl World {
         };
         let session = text(Session::open(self.store.clone(), setup).await)?;
         for tick in 0..3 {
-            let ops = [Op::Effects(format!("tick {tick}").into())];
+            let ops = [Op::Record("outbox", format!("tick {tick}").into())];
             text(session.flush(&ops).await)?;
         }
         // The flushes' collections list S3 only around a promotion: one
@@ -693,7 +693,7 @@ fn trace(line: impl FnOnce() -> String) {
 
 fn describe(op: &Op) -> String {
     match op {
-        Op::Effects(value) => format!("set effects to {} bytes", value.len()),
+        Op::Record(name, value) => format!("set {name:?} to {} bytes", value.len()),
         Op::Write(index, Some(image)) => format!("write page {index}: {:02x?}", &image[..4]),
         Op::Write(index, None) => format!("hole page {index}"),
         Op::SetLen(len) => format!("set_len {len}"),

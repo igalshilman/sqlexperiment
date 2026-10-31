@@ -91,8 +91,9 @@ ctx.transaction(async ({ db, tx }) => {
 });
 ```
 
-The sends commit with the transaction, in the same tail entry: the record
-`effects` holds them (opaque to the storage), as the database's outbox.
+The sends commit with the transaction, in the same tail entry: the
+database's record `outbox` holds them (beside its tables, opaque to the
+storage).
 Once the commit is done the SDK makes them, each with an idempotency key of
 the transaction, `transaction/<id>/<index>` (or the send's own key), with a
 random id of the transaction. Restate keeps an attempt's commands in the
@@ -136,7 +137,7 @@ the invocation started with it (lazy state, so an invocation does not start
 by loading every page). A set or clear is a state write, and returns at once.
 Restate keeps an attempt's writes, and its sends, in the order they were
 made: a crash loses a suffix of them, never a write without the ones before
-it. A transaction writes the pages it changed and its effects as one tail
+it. A transaction writes the pages it changed and its records as one tail
 entry under a key of its own, then the head, which names it: the commit
 point. Then one empty `ctx.run` waits until all of it is stored: a commit is
 one round trip. Whatever prefix a crash keeps, the stored head names only a

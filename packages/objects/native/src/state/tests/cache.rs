@@ -215,10 +215,12 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                     Err(error) => panic!("round {round}: {error}"),
                 }
             }
-            assert_eq!(reader.state.effects(), opened.effects());
+            for name in RECORDS {
+                assert_eq!(reader.state.record(name), opened.record(name));
+            }
             // Its mutations never flush.
             let keys = memory.keys();
-            let error = reader.flush(&[Op::Effects("reader".into())]).await;
+            let error = reader.flush(&[Op::Record("outbox", "reader".into())]).await;
             let error = error.unwrap_err().to_string();
             assert!(error.contains("a reader writes nothing"), "{error}");
             assert_eq!(memory.keys(), keys);
@@ -251,7 +253,7 @@ fn an_open_session_reads_its_state_while_another_flushes() -> Result<()> {
             model = model.applied(&ops);
             assert_eq!(opened.differs(&open).await?, None);
         }
-        let late = [Op::Effects("late".into())];
+        let late = [Op::Record("outbox", "late".into())];
         let error = open.flush(&late).await.unwrap_err().to_string();
         assert!(error.contains("another state flushed"), "{error}");
         drop(open);

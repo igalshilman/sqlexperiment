@@ -1,5 +1,5 @@
 //! The database's session (`Database`) under storage faults: what a
-//! failed call leaves, effects and their transaction under a crash, and a
+//! failed call leaves, records and their transaction under a crash, and a
 //! reader beside its owner.
 use super::fault::{Ended, every_failure, failpoint, probe, under};
 use super::host::StateSetup;
@@ -41,12 +41,12 @@ async fn insert_pair(session: &Database, i: i64) -> Result<()> {
     session.query_columns(&sql, None).await.map(drop)
 }
 
-/// What a commit of `pairs` pairs sets as its effects.
-fn effects(pairs: i64) -> Bytes {
+/// What a commit of `pairs` pairs sets as its record `outbox`.
+fn outbox(pairs: i64) -> Bytes {
     Bytes::from(format!("pairs {pairs}"))
 }
 
-/// The pairs a store holds and the effects, through a new session; its
+/// The pairs a store holds and its outbox, through a new session; its
 /// database checks out.
 async fn observe(store: Arc<dyn KvStore>) -> Result<(i64, Bytes)> {
     let session = open(store, None).await?;
@@ -57,12 +57,12 @@ async fn observe(store: Arc<dyn KvStore>) -> Result<(i64, Bytes)> {
         .query_columns("PRAGMA integrity_check", None)
         .await?;
     assert_eq!(check[0][0].to_string(), "ok");
-    let effects = session.effects().await?;
+    let outbox = session.record("outbox").await?;
     session.close().await;
-    Ok((rows[0][0].as_int().unwrap() / 2, effects))
+    Ok((rows[0][0].as_int().unwrap() / 2, outbox))
 }
 
-/// A store with 20 pairs, committed with their effects.
+/// A store with 20 pairs, committed with their outbox.
 async fn baseline() -> Result<MemoryKv> {
     let memory = MemoryKv::default();
     let session = open(Arc::new(memory.clone()), None).await?;
@@ -72,7 +72,7 @@ async fn baseline() -> Result<MemoryKv> {
     for i in 0..20 {
         insert_pair(&session, i).await?;
     }
-    session.commit(Some(effects(20))).await?;
+    session.commit([("outbox".into(), outbox(20))]).await?;
     // More flushes: tail entries over the checkpoint, read from the store.
     session.query_columns("CREATE TABLE a(x)", None).await?;
     for k in 0..4 {
@@ -90,19 +90,19 @@ enum Call {
     Read,
     Write,
     Begin,
-    CommitWithEffects,
-    CommitEffectsAlone,
+    CommitWithRecord,
+    CommitRecordAlone,
     Rollback,
 }
 
 impl Call {
     async fn prepare(self, session: &Database) -> Result<()> {
         match self {
-            Call::CommitWithEffects | Call::Rollback => {
+            Call::CommitWithRecord | Call::Rollback => {
                 session.begin().await?;
                 insert_pair(session, 20).await
             }
-            Call::CommitEffectsAlone => session.begin().await,
+            Call::CommitRecordAlone => session.begin().await,
             _ => Ok(()),
         }
     }
@@ -115,40 +115,44 @@ impl Call {
             }
             Call::Write => insert_pair(session, 20).await,
             Call::Begin => session.begin().await,
-            Call::CommitWithEffects => session.commit(Some(effects(21))).await,
-            Call::CommitEffectsAlone => session.commit(Some(Bytes::from("sent"))).await,
+            Call::CommitWithRecord => session.commit([("outbox".into(), outbox(21))]).await,
+            Call::CommitRecordAlone => {
+                session
+                    .commit([("outbox".into(), Bytes::from("sent"))])
+                    .await
+            }
             Call::Rollback => session.rollback().await,
         }
     }
 
-    /// The pairs and effects once the call succeeded.
+    /// The pairs and the outbox once the call succeeded.
     fn new_state(self) -> (i64, Bytes) {
         match self {
-            Call::Write => (21, effects(20)),
-            Call::CommitWithEffects => (21, effects(21)),
-            Call::CommitEffectsAlone => (20, Bytes::from("sent")),
-            _ => (20, effects(20)),
+            Call::Write => (21, outbox(20)),
+            Call::CommitWithRecord => (21, outbox(21)),
+            Call::CommitRecordAlone => (20, Bytes::from("sent")),
+            _ => (20, outbox(20)),
         }
     }
 }
 
 /// A storage error or a cancellation at any request of any call ends the
-/// session: it is no longer usable, its effects stay those of its last
+/// session: it is no longer usable, its outbox stays that of its last
 /// commit, later calls fail (a rollback has nothing to do), and `save` says
 /// so. The store holds the state before the call or, if the call wrote, the
-/// one after it, whatever a crash keeps, with the effects of that state.
+/// one after it, whatever a crash keeps, with the outbox of that state.
 #[test]
 fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
     futures::executor::block_on(async {
         let base = baseline().await?;
-        let old = (20, effects(20));
+        let old = (20, outbox(20));
         let mut cases = 0;
         for call in [
             Call::Read,
             Call::Write,
             Call::Begin,
-            Call::CommitWithEffects,
-            Call::CommitEffectsAlone,
+            Call::CommitWithRecord,
+            Call::CommitRecordAlone,
             Call::Rollback,
         ] {
             let events = {
@@ -176,9 +180,9 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
                 assert!(!session.is_usable(), "{case}: still usable");
                 match ended {
                     // A cancelled call ends the session outright.
-                    Ended::Cancelled => assert!(session.effects().await.is_err(), "{case}"),
+                    Ended::Cancelled => assert!(session.record("outbox").await.is_err(), "{case}"),
                     Ended::Returned(_) => {
-                        assert_eq!(session.effects().await?, old.1, "{case}: effects")
+                        assert_eq!(session.record("outbox").await?, old.1, "{case}: outbox")
                     }
                 }
                 assert!(
@@ -187,8 +191,11 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
                 );
                 assert!(session.begin().await.is_err(), "{case}");
                 assert!(
-                    session.commit(Some(Bytes::from("late"))).await.is_err(),
-                    "{case}: commits effects after the failure"
+                    session
+                        .commit([("outbox".into(), Bytes::from("late"))])
+                        .await
+                        .is_err(),
+                    "{case}: commits a record after the failure"
                 );
                 let cancelled = matches!(ended, Ended::Cancelled);
                 assert_eq!(
@@ -198,7 +205,7 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
                 );
                 let saved = session.save().await.unwrap_err().to_string();
                 assert!(saved.contains("the session ended"), "{case}: {saved}");
-                assert!(session.effects().await.is_err(), "{case}: closed");
+                assert!(session.record("outbox").await.is_err(), "{case}: closed");
 
                 let mut seen = vec![observe(Arc::new(memory.fork())).await?];
                 for kept in 0..=memory.unsynced().len() {
@@ -221,11 +228,11 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
     })
 }
 
-/// Crash a run of transactions, each committed with its effects, at every
+/// Crash a run of transactions, each committed with its outbox, at every
 /// sync, keeping each prefix of the writes the sync would have stored: the
-/// effects are always those of the rows beside them.
+/// outbox is always that of the rows beside it.
 #[test]
-fn effects_commit_with_their_transaction_under_a_crash_at_any_write() -> Result<()> {
+fn records_commit_with_their_transaction_under_a_crash_at_any_write() -> Result<()> {
     futures::executor::block_on(async {
         let mut cases = 0;
         for cached in [false, true] {
@@ -236,7 +243,7 @@ fn effects_commit_with_their_transaction_under_a_crash_at_any_write() -> Result<
                 cases += prefixes;
             }
         }
-        println!("session effects campaign: {cases} cases");
+        println!("session records campaign: {cases} cases");
         assert!(cases > 100, "{cases} cases");
         Ok(())
     })
@@ -261,7 +268,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
                     .query_columns("UPDATE t SET body = 'y' WHERE n < 0", None)
                     .await?;
             }
-            session.commit(Some(effects(i + 1))).await?;
+            session.commit([("outbox".into(), outbox(i + 1))]).await?;
             acknowledged = i + 1;
         }
         Result::Ok(())
@@ -285,7 +292,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
         );
         let expected = match pairs {
             0 => Bytes::new(),
-            pairs => effects(pairs),
+            pairs => outbox(pairs),
         };
         assert_eq!(seen, expected, "{case}");
         // It goes on. One of the crashes goes on through the owner's cache,
@@ -296,11 +303,13 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
         let session = open(store.clone(), through_cache).await?;
         session.begin().await?;
         insert_pair(&session, pairs).await?;
-        session.commit(Some(effects(pairs + 1))).await?;
+        session
+            .commit([("outbox".into(), outbox(pairs + 1))])
+            .await?;
         session.save().await?;
         assert_eq!(
             observe(store.clone()).await?,
-            (pairs + 1, effects(pairs + 1))
+            (pairs + 1, outbox(pairs + 1))
         );
         assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
     }
@@ -332,7 +341,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
         for i in 0..60 {
             insert_pair(&owner, i).await?;
         }
-        owner.commit(None).await?;
+        owner.commit([]).await?;
         owner.query_columns("CREATE TABLE a(x)", None).await?;
         for k in 0..4 {
             owner

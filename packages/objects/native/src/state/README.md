@@ -3,10 +3,11 @@
 The storage of an object's database, over an asynchronous key/value store,
 for namespaces with one owner at a time: the state of a Restate object
 without Restate's journal (`journalReplay: false`). It keeps one paged
-**file** (4 KiB pages, read and written at random), the database's, and the
-**effects** committed with it (a small whole value). The state is read; it
-changes only through a **mutation**, an owned value that collects the pages
-written and the effects set, and a **flush** makes everything in the
+**file** (4 KiB pages, read and written at random), the database's, and
+**records** committed with it (whole values by name, which the host keeps
+beside the SQL, such as its outbox). The state is read; it changes only
+through a **mutation**, an owned value that collects the pages written and
+the records set, and a **flush** makes everything in the
 mutation durable at once, in one round trip. It needs only `get`, `put`,
 `delete` and `sync` from the backend, and a listing of its keys to collect
 the garbage. It is a private module of the addon's crate, for the
@@ -28,14 +29,14 @@ let cache = PageCache::open(PageCacheConfig::new(256 << 20, 8 << 30)).await?;
 let state = State::open(store).cached(&cache, "object-42").await?;
 let mut mutation = state.mutation();
 mutation.write(0, Some(page))?;
-mutation.set_effects("step 7".into())?;
-mutation.flush().await?; // the page and the effects, durable together
+mutation.set_record("outbox", "sends".into())?;
+mutation.flush().await?; // the page and the record, durable together
 ```
 
 Nothing is durable before `Mutation::flush`, and then everything in that
 mutation is, at once: its tail entry, then the head that names it, in one
 round trip. A flush consumes the mutation; a mutation dropped instead
-discards its writes. The state shows what was flushed (`state.effects()`,
+discards its writes. The state shows what was flushed (`state.record(name)`,
 `state.file().read(page)`), never what a mutation holds. The host must
 guarantee one owner per namespace. A failed or cancelled flush ends the
 state (`is_usable()` returns false): its outcome is unknown, so settle

@@ -4,7 +4,7 @@ Its host is an object without Restate's journal: a key, its own database,
 and calls to other objects or services, with at-least-once delivery. The
 namespace is all the object keeps, and the state is how it reaches the store:
 the database (the `sql` module's `Database`) flushes a mutation, the pages
-its SQL changed and the effects, in one put, at every commit, as SQLite
+its SQL changed and the records set, in one put, at every commit, as SQLite
 does. The sections on SQL describe the `sql` module, which keeps its
 engine's state private until it commits.
 
@@ -33,11 +33,12 @@ collection. The encodings are in [FORMAT.md](FORMAT.md).
 
 ## Records and the one rule
 
-**Records** are whole named values, of which the state keeps one, the
-effects: in the manifest up to `inline_record_bytes` (1 KiB), and a value of
-its own in a pack when larger, written by the first checkpoint after it
-changes. The format names its records and files, as the database's file
-`db` and the record `effects`.
+**Records** are whole named values, which the host keeps beside the SQL
+(the SDK, its outbox): in the manifest up to `inline_record_bytes` (1 KiB),
+and a value of its own in a pack when larger, written by the first
+checkpoint after it changes. The format names its records and files, as the
+database's file `db`; a name, once set, stays, and an empty value reads as
+one never set.
 
 **One rule.** A tail entry or a pack is stored before the first head that
 names it, and dropped only once no head that a state may still hold needs
@@ -45,7 +46,7 @@ it. The store keeps a prefix of the writes, so whatever a crash keeps, the
 head stored names only what is stored. Nothing a head names is ever
 overwritten, so there is nothing to repair after a crash.
 
-## Compression and effects
+## Compression and records
 
 **Compression.** zstd does the work twice. A frame compresses its 4 pages
 together, so a B-tree page compresses against its neighbours. And a page in the tail, or a patch, uses the page as
@@ -53,11 +54,11 @@ the checkpoint holds it as a reference prefix ("patch from"), so a flush
 that changes a few bytes of a page writes about those bytes plus the
 frame's overhead.
 
-**Effects.** A host may commit bytes of its own with a transaction, as its
-effects (`Database::commit(effects)`): set in the same mutation, they ride
+**Records.** A host may commit values of its own with a transaction, as
+records (`Database::commit(records)`): set in the same mutation, they ride
 in the same tail entry, so they are durable exactly when the transaction
 is, and stay until a later commit replaces them. The Restate SDKs keep a
-transaction's sends there, as its outbox, and make them once it is
+transaction's sends in the record `outbox`, and make them once it is
 committed. A mutation that changes nothing writes nothing.
 
 ## When a flush happens
@@ -65,8 +66,8 @@ committed. A mutation that changes nothing writes nothing.
 At every commit of the database, and only then: each call of a `Database`
 that leaves no SQL transaction open (a statement on its own, or the
 `COMMIT` of a transaction) moves the pages its SQL committed into a
-mutation, as writes to the file `db`, with the effects of
-`commit(effects)` if any, and flushes it, in one tail entry, before the
+mutation, as writes to the file `db`, with the records of
+`commit(records)`, and flushes it, in one tail entry, before the
 call returns. SQL statements in a transaction change only the engine's
 private view. The pages stay private until the flush succeeds; a commit
 that fails ends the session. `Database::transaction(body)` wraps
@@ -74,21 +75,21 @@ that fails ends the session. `Database::transaction(body)` wraps
 
 A continuing session moves its view forward locally instead of reopening:
 the flush's entry joins the state's overlay. Each flush costs one round
-trip. Flushes are sequential: a second flush of the state is refused while
-one runs, and each builds on the head of the one before, once its sync
+trip. Flushes are sequential: the owner's calls hold its session one at a
+time, and each builds on the head of the one before, once its sync
 returned.
 
 **Retries without a journal.** With at-least-once delivery, a handler that
 fails after a flush runs again on top of it. Two patterns keep that correct:
 
 - **Idempotent requests.** In the same SQL transaction as the request's
-  effects, write its id, and stop if it was already there:
+  writes, record its id, and stop if it was already there:
   a plain `INSERT` into a table keyed by the id fails on a duplicate, which
   rolls back `Database::transaction`, or `ON CONFLICT DO NOTHING RETURNING id`
-  returns no row for one. The dedupe row and the effects become durable
+  returns no row for one. The dedupe row and the writes become durable
   together, because they are one tail entry.
 - **Outbox for calls.** Flush the intent to call another object or service
-  with the transaction, as effects, then make the call, and drop it from a
+  with the transaction, as a record, then make the call, and drop it from a
   later flush once the call is stored. A retry finds it and calls again, so
   the callee must deduplicate too.
 
@@ -103,8 +104,8 @@ choice that does not lose acknowledged work when a later step fails.
 
 A reader (`State::open(store).reader()`) reads a namespace that another owns,
 alongside it, such as a virtual object's shared handler beside the exclusive
-one. It flushes nothing: its SQL changes stay in the session, and it
-commits no effects. It reads the head it opened, its
+one. It flushes nothing: its SQL changes and the records it commits stay in
+the session. It reads the head it opened, its
 checkpoint and its tail, and packs never change, so it reads one consistent
 state, however the owner flushes meanwhile: snapshot isolation, with no
 check and no retry. The packs and the tail its head names stay until the

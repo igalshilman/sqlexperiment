@@ -415,7 +415,7 @@ fn a_second_concurrent_writer_is_refused() -> Result<()> {
 }
 
 #[test]
-fn effects_commit_with_their_transaction() -> Result<()> {
+fn records_commit_with_their_transaction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let db = Db::open(store.clone(), options(None)).await?;
@@ -425,15 +425,15 @@ fn effects_commit_with_their_transaction() -> Result<()> {
              CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)",
         )
         .await?;
-        assert!(db.effects().is_empty());
+        assert!(db.outbox().is_empty());
         let v0 = db.version();
-        // Effects commit even with a transaction that changes nothing...
+        // A record commits even with a transaction that changes nothing...
         db.execute("BEGIN").await?;
         db.query("SELECT * FROM p").await?;
         db.commit_with(Bytes::from_static(b"sends 1")).await?;
-        assert_eq!(db.effects(), &b"sends 1"[..]);
+        assert_eq!(db.outbox(), &b"sends 1"[..]);
         assert_eq!(db.version(), v0 + 1);
-        // ...but the same effects again, without changes, flush nothing.
+        // ...but the same record again, without changes, flushes nothing.
         db.execute("BEGIN").await?;
         db.commit_with(Bytes::from_static(b"sends 1")).await?;
         assert_eq!(db.version(), v0 + 1);
@@ -446,8 +446,8 @@ fn effects_commit_with_their_transaction() -> Result<()> {
                 .is_err()
         );
         db.execute("ROLLBACK").await?;
-        assert_eq!(db.effects(), &b"sends 1"[..]);
-        // Later flushes without effects keep them.
+        assert_eq!(db.outbox(), &b"sends 1"[..]);
+        // Later flushes without records keep it.
         for i in 0..10 {
             db.execute(&format!("INSERT INTO p VALUES({i})")).await?;
         }
@@ -456,18 +456,18 @@ fn effects_commit_with_their_transaction() -> Result<()> {
         store.crash();
 
         let db = Db::open(store.clone(), options(None)).await?;
-        assert_eq!(db.effects(), &b"sends 1"[..]);
+        assert_eq!(db.outbox(), &b"sends 1"[..]);
         assert_eq!(db.version(), v0 + 11);
         assert_eq!(
             db.query("PRAGMA integrity_check").await?[0][0].to_string(),
             "ok"
         );
-        // An empty transaction clears them.
+        // An empty value clears it.
         db.execute("BEGIN").await?;
         db.commit_with(Bytes::new()).await?;
         drop(db);
         let db = Db::open(store.clone(), options(None)).await?;
-        assert!(db.effects().is_empty());
+        assert!(db.outbox().is_empty());
         Ok(())
     })
 }

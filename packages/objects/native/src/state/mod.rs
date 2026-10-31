@@ -1,15 +1,16 @@
 //! The storage of an object's database, over an asynchronous key/value
-//! store: the database's file, 4 KiB pages, and its effects, changed
+//! store: the database's file, 4 KiB pages, and its records, changed
 //! through a mutation in memory, which a flush makes durable at once.
 //!
 //! A [`State`] is one namespace in a KV store: the state of a Restate object
 //! without Restate's journal, which keeps writes in issue order and makes
 //! them durable at a sync (see [`kv`]). It needs no multi-key transaction or
 //! compare-and-swap; only collecting garbage lists keys. It holds the
-//! database's [`File`], pages read and written at random, and its effects,
-//! a whole value (the outbox of the sends committed with the rows). The state
-//! is read; it changes only through a [`Mutation`] ([`State::mutation`]): the
-//! pages written and the effects set there become durable together at
+//! database's [`File`], pages read and written at random, and its records,
+//! whole values by name, which the host keeps beside the SQL (such as the
+//! outbox of the sends committed with the rows). The state is read; it
+//! changes only through a [`Mutation`] ([`State::mutation`]): the pages
+//! written and the records set there become durable together at
 //! [`Mutation::flush`], and a mutation dropped discards them.
 //! [`crate::sql::Database`] makes one after each SQL transaction.
 //!
@@ -20,7 +21,7 @@
 //! puts its mutation as one entry of a *tail* in Restate, then the *head*,
 //! and syncs once: one round trip, which Restate fences. Now and then
 //! ([`StateOptions::checkpoint_entries`]), a flush first writes the state as
-//! a *checkpoint*: the frames of pages the tail changed, and the values it
+//! a *checkpoint*: the frames of pages the tail changed, and the records it
 //! set, into one *pack*, and a manifest of where every frame and value is,
 //! in Restate. Its head then names the checkpoint, and drops the tail it
 //! covered. Packs are tiered: a checkpoint's pack goes to *L0*, in Restate's
@@ -32,11 +33,11 @@
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | A mutation | Pages written and effects set in it, in memory | No: dropping it discards them |
+//! | A mutation | Pages written and records set in it, in memory | No: dropping it discards them |
 //! | Head | `v22/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
-//! | Tail | `v22/tail/<version>/<part>`: the mutation a flush made: effects, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
-//! | Manifests | `v22/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and values are | Yes, while the head names its checkpoint |
-//! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large values | Yes, until no checkpoint the head names needs it |
+//! | Tail | `v22/tail/<version>/<part>`: the mutation a flush made: records, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
+//! | Manifests | `v22/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and records are | Yes, while the head names its checkpoint |
+//! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large records | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -68,16 +69,18 @@
 //! let state = State::open(store).await?;
 //! let mut mutation = state.mutation();
 //! mutation.write(0, Some(vec![7; 4096].into()))?;
-//! mutation.set_effects("sends".into())?;
-//! mutation.flush().await?; // the page and the effects, durable together
+//! mutation.set_record("outbox", "sends".into())?;
+//! mutation.flush().await?; // the page and the record, durable together
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # Limits
 //!
-//! The file holds at most [`MAX_FILE_BYTES`], the effects
-//! [`MAX_RECORD_BYTES`]. The backend is assumed
+//! The file holds at most [`MAX_FILE_BYTES`], a record
+//! [`MAX_RECORD_BYTES`], under a name of at most [`MAX_NAME_BYTES`]. A state
+//! holds at most 65,535 records, and a name once set stays: setting it empty
+//! frees nothing. The backend is assumed
 //! to return what was stored; decoding checks structure and bounds, and
 //! zstd frames carry a checksum. Use a fresh, dedicated namespace; no
 //! migration or format discovery is implemented. The simulated stores
@@ -93,7 +96,7 @@ mod tail;
 mod zstd;
 
 pub use cache::{PageCache, PageCacheConfig};
-pub(crate) use format::{MAX_FILE_BYTES, MAX_RECORD_BYTES};
+pub(crate) use format::{MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_RECORD_BYTES};
 pub(crate) use store::FlushReport;
 #[cfg(test)]
 pub(crate) use {
@@ -123,10 +126,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// Bytes of a page of the [`File`].
 pub(crate) const PAGE_SIZE: usize = 4096;
 
-/// The name the format stores the database's file under.
+/// The name the format stores the database's file under: no record's.
 const DB: &str = "db";
-/// The name the format stores the effects under, a record.
-const EFFECTS: &str = "effects";
 
 /// A page's 4096 bytes.
 pub(crate) type Page = Bytes;
@@ -143,8 +144,8 @@ pub struct StateOptions {
     /// smaller manifest, smaller ones cost a checkpoint less to rewrite. Set
     /// when the namespace is made; its head keeps it.
     pub frame_pages: u64,
-    /// Bytes of effects a checkpoint's manifest holds; larger ones are a
-    /// value of their own in the pack.
+    /// Bytes of a record a checkpoint's manifest holds; a larger one is a
+    /// value of its own in the pack.
     pub inline_record_bytes: usize,
     /// Every frame and patch of a file of at most this many
     /// pages, is fetched at open, alongside the manifest's values.
@@ -179,7 +180,7 @@ impl Default for StateOptions {
     }
 }
 
-/// One namespace's state: the database's file and its effects, as last
+/// One namespace's state: the database's file and its records, as last
 /// flushed. It is read here, and changed through a [`Mutation`]
 /// ([`Self::mutation`]), which [`Mutation::flush`] makes durable at once. A
 /// cheap handle; clones share it.
@@ -374,10 +375,10 @@ impl State {
         })
     }
 
-    /// The effects, as last flushed: empty if never set.
-    pub(crate) fn effects(&self) -> Bytes {
+    /// The record `name`, as last flushed: empty if never set.
+    pub(crate) fn record(&self, name: &str) -> Bytes {
         let snapshot = self.shared.snapshot();
-        snapshot.records().get(EFFECTS).cloned().unwrap_or_default()
+        snapshot.records().get(name).cloned().unwrap_or_default()
     }
 
     /// The database's file: 4 KiB pages, read here and written in a
@@ -437,7 +438,7 @@ impl State {
     }
 
     /// A new, empty mutation on this state: the pages written and the
-    /// effects set in it ([`Mutation::write`], [`Mutation::set_effects`])
+    /// records set in it ([`Mutation::write`], [`Mutation::set_record`])
     /// become durable together at [`Mutation::flush`]; dropping it discards
     /// them.
     pub(crate) fn mutation(&self) -> Mutation {
@@ -567,13 +568,13 @@ impl IntoFuture for Open {
     }
 }
 
-/// A change to a [`State`]: the pages written and the effects set since
+/// A change to a [`State`]: the pages written and the records set since
 /// [`State::mutation`] made it, in memory, which [`Self::flush`] makes
 /// durable together, atomically. There is no other way to change the state.
 /// A mutation dropped discards its writes.
 pub(crate) struct Mutation {
     shared: Arc<Shared>,
-    /// The effects, under their name in the format.
+    /// The records set, by name.
     records: store::Records,
     /// The file's writes, under its name in the format.
     files: store::Writes,
@@ -595,11 +596,12 @@ impl Mutation {
         self.checkpoint = true;
     }
 
-    /// Replace the effects with this mutation's flush. Refused, before the
-    /// mutation changes, are effects past [`MAX_RECORD_BYTES`].
-    pub(crate) fn set_effects(&mut self, effects: Bytes) -> Result<()> {
-        check_effects(&effects)?;
-        self.records.insert(EFFECTS.to_owned(), effects);
+    /// Replace the record `name` with `value` at this mutation's flush; an
+    /// empty value reads as one never set. Refused, before the mutation
+    /// changes, is a record [`check_record`] refuses.
+    pub(crate) fn set_record(&mut self, name: &str, value: Bytes) -> Result<()> {
+        check_record(name, &value)?;
+        self.records.insert(name.to_owned(), value);
         Ok(())
     }
 
@@ -658,7 +660,7 @@ impl Mutation {
         f(written);
     }
 
-    /// Make every page written and the effects set durable: as a tail
+    /// Make every page written and record set durable: as a tail
     /// entry, then the head, then one sync, in one round trip. Nothing
     /// changed: nothing is written. Refused, for writes the state cannot
     /// store, a flush writes nothing, and the state goes on. `Ok` holds what
@@ -730,7 +732,7 @@ impl Mutation {
 
 /// The database's file: 4 KiB pages, read at random from the state and
 /// written at random in a mutation, made durable by its flush with the
-/// effects. An absent page, never written or past the end, reads as `None`
+/// records. An absent page, never written or past the end, reads as `None`
 /// (zeros). A cheap handle.
 ///
 /// A page flushed is in the tail, a zstd frame of its own, until a
@@ -775,11 +777,15 @@ impl File {
     }
 }
 
-/// Refuse effects past [`MAX_RECORD_BYTES`].
-pub(crate) fn check_effects(effects: &[u8]) -> Result<()> {
-    if effects.len() > MAX_RECORD_BYTES {
-        let (len, max) = (effects.len(), MAX_RECORD_BYTES);
-        return Err(format!("effects of {len} bytes exceed {max}").into());
+/// Refuse a record no flush could store: a name that is empty, past
+/// [`MAX_NAME_BYTES`], or the file's; a value past [`MAX_RECORD_BYTES`].
+pub(crate) fn check_record(name: &str, value: &[u8]) -> Result<()> {
+    if name.is_empty() || name.len() > MAX_NAME_BYTES || name == DB {
+        return Err(format!("{name:?} cannot name a record").into());
+    }
+    if value.len() > MAX_RECORD_BYTES {
+        let (len, max) = (value.len(), MAX_RECORD_BYTES);
+        return Err(format!("the record {name:?} of {len} bytes exceeds {max}").into());
     }
     Ok(())
 }

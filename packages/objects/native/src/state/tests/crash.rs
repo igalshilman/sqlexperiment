@@ -38,13 +38,13 @@ fn changes(step: u64) -> Vec<Op> {
         _ => page(step),
     };
     let mut ops = vec![
-        Op::Effects(format!("step {step}").into_bytes().into()),
+        Op::Record("outbox", format!("step {step}").into_bytes().into()),
         Op::Write(step % 4, Some(image(&mut rng))),
         Op::Write(4 + step % 3, Some(image(&mut rng))),
         Op::Write(8 + step % 6, Some(image(&mut rng))),
     ];
     if step % 2 == 1 {
-        ops.push(Op::Effects(rng.bytes(600).into()));
+        ops.push(Op::Record("outbox", rng.bytes(600).into()));
     }
     if step % 3 == 2 {
         ops.push(Op::SetLen(512 * 9));
@@ -201,7 +201,10 @@ async fn crash_every_flush(packs: Option<MemoryBlobs>) -> Result<Vec<String>> {
                 assert_eq!(expected.differs(&reopened).await?, None, "{case}");
                 drop(reopened);
                 // A next flush, by a new owner, survives a crash.
-                let next = [Op::Effects("next".into()), Op::Write(9, Some(page(99)))];
+                let next = [
+                    Op::Record("outbox", "next".into()),
+                    Op::Write(9, Some(page(99))),
+                ];
                 let owner = cached.then(fresh_namespace);
                 let after = session(store.clone(), owner, packs.as_ref()).await?;
                 after.flush(&next).await?;

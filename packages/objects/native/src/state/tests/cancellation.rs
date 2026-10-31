@@ -37,6 +37,17 @@ fn poll_times<F: Future>(future: F, polls: usize) -> Option<F::Output> {
     })
 }
 
+/// Random changes to one record, and to the file. With another record, one
+/// left in an older pack moves at a checkpoint: a fetch that waits on the
+/// cache's disk threads, not on polls.
+fn random_ops(rng: &mut Rng, count: usize) -> Vec<Op> {
+    let one = |op| match op {
+        Op::Record(_, value) => Op::Record("outbox", value),
+        op => op,
+    };
+    (0..count).map(|_| one(Op::random(rng))).collect()
+}
+
 /// A store after a few flushes, and what it holds.
 async fn prepared() -> Result<(MemoryKv, Model)> {
     let memory = MemoryKv::default();
@@ -44,7 +55,7 @@ async fn prepared() -> Result<(MemoryKv, Model)> {
     let mut rng = Rng::new(0xca9ce1);
     for _ in 0..4 {
         let session = Session::open(Arc::new(memory.clone()), options(None)).await?;
-        let ops: Vec<Op> = (0..8).map(|_| Op::random(&mut rng)).collect();
+        let ops = random_ops(&mut rng, 8);
         session.flush(&ops).await?;
         model = model.applied(&ops);
     }
@@ -56,7 +67,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
     futures::executor::block_on(async {
         let (prepared, old) = prepared().await?;
         let mut rng = Rng::new(0xd20);
-        let ops: Vec<Op> = (0..12).map(|_| Op::random(&mut rng)).collect();
+        let ops = random_ops(&mut rng, 12);
         let new = old.applied(&ops);
         // Reopened by the owner, or after a crash.
         for (cached, crash) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -121,7 +132,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 assert_eq!(whole, head_queued && !crash, "{case}");
                 landed[usize::from(whole)] += 1;
                 // It goes on, durably.
-                let after = [Op::Effects("after".into())];
+                let after = [Op::Record("outbox", "after".into())];
                 reopened.flush(&after).await?;
                 drop(reopened);
                 memory.crash();

@@ -19,23 +19,23 @@ handler, which Restate runs once per key and fences, so a former attempt's
 writes never land after a newer one's. Shared handlers may open the same
 namespace as **readers** beside the owner.
 
-A namespace's state holds two values, named in the format:
+A namespace's state holds values of two kinds, named in the format:
 
-| Kind                 | What it is                                                          | Used for                        |
-| -------------------- | ------------------------------------------------------------------- | ------------------------------- |
-| **Record** `effects` | A whole value, up to 16 MiB, set and read whole                     | A request's effects (its sends) |
-| **File** `db`        | A paged file: 4 KiB pages, read and written at random, up to 10 GiB | The SQL database                |
+| Kind          | What it is                                                          | Used for                                               |
+| ------------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
+| **Records**   | Whole values by name, each up to 16 MiB, set and read whole         | What the host keeps beside the SQL, such as its outbox |
+| **File** `db` | A paged file: 4 KiB pages, read and written at random, up to 10 GiB | The SQL database                                       |
 
 **The state is read, never written in place.** A change goes into a
 **mutation**: an owned value that collects the pages written, the file
-resized and the effects set, in memory. A **flush**
+resized and the records set, in memory. A **flush**
 of the mutation makes all of it durable at once, atomically, in one round
 trip to Restate, or none of it; a mutation dropped instead discards it.
 
 ```rust,ignore
 let state = State::open(store).cached(&cache, "chat/42").await?;
 let mut mutation = state.mutation();
-mutation.set_effects(effects)?;
+mutation.set_record("outbox", sends)?;
 mutation.write(7, Some(page))?;
 mutation.flush().await?; // both durable together, or neither
 ```
@@ -53,8 +53,9 @@ What the state guarantees:
 **SQL on top.** The [SQL module](../../sql/README.md)'s `Database` runs a
 SQLite-compatible engine on the file `db`. Its statements change a private
 view; at each commit, it moves the pages the SQL committed into a mutation,
-with the effects of the request, and flushes it, so the database and the
-effects become durable together. It commits after every call that leaves no
+with the records the host committed with them, and flushes it, so the
+database and the records become durable together. It commits after every
+call that leaves no
 SQL transaction open.
 
 ## 2. The state over time: a sequence of mutations
@@ -68,13 +69,13 @@ state(n) = state(n − 1) + mutation(n)
 
 A chat agent's first turns, say:
 
-| Version | Mutation (one flush)                                   | State after                             |
-| ------- | ------------------------------------------------------ | --------------------------------------- |
-| 1       | `CREATE TABLE messages`: pages 0–1 of `db`             | An empty table                          |
-| 2       | Insert the user's message: page 1 of `db`              | 1 message                               |
-| 3       | Insert the model's reply: page 1; set record `effects` | 2 messages, and the effects of the turn |
-| 4       | Insert the next user's message: page 1                 | 3 messages                              |
-| …       | …                                                      | …                                       |
+| Version | Mutation (one flush)                                  | State after                           |
+| ------- | ----------------------------------------------------- | ------------------------------------- |
+| 1       | `CREATE TABLE messages`: pages 0–1 of `db`            | An empty table                        |
+| 2       | Insert the user's message: page 1 of `db`             | 1 message                             |
+| 3       | Insert the model's reply: page 1; set record `outbox` | 2 messages, and the sends of the turn |
+| 4       | Insert the next user's message: page 1                | 3 messages                            |
+| …       | …                                                     | …                                     |
 
 Stored as is, that sequence is cheap to write (a flush puts only its own
 mutation, often a few hundred bytes) but grows without end, and opening the
@@ -504,7 +505,7 @@ Per flush, with a warm cache:
 
 | Workload           | Database | Bytes put to Restate (tail + pack + manifest + head) | Stored in Restate | Keys  | Cold open and a point read |
 | ------------------ | -------- | ---------------------------------------------------- | ----------------- | ----- | -------------------------- |
-| Chat with effects  | 180 KiB  | 1175 (851 + 210 + 15 + 99)                           | 161 KiB           | 121   | 5 round trips, 48 gets     |
+| Chat with outbox   | 180 KiB  | 1175 (851 + 210 + 15 + 99)                           | 161 KiB           | 121   | 5 round trips, 48 gets     |
 | Small, update 1    | 20 KiB   | 326 (114 + 34 + 0 + 178)                             | 28 KiB            | 156   | 3 round trips, 26 gets     |
 | 10k rows, update 1 | 2.8 MiB  | 631                                                  | 1.2 MiB           | 153   | 5 round trips, 6 gets      |
 | 1M rows, update 1  | 274 MiB  | 859 (226 + 206 + 250 + 177)                          | 108 MiB           | 1,860 | 6 round trips, 8 gets      |
@@ -546,7 +547,7 @@ Per flush, with a warm cache, and against v20's packs all in S3:
 
 | Workload            | Bytes put to Restate per flush | v20, all in S3 | Stored in Restate | Stored in S3 | S3 Standard $ per million flushes, warm / cold | v20, warm |
 | ------------------- | ------------------------------ | -------------- | ----------------- | ------------ | ---------------------------------------------- | --------- |
-| Chat with effects   | 1177                           | 1938           | 161 KiB           | none         | $0 / $0                                        | $0.07     |
+| Chat with outbox    | 1177                           | 1938           | 161 KiB           | none         | $0 / $0                                        | $0.07     |
 | Small, update 1     | 327                            | 1734           | 28 KiB            | none         | $0 / $0                                        | $0.07     |
 | 10k rows, update 1  | 633                            | 436            | 1.2 MiB           | none         | $0 / $0                                        | $0.08     |
 | 100k rows, update 1 | 521                            | 426            | 81 KiB            | 10.7 MiB     | $0.02 / $2.45                                  | $0.08     |

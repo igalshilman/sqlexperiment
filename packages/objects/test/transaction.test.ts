@@ -9,7 +9,7 @@ import { memoryStore, sqlAttempt } from './support.ts';
 
 type Send = restate.GenericSend<Uint8Array>;
 
-/** The database's head: the commit point of the flush whose effects hold the outbox. */
+/** The database's head: the commit point of the flush whose record holds the outbox. */
 const HEAD = 'v22/head';
 let namespaces = 0;
 
@@ -42,10 +42,10 @@ function object() {
     /** The keys of the sends in the stored outbox. */
     async outbox() {
       const db = await open(`outbox-${namespaces++}`, memoryStore(map));
-      const effects = await db.effects();
+      const record = await db.record('outbox');
       await db.close();
-      if (effects.length === 0) return [];
-      const outbox = JSON.parse(new TextDecoder().decode(effects)) as { id: string; sends: unknown[] }[];
+      if (record.length === 0) return [];
+      const outbox = JSON.parse(new TextDecoder().decode(record)) as { id: string; sends: unknown[] }[];
       return outbox.flatMap(({ id, sends }) => sends.map((_, i) => `transaction/${id}/${i}`));
     },
   };

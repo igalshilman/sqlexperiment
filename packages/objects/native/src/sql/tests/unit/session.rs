@@ -41,7 +41,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
         let probe = changed(base.fork()).await?;
         let io = probe.io.clone();
         let _unused = io.arm_fault(usize::MAX, false, false);
-        probe.commit(None).await?;
+        probe.commit([]).await?;
         let count = io.fault_ops();
         assert!(count > 0);
         for at in 1..=count {
@@ -52,7 +52,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                     store.reset_stats();
                     let gate = db.io.arm_fault(at, after, cancel);
                     if cancel {
-                        match select(db.commit(None).boxed(), gate).await {
+                        match select(db.commit([]).boxed(), gate).await {
                             Either::Left(_) => panic!("checkpoint missed cancellation point"),
                             Either::Right((signal, pending)) => {
                                 signal?;
@@ -61,7 +61,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                         }
                     } else {
                         assert!(
-                            db.commit(None)
+                            db.commit([])
                                 .await
                                 .unwrap_err()
                                 .to_string()

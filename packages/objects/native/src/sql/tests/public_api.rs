@@ -63,9 +63,10 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
-/// A transaction and its effects, durable together at its commit.
+/// Records commit with their transaction, durable together at its commit; a
+/// reader's are its own, as its SQL is, and never stored.
 #[test]
-fn a_commit_with_effects_with_an_immediately_ready_backend() -> Result<()> {
+fn records_commit_with_their_transaction_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
@@ -77,10 +78,33 @@ fn a_commit_with_effects_with_an_immediately_ready_backend() -> Result<()> {
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
         require_send(db.begin()).await?;
         db.execute("INSERT INTO t VALUES (2, 'world')").await?;
-        require_send(db.commit(Some(Bytes::from_static(b"two rows")))).await?;
+        let records = [
+            ("outbox".into(), Bytes::from_static(b"two rows")),
+            ("schema".into(), Bytes::from_static(b"1")),
+        ];
+        require_send(db.commit(records)).await?;
+        // A name no record may have is refused, and the transaction stays
+        // open, for its rollback.
+        db.begin().await?;
+        db.execute("INSERT INTO t VALUES (3, 'lost')").await?;
+        assert!(db.commit([("db".into(), Bytes::new())]).await.is_err());
+        db.rollback().await?;
         drop(db);
+
+        let reader = Database::open(store.clone()).reader().await?;
+        reader.begin().await?;
+        reader.execute("INSERT INTO t VALUES (3, 'mine')").await?;
+        reader
+            .commit([("schema".into(), Bytes::from_static(b"2"))])
+            .await?;
+        assert_eq!(reader.record("schema").await?, &b"2"[..]);
+        assert_eq!(reader.record("outbox").await?, &b"two rows"[..]);
+        drop(reader);
+
         let db = Database::open(store).await?;
-        assert_eq!(db.effects().await?, &b"two rows"[..]);
+        assert_eq!(db.record("outbox").await?, &b"two rows"[..]);
+        assert_eq!(db.record("schema").await?, &b"1"[..]);
+        assert!(db.record("never set").await?.is_empty());
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

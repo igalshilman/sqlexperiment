@@ -38,9 +38,9 @@ export interface Store {
 interface Native {
   queryColumns(sql: string, params?: SqlParam[]): Promise<Columns>;
   begin(): Promise<void>;
-  commit(effects?: Buffer): Promise<void>;
+  commit(records?: Record<string, Buffer>): Promise<void>;
   rollback(): Promise<void>;
-  effects(): Promise<Buffer>;
+  record(name: string): Promise<Buffer>;
   isUsable(): boolean;
   save(): Promise<void>;
   close(): Promise<void>;
@@ -155,10 +155,10 @@ export class Database {
         await rollback(native);
         throw error;
       }
-      const effects = tx.effects;
+      const records = tx.records();
       tx.end();
       try {
-        await native.commit(effects);
+        await native.commit(records);
       } catch (error) {
         // A COMMIT that fails (a deferred constraint) leaves the transaction
         // open: without the rollback, the calls after it would run inside it.
@@ -170,12 +170,12 @@ export class Database {
   }
 
   /**
-   * The effects of the last commit that set them
-   * ({@link Transaction.commitEffects}); empty if none did. It does not wait
-   * for queued calls, so a transaction's body may read them.
+   * The record `name` as this session holds it: as the last commit that set
+   * it ({@link Transaction.setRecord}) left it; empty if none did. It does
+   * not wait for queued calls, so a transaction's body may read it.
    */
-  async effects(): Promise<Uint8Array> {
-    return new Uint8Array(await this.#native.effects());
+  async record(name: string): Promise<Uint8Array> {
+    return new Uint8Array(await this.#native.record(name));
   }
 
   /** Whether SQL can still run: an SQL error leaves the session usable, a storage error ends it. */
@@ -210,8 +210,8 @@ export class Transaction {
   // The transaction whose body this one's runs in, if any: of another
   // database, since a database's own are refused.
   readonly #outer: Transaction | undefined;
-  /** See {@link commitEffects}. */
-  effects: Buffer | undefined;
+  // The records it sets, by name.
+  readonly #records = new Map<string, Buffer>();
 
   constructor(database: Database, native: Native, outer: Transaction | undefined) {
     this.#database = database;
@@ -234,13 +234,21 @@ export class Transaction {
   }
 
   /**
-   * Commit `effects` with this transaction, in the same write: they are
-   * stored exactly when it is, even if it changes nothing, and stay until a
-   * later transaction commits others (see {@link Database.effects}).
+   * Set the record `name` to `value` with this transaction, in the same
+   * write: a whole value kept beside the SQL, in no table, stored exactly
+   * when the transaction is, even if it changes no row. It stays until a
+   * later transaction sets it again; an empty value reads as never set (see
+   * {@link Database.record}). A name is at most 255 bytes, and not `db`; a
+   * value at most 16 MiB.
    */
-  commitEffects(effects: Uint8Array) {
+  setRecord(name: string, value: Uint8Array) {
     this.#check();
-    this.effects = Buffer.from(effects);
+    this.#records.set(name, Buffer.from(value));
+  }
+
+  /** The records it sets, as the addon's commit takes them. */
+  records(): Record<string, Buffer> {
+    return Object.fromEntries(this.#records);
   }
 
   async query(sql: string, params?: SqlParam[]): Promise<SqlValue[][]> {

@@ -287,7 +287,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             after.database_bytes_written - before.database_bytes_written,
             after.private_wal_bytes_written - before.private_wal_bytes_written,
         );
-        db.commit(None).await?;
+        db.commit([]).await?;
         let committed = db.io_stats();
         sample.db_pages = (committed.database_len / 4096) as usize;
         sample.emit(
@@ -370,7 +370,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             effect,
             cancel: false,
         });
-        assert!(db.commit(None).await.is_err());
+        assert!(db.commit([]).await.is_err());
         assert!(
             store.events().iter().any(|e| e.faulted),
             "the sync failpoint was not reached"

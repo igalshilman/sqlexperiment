@@ -1,18 +1,18 @@
 //! An object's database: SQLite-compatible SQL, Turso's Rust engine
 //! (`turso_core`, unmodified), over the [`State`]'s file, committed with
-//! the effects in the state's flush.
+//! the host's records in the state's flush.
 //!
 //! For a Restate object without Restate's journal (`journalReplay: false`),
 //! whose state is the namespace. A [`Database`] is one session of it: its
 //! statements change a private view of the file, and each call that leaves
 //! no SQL transaction open commits: it moves what the SQL committed into a
-//! [`Mutation`](crate::state::Mutation), with the effects of [`Database::commit`] if any, and flushes
-//! it, durable before the call returns.
+//! [`Mutation`](crate::state::Mutation), with the records of
+//! [`Database::commit`], and flushes it, durable before the call returns.
 //!
 //! | Layer | Representation | Survives? |
 //! |---|---|---|
-//! | SQL working state | Dirty 4096-byte pages and the private engine WAL | No |
-//! | A commit | The pages and effects in one mutation, flushing | No: one that fails ends the session |
+//! | SQL working state | Dirty 4096-byte pages, the private engine WAL, records committed | No |
+//! | A commit | The pages and records in one mutation, flushing | No: one that fails ends the session |
 //! | The state | Its head, tail and packs (see [`state`](crate::state)) | Yes, after an acknowledged flush |
 //!
 //! An SQL error (syntax, a constraint, a missing table) undoes just that
@@ -80,7 +80,7 @@
 //! db.execute("CREATE TABLE messages(body TEXT)").await?; // durable now
 //! db.begin().await?;
 //! db.execute("INSERT INTO messages VALUES('hello')").await?;
-//! db.commit(Some("sends".into())).await?; // the row and the effects, durable together
+//! db.commit([("outbox".into(), "sends".into())]).await?; // the row and the record, durable together
 //! db.save().await?; // ends the session, leaving its engine to the next one
 //! # Ok(())
 //! # }
@@ -107,6 +107,7 @@ use crate::yield_now;
 use bytes::Bytes;
 use futures::lock::{Mutex, MutexGuard};
 use std::{
+    collections::BTreeMap,
     future::{Future, IntoFuture},
     pin::Pin,
     sync::{
@@ -187,9 +188,10 @@ struct Engine {
     schema_bytes: Option<usize>,
     /// SQL since the last commit may have changed the schema.
     schema_changed: bool,
-    /// The effects [`Database::commit`] set, for the call's commit to flush
-    /// with the SQL.
-    effects: Option<Bytes>,
+    /// The records [`Database::commit`] set since the last flush, which
+    /// the next one makes durable with the SQL; a reader keeps them, as it
+    /// keeps its SQL.
+    records: BTreeMap<String, Bytes>,
 }
 
 /// An idle engine and its adapter at a flushed state, kept in the owner's
@@ -220,7 +222,7 @@ impl WarmEngine {
 /// object's handler: every SQL commit is durable when its call returns.
 ///
 /// A call that leaves no SQL transaction open commits before it returns: what
-/// the SQL committed, and the effects [`Self::commit`] set, in one flush of
+/// the SQL committed, and the records [`Self::commit`] set, in one flush of
 /// the state. The host's `transaction()` runs its body between
 /// [`Self::begin`] and [`Self::commit`] or [`Self::rollback`]; meanwhile a
 /// statement that ends the transaction ends the session, rather than commit
@@ -411,28 +413,27 @@ impl Database {
         .await
     }
 
-    /// `COMMIT` the transaction of a `transaction()` body; with `effects`,
-    /// they commit with it, in the same flush, even if the transaction
-    /// changed nothing. A `COMMIT` that fails sets no effects and leaves the
-    /// transaction open, for `rollback`.
-    pub async fn commit(&self, effects: Option<Bytes>) -> Result<()> {
+    /// `COMMIT` the transaction of a `transaction()` body, with `records`:
+    /// whole values by name, kept beside the SQL (such as the outbox of the
+    /// sends the transaction made), which commit with it in the same flush,
+    /// even if it changed no row. A `COMMIT` that fails sets no record and
+    /// leaves the transaction open, for `rollback`. See [`Self::record`].
+    pub async fn commit(&self, records: impl IntoIterator<Item = (String, Bytes)>) -> Result<()> {
+        let records: Vec<(String, Bytes)> = records.into_iter().collect();
         self.call(async |engine| {
             engine.in_body = false;
-            // Nothing commits on a session a failure ended: the effects would
+            // Nothing commits on a session a failure ended: the records would
             // stay pending, and the call would resolve as if they committed.
             if !engine.is_usable() {
                 return Err(ENDED.into());
             }
-            if let Some(effects) = &effects {
-                if engine.state.is_reader() {
-                    return Err("a reader commits no effects".into());
-                }
-                crate::state::check_effects(effects)?;
+            for (name, value) in &records {
+                crate::state::check_record(name, value)?;
             }
             if engine.in_transaction() {
                 engine.execute("COMMIT").await?;
             }
-            engine.effects = effects;
+            engine.records.extend(records);
             Ok(())
         })
         .await
@@ -458,9 +459,16 @@ impl Database {
         self.usable.load(Ordering::Acquire)
     }
 
-    /// The effects of the last commit that set them; empty if none did.
-    pub async fn effects(&self) -> Result<Bytes> {
-        Ok(self.session.lock().await.engine()?.state.effects())
+    /// The record `name` as this session holds it: as the last commit that
+    /// set it left it, empty if none did. A reader's own commits set its
+    /// records, as they change its SQL, though they are never stored.
+    pub async fn record(&self, name: &str) -> Result<Bytes> {
+        let mut session = self.session.lock().await;
+        let engine = session.engine()?;
+        Ok(match engine.records.get(name) {
+            Some(value) => value.clone(),
+            None => engine.state.record(name),
+        })
     }
 
     /// End the session, leaving its engine to the next one. It fails if a
@@ -524,7 +532,7 @@ impl Database {
     /// ended the transaction of a `transaction()` body ends the session.
     /// Otherwise a call that leaves no SQL transaction open commits, even
     /// after an SQL error (the statements before it stand): what the SQL
-    /// committed, with the effects set, in one flush, durable before the call
+    /// committed, with the records set, in one flush, durable before the call
     /// returns. A reader commits nothing, and a session that a failure ended
     /// cannot. A call dropped before it returns ends the session.
     async fn call<T>(&self, call: impl AsyncFnOnce(&mut Engine) -> Result<T>) -> Result<T> {
@@ -535,7 +543,6 @@ impl Database {
         };
         let engine = running.session.engine()?;
         let result = call(engine).await;
-        let effects = engine.effects.take();
         if engine.in_body && !engine.in_transaction() {
             // `running` ends the session as it drops. A storage error that
             // ended the transaction too is the error to report.
@@ -546,9 +553,14 @@ impl Database {
         }
         let committed =
             match !engine.state.is_reader() && engine.is_usable() && !engine.in_transaction() {
-                true => engine.commit(effects).await,
+                true => engine.commit().await,
                 false => Ok(()),
             };
+        if !engine.is_usable() {
+            // Ended, the session commits nothing more: it holds what was
+            // stored.
+            engine.records.clear();
+        }
         self.usable.store(engine.is_usable(), Ordering::Release);
         running.returned = true;
         committed.and(result)
@@ -598,7 +610,7 @@ impl Engine {
             reusable: true,
             schema_bytes: warm.as_ref().map(|warm| warm.schema_bytes),
             schema_changed: false,
-            effects: None,
+            records: BTreeMap::new(),
         };
         let database = match warm {
             Some(warm) => warm.database,
@@ -681,17 +693,18 @@ impl Engine {
         self.query(sql, None).await.map(drop)
     }
 
-    /// Make what the SQL committed durable, and `effects` if any, in one
-    /// flush of the state. No SQL transaction may be open. The engine WAL
-    /// goes into the private view of the file, whose pages move into a
-    /// mutation; SQL goes on reading them from its view until the flush
-    /// settles them: the state holds them once it flushed, and they are
-    /// private again, for the next commit, if it was refused. Any other
-    /// failure ends the state, and the engine with it.
-    async fn commit(&mut self, effects: Option<Bytes>) -> Result<()> {
+    /// Make what the SQL committed durable, and the records set since the
+    /// last flush, in one flush of the state. No SQL transaction may be
+    /// open. The engine WAL goes into the private view of the file, whose
+    /// pages move into a mutation; SQL goes on reading them from its view
+    /// until the flush settles them: the state holds them once it flushed,
+    /// and they are private again, for the next commit, if it was refused,
+    /// as the records are. Any other failure ends the state, and the engine
+    /// with it.
+    async fn commit(&mut self) -> Result<()> {
         let mut mutation = self.state.mutation();
-        if let Some(effects) = effects {
-            mutation.set_effects(effects)?;
+        for (name, value) in &self.records {
+            mutation.set_record(name, value.clone())?;
         }
         if self.io.has_changes() || self.io.has_pending() {
             self.checkpoint().await?;
@@ -705,6 +718,7 @@ impl Engine {
         match mutation.flush().await {
             Ok(_) => {
                 self.io.settle_flushed();
+                self.records.clear();
                 Ok(())
             }
             Err(error) => {

@@ -140,7 +140,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                             .await?;
                     }
                     if op == "ten_updates_one_commit" {
-                        db.commit(None).await?;
+                        db.commit([]).await?;
                     }
                 }
                 _ => unreachable!(),

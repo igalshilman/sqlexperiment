@@ -58,11 +58,14 @@ pub(super) fn varied(rng: &mut Rng) -> Page {
     page.into()
 }
 
+/// The records a random change sets.
+pub(super) const RECORDS: [&str; 2] = ["outbox", "schema"];
+
 /// A change to a state (in a mutation) and to its model alike.
 #[derive(Clone, Debug)]
 pub(super) enum Op {
-    /// Set the effects.
-    Effects(Bytes),
+    /// Set a record.
+    Record(&'static str, Bytes),
     /// Write a page of the file, or a hole.
     Write(u64, Option<Page>),
     /// Set the file's length.
@@ -70,7 +73,7 @@ pub(super) enum Op {
 }
 
 impl Op {
-    /// A random change: effects small and over an inline budget of a few
+    /// A random change: records small and over an inline budget of a few
     /// hundred bytes, pages written, holes, and lengths shrunk and grown.
     pub(super) fn random(rng: &mut Rng) -> Self {
         let len = |rng: &mut Rng| match rng.below(4) {
@@ -82,7 +85,8 @@ impl Op {
         match rng.below(10) {
             0..=1 => {
                 let len = len(rng);
-                Self::Effects(rng.bytes(len).into())
+                // Named by its length, which draws nothing more.
+                Self::Record(RECORDS[len % RECORDS.len()], rng.bytes(len).into())
             }
             2 => Self::SetLen(512 * rng.below(8 * 20)),
             3 => Self::Write(rng.below(20), None),
@@ -120,7 +124,7 @@ impl Session {
     /// Make the change `op` in `mutation`, a mutation of this state.
     pub(super) fn apply(&self, mutation: &mut Mutation, op: &Op) -> Result<()> {
         match op {
-            Op::Effects(value) => mutation.set_effects(value.clone()),
+            Op::Record(name, value) => mutation.set_record(name, value.clone()),
             Op::Write(index, image) => mutation.write(*index, image.clone()),
             Op::SetLen(len) => mutation.set_len(*len),
         }
@@ -136,11 +140,11 @@ impl Session {
     }
 }
 
-/// What a state should hold, as last flushed: its effects, and its file's
+/// What a state should hold, as last flushed: its records, and its file's
 /// length and pages; an absent page is a hole.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Model {
-    effects: Bytes,
+    records: BTreeMap<&'static str, Bytes>,
     len: u64,
     pages: BTreeMap<u64, Page>,
 }
@@ -150,7 +154,9 @@ const PAGE: u64 = PAGE_SIZE as u64;
 impl Model {
     pub(super) fn apply(&mut self, op: &Op) {
         match op {
-            Op::Effects(value) => self.effects = value.clone(),
+            Op::Record(name, value) => {
+                self.records.insert(name, value.clone());
+            }
             Op::Write(index, image) => {
                 self.len = self.len.max((index + 1) * PAGE);
                 match image {
@@ -186,16 +192,19 @@ impl Model {
         self.len
     }
 
-    pub(super) fn effects(&self) -> Bytes {
-        self.effects.clone()
+    /// The record `name`: empty if never set.
+    pub(super) fn record(&self, name: &str) -> Bytes {
+        self.records.get(name).cloned().unwrap_or_default()
     }
 
     /// How `session` differs from the model; `None` when it reads the same.
     /// A session reads its state as last flushed, so compare after a flush.
     pub(super) async fn differs(&self, session: &Session) -> Result<Option<String>> {
-        let held = session.state.effects();
-        if held != self.effects {
-            return Ok(Some(format!("effects: {} bytes", held.len())));
+        for name in RECORDS {
+            let held = session.state.record(name);
+            if held != self.record(name) {
+                return Ok(Some(format!("record {name:?}: {} bytes", held.len())));
+            }
         }
         let file = session.file();
         if file.len() != self.len {

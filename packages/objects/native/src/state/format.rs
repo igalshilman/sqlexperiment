@@ -40,7 +40,7 @@ pub(crate) const PART_BYTES: usize = 1 << 20;
 /// Bytes of a record's value.
 pub(crate) const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes of a record's or file's name.
-pub(super) const MAX_NAME_BYTES: usize = 255;
+pub(crate) const MAX_NAME_BYTES: usize = 255;
 /// Bytes of a paged file: 10 GiB.
 pub(crate) const MAX_FILE_BYTES: u64 = 10 << 30;
 /// Most pages a frame holds: 1 MiB.

@@ -116,9 +116,9 @@ struct Workload {
 }
 
 const WORKLOADS: [Workload; 11] = [
-    // A restate-objects object: a message row, and its sends as effects.
+    // A restate-objects object: a message row, and its sends in the outbox.
     Workload {
-        name: "chat+effects",
+        name: "chat+outbox",
         rows: 0,
         payload: 400,
         flushes: 384,
@@ -226,7 +226,7 @@ fn row(w: Workload, i: u64, n: u64) -> i64 {
 /// A flush of `w`: one commit.
 async fn step(db: &Database, w: Workload, i: u64, words: &mut Words) -> Result<()> {
     match w.name {
-        "chat+effects" => {
+        "chat+outbox" => {
             let text = words.text(w.payload);
             db.begin().await?;
             db.execute_with(
@@ -241,10 +241,10 @@ async fn step(db: &Database, w: Workload, i: u64, words: &mut Words) -> Result<(
                 ],
             )
             .await?;
-            let effects = format!(
+            let outbox = format!(
                 r#"{{"sends":[{{"service":"Notifier","handler":"message","key":"session-17","idempotencyKey":"inv_1{i:015x}-{i}","input":{{"id":{i},"text":"{text}"}}}}]}}"#
             );
-            db.commit(Some(effects.into())).await
+            db.commit([("outbox".into(), outbox.into())]).await
         }
         name if name.ends_with("update 1") => {
             db.execute_with(
@@ -315,7 +315,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
             .await?;
     }
     db.begin().await?;
-    db.commit(Some("warm".into())).await?;
+    db.commit([("outbox".into(), "warm".into())]).await?;
     db.save().await?;
     stores.restate.reset();
     memory.reset_stats();
@@ -339,7 +339,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     let s3_cold = stores.s3.as_ref().map(|s3| s3.gets());
     let db = open(&stores, &None).await?;
     let probe = match w.name {
-        "chat+effects" => "SELECT text FROM messages WHERE id = 7",
+        "chat+outbox" => "SELECT text FROM messages WHERE id = 7",
         _ => "SELECT payload FROM t WHERE id = 4242",
     };
     db.query(probe).await?;

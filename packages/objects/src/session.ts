@@ -261,9 +261,9 @@ class SqlErrors {
   }
 }
 
-// A transaction's sends commit with it, in the database's root (its
-// effects): the outbox, which holds each committed transaction's sends until
-// they are stored. They are made once the transaction commits; a later open
+// A transaction's sends commit with it, in the database's record `outbox`
+// (beside its tables, in none of them), which holds each committed
+// transaction's sends until they are stored. They are made once the transaction commits; a later open
 // makes again those still in the outbox, with the same idempotency keys
 // (`transaction/<id>/<index>`, with a random id of the transaction), so
 // making them again is dropped. Restate keeps an attempt's commands in the
@@ -282,13 +282,16 @@ interface Outgoing {
   sends: (StoredSend & { parameter: string })[];
 }
 
-/** The outbox as effects: none is empty, as the record's effects start. */
+/** The database's record of the outbox. */
+const OUTBOX = 'outbox';
+
+/** The outbox as its record: none is empty, as a record never set reads. */
 function encodeOutbox(outbox: Outgoing[]): Uint8Array {
   return outbox.length === 0 ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(outbox));
 }
 
-function decodeOutbox(effects: Uint8Array): Outgoing[] {
-  return effects.length === 0 ? [] : (JSON.parse(new TextDecoder().decode(effects)) as Outgoing[]);
+function decodeOutbox(record: Uint8Array): Outgoing[] {
+  return record.length === 0 ? [] : (JSON.parse(new TextDecoder().decode(record)) as Outgoing[]);
 }
 
 function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][number] {
@@ -419,7 +422,7 @@ export class SqlAttempt {
           outgoing = { id: randomUUID(), sends };
           outbox.push(outgoing);
         }
-        handle.commitEffects(encodeOutbox(outbox));
+        handle.setRecord(OUTBOX, encodeOutbox(outbox));
         return result;
       });
     } catch (error) {
@@ -444,7 +447,7 @@ export class SqlAttempt {
 
   /** The outbox as committed, but the transactions this attempt made the sends of: a commit made after them stores them first. */
   async #unstored(db: Database): Promise<Outgoing[]> {
-    return decodeOutbox(await db.effects()).filter(({ id }) => !this.#made.has(id));
+    return decodeOutbox(await db.record(OUTBOX)).filter(({ id }) => !this.#made.has(id));
   }
 
   /**
@@ -452,9 +455,9 @@ export class SqlAttempt {
    * commit after them, which stores them first.
    */
   async #flush(db: Database) {
-    if ((await db.effects()).length === 0) return;
+    if ((await db.record(OUTBOX)).length === 0) return;
     const outbox = encodeOutbox(await this.#unstored(db));
-    await db.transaction(async (tx) => tx.commitEffects(outbox));
+    await db.transaction(async (tx) => tx.setRecord(OUTBOX, outbox));
   }
 
   /** The session, for a call that is not from inside a body ({@link inBody}). */
@@ -487,7 +490,7 @@ export class SqlAttempt {
     try {
       // What a crash may have left unmade.
       if (!ctx.shared && this.#name === undefined) {
-        decodeOutbox(await db.effects()).forEach((outgoing) => this.#make(outgoing));
+        decodeOutbox(await db.record(OUTBOX)).forEach((outgoing) => this.#make(outgoing));
       }
       if (own) await this.#apply(db, [own]);
     } catch (error) {

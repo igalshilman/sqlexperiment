@@ -67,15 +67,15 @@ impl Db {
         Ok(report)
     }
 
-    /// `COMMIT` the open transaction with `effects`, in one flush: what the
-    /// addon's `commit(effects)` does.
-    pub(super) async fn commit_with(&self, effects: Bytes) -> Result<()> {
-        self.0.commit(Some(effects)).await
+    /// `COMMIT` the open transaction with the record `outbox`, in one
+    /// flush: what the addon's `commit(records)` does.
+    pub(super) async fn commit_with(&self, outbox: Bytes) -> Result<()> {
+        self.0.commit([("outbox".into(), outbox)]).await
     }
 
-    /// The effects, as last flushed.
-    pub(super) fn effects(&self) -> Bytes {
-        self.0.state().effects()
+    /// The record `outbox`, as last flushed.
+    pub(super) fn outbox(&self) -> Bytes {
+        self.0.state().record("outbox")
     }
 
     /// The state's version: the flushes ever made, as this session holds it.
@@ -93,7 +93,7 @@ pub(super) async fn transaction<T>(
 ) -> Result<T> {
     db.begin().await?;
     let result = match body(db).await {
-        Ok(value) => db.commit(None).await.map(|()| value),
+        Ok(value) => db.commit([]).await.map(|()| value),
         Err(error) => Err(error),
     };
     if result.is_err() {

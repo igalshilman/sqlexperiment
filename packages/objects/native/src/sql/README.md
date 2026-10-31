@@ -4,11 +4,12 @@ An object's database: SQLite-compatible SQL on the
 [state](../state/README.md), for a Restate object without Restate's journal
 (`journalReplay: false`), whose state the namespace is. It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified, over the state's one file, and commits
-with the state: the rows and the effects, durable together in one flush.
+with the state: the rows and the host's records, durable together in one
+flush.
 
 A `Database` is one session of it. Its statements change a private view of
 the file, and each call that leaves no SQL transaction open commits: what the
-SQL committed, and the effects of `commit(effects)` if any, in one flush,
+SQL committed, and the records of `commit(records)`, in one flush,
 durable before the call returns. With a page cache, a session that ends
 cleanly leaves its engine warm for the namespace's next one. It is a private
 module of the addon's crate; where it sits: [the
@@ -25,9 +26,9 @@ use restate_objects::Database;
 // Kept warm in the process's page cache under the namespace's stable key.
 let db = Database::open(store).cached(&cache, "object-42").await?;
 db.execute("UPDATE stock SET n = n - 1 WHERE id = 7").await?; // durable now
-db.begin().await?;                                  // one transaction, with effects
+db.begin().await?;                                  // one transaction, with a record
 db.execute("INSERT INTO shipments VALUES(7)").await?;
-db.commit(Some("shipped 7".into())).await?;         // the row and the effects, durable together
+db.commit([("outbox".into(), "ship 7".into())]).await?; // the row and the record, durable together
 db.save().await?;                                   // ends the session, leaving its engine warm
 ```
 
@@ -37,7 +38,11 @@ checkpoints in S3, and `.reader()` opens a reader beside the owner, as a
 shared handler does. The host's `transaction(body)` (`src/database.ts`) runs
 `body` between `begin` and `commit`, or `rollback` when it fails; a statement
 in the body that ends its transaction (`COMMIT`, `END`, `ROLLBACK`) ends the
-session rather than commit the body halfway. Bind values with
+session rather than commit the body halfway. `commit(records)` commits
+records with the transaction, whole values by name kept beside the SQL, in
+no table (the host's outbox, say); `record(name)` reads one as the session
+holds it, empty if never set, and a reader's commits set its own, which are
+never stored, as its SQL is not. Bind values with
 `query_with`/`execute_with` rather than formatting them into SQL. A session
 holds at most 256 MiB of changes not yet committed, and a statement returns
 at most 64 MiB of rows: past either, the session ends.

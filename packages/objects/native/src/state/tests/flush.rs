@@ -57,28 +57,28 @@ fn a_mutation_is_read_once_flushed() -> Result<()> {
         let state = State::open(store.clone()).await?;
         let db = state.file();
         let mut mutation = state.mutation();
-        mutation.set_effects("1".into())?;
+        mutation.set_record("outbox", "1".into())?;
         mutation.write(0, Some(page(1)))?;
         assert!(
-            state.effects().is_empty() && db.len() == 0,
+            state.record("outbox").is_empty() && db.len() == 0,
             "not flushed yet"
         );
         assert_eq!(db.read(0).await?, None);
         mutation.flush().await?;
-        assert_eq!(&state.effects()[..], b"1");
+        assert_eq!(&state.record("outbox")[..], b"1");
         assert_eq!(db.read(0).await?, Some(page(1)));
         // A second mutation, on top.
         let mut mutation = state.mutation();
-        mutation.set_effects("2".into())?;
+        mutation.set_record("outbox", "2".into())?;
         mutation.write(1, Some(page(2)))?;
-        assert_eq!((&state.effects()[..], db.len()), (&b"1"[..], 4096));
+        assert_eq!((&state.record("outbox")[..], db.len()), (&b"1"[..], 4096));
         mutation.flush().await?;
-        assert_eq!((&state.effects()[..], db.len()), (&b"2"[..], 8192));
+        assert_eq!((&state.record("outbox")[..], db.len()), (&b"2"[..], 8192));
         assert_eq!(db.read(0).await?, Some(page(1)));
         assert_eq!(db.read(1).await?, Some(page(2)));
         assert_eq!(state.version(), 2);
         let reopened = State::open(store).await?;
-        assert_eq!(&reopened.effects()[..], b"2");
+        assert_eq!(&reopened.record("outbox")[..], b"2");
         assert_eq!(reopened.file().read(1).await?, Some(page(2)));
         Ok(())
     })
@@ -92,49 +92,52 @@ fn a_mutation_dropped_discards_its_writes() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
         let mut mutation = state.mutation();
-        mutation.set_effects("1".into())?;
+        mutation.set_record("outbox", "1".into())?;
         mutation.flush().await?;
         let keys = store.keys();
         let mut mutation = state.mutation();
-        mutation.set_effects("2".into())?;
+        mutation.set_record("outbox", "2".into())?;
         mutation.write(0, Some(page(1)))?;
         assert!(!mutation.is_empty());
         drop(mutation);
-        assert_eq!(&state.effects()[..], b"1");
+        assert_eq!(&state.record("outbox")[..], b"1");
         assert_eq!(state.file().len(), 0);
         assert_eq!(state.version(), 1);
         assert_eq!(store.keys(), keys, "nothing written");
         let mut mutation = state.mutation();
-        mutation.set_effects("3".into())?;
+        mutation.set_record("outbox", "3".into())?;
         mutation.flush().await?;
         let reopened = State::open(store).await?;
-        assert_eq!(&reopened.effects()[..], b"3");
+        assert_eq!(&reopened.record("outbox")[..], b"3");
         assert_eq!(reopened.file().len(), 0);
         Ok(())
     })
 }
 
-/// A write refuses what no flush could store (effects too large, a bad
-/// length, a page past the largest file or not 4096 bytes) before the
-/// mutation changes: it holds what was accepted, and flushes.
+/// A write refuses what no flush could store (a record too large or badly
+/// named, a bad length, a page past the largest file or not 4096 bytes)
+/// before the mutation changes: it holds what was accepted, and flushes.
 #[test]
 fn a_write_refuses_what_no_flush_could_store_and_the_mutation_goes_on() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
         let mut mutation = state.mutation();
-        mutation.set_effects("yes".into())?;
+        mutation.set_record("outbox", "yes".into())?;
         mutation.write(0, Some(page(1)))?;
         let large = vec![0; MAX_RECORD_BYTES + 1].into();
-        let error = mutation.set_effects(large).unwrap_err();
+        let error = mutation.set_record("outbox", large).unwrap_err();
         assert!(error.to_string().contains("exceed"), "{error}");
+        for name in ["", "db", &"n".repeat(256)] {
+            assert!(mutation.set_record(name, "no".into()).is_err(), "{name:?}");
+        }
         assert!(mutation.set_len(1000).is_err());
         assert!(mutation.write(u64::MAX, None).is_err());
         assert!(mutation.write(1, Some(vec![0; 100].into())).is_err());
         // It flushes what was accepted, and nothing of the rest.
         mutation.flush().await?;
         let reopened = State::open(store).await?;
-        assert_eq!(&reopened.effects()[..], b"yes");
+        assert_eq!(&reopened.record("outbox")[..], b"yes");
         assert_eq!(reopened.file().len(), 4096);
         assert_eq!(reopened.file().read(0).await?, Some(page(1)));
         Ok(())
@@ -149,17 +152,17 @@ fn a_mutation_kept_across_another_flush_flushes_on_top() -> Result<()> {
         let store = Arc::new(MemoryKv::default());
         let state = State::open(store.clone()).await?;
         let mut kept = state.mutation();
-        kept.set_effects("kept".into())?;
+        kept.set_record("outbox", "kept".into())?;
         kept.write(0, Some(page(1)))?;
         let mut other = state.mutation();
-        other.set_effects("other".into())?;
+        other.set_record("outbox", "other".into())?;
         other.write(3, Some(page(2)))?;
         other.flush().await?;
-        assert_eq!(&state.effects()[..], b"other");
+        assert_eq!(&state.record("outbox")[..], b"other");
         kept.flush().await?;
         assert_eq!(state.version(), 2);
         let reopened = State::open(store).await?;
-        assert_eq!(&reopened.effects()[..], b"kept");
+        assert_eq!(&reopened.record("outbox")[..], b"kept");
         let db = reopened.file();
         assert_eq!(db.len(), 4 * 4096);
         assert_eq!(db.read(0).await?, Some(page(1)));
@@ -207,16 +210,16 @@ fn a_cancelled_flush_ends_the_state_and_no_other_flushes_on_top() -> Result<()> 
         // Another state of the owner, opened on the same flush.
         let other = open(memory.clone()).await?;
         let mut mutation = state.mutation();
-        mutation.set_effects("1".into())?;
+        mutation.set_record("outbox", "1".into())?;
         let mut flush = Box::pin(mutation.flush());
         assert!((&mut flush).now_or_never().is_none());
-        // Dropped midway: its effects may or may not be stored.
+        // Dropped midway: its record may or may not be stored.
         drop(flush);
         assert!(!state.is_usable());
         let error = state.mutation().flush().await.unwrap_err().to_string();
         assert!(error.contains("ended"), "{error}");
         let mut mutation = other.mutation();
-        mutation.set_effects("2".into())?;
+        mutation.set_record("outbox", "2".into())?;
         let error = mutation.flush().await.unwrap_err().to_string();
         assert!(error.contains("reopen"), "{error}");
         Ok(())
@@ -238,7 +241,7 @@ fn a_parked_value_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Re
         {
             let state = State::open(store.clone()).cached(&cache, namespace).await?;
             let mut mutation = state.mutation();
-            mutation.set_effects("1".into())?;
+            mutation.set_record("outbox", "1".into())?;
             mutation.flush().await?;
             state.park(value, weight).unwrap();
         }
@@ -462,17 +465,17 @@ fn a_collection_lists_once_and_syncs_once() -> Result<()> {
     })
 }
 
-/// With packs in Restate, a state of small effects does not checkpoint at
+/// With packs in Restate, a state of small records does not checkpoint at
 /// every flush, though its checkpoint holds less than one flush puts: the
 /// tail holds a frame's bytes (16 KiB) first.
 #[test]
-fn small_effects_checkpoint_once_the_tail_holds_a_frame() -> Result<()> {
+fn small_records_checkpoint_once_the_tail_holds_a_frame() -> Result<()> {
     futures::executor::block_on(async {
         let state = State::open(Arc::new(MemoryKv::default())).await?;
         let mut checkpoints = Vec::new();
         for n in 0..120u8 {
             let mut mutation = state.mutation();
-            mutation.set_effects(vec![n; 200].into())?;
+            mutation.set_record("outbox", vec![n; 200].into())?;
             if mutation.flush().await?.checkpoint.is_some() {
                 checkpoints.push(n);
             }
@@ -524,7 +527,7 @@ fn a_crashed_flushs_extra_tail_parts_are_collected() -> Result<()> {
         let state = State::open(memory.clone()).await?;
         for n in 0..3u8 {
             let mut mutation = state.mutation();
-            mutation.set_effects(vec![n; 8].into())?;
+            mutation.set_record("outbox", vec![n; 8].into())?;
             mutation.checkpoint();
             mutation.flush().await?;
         }

@@ -44,11 +44,12 @@ a call to the session from inside the body is refused, as it would wait for
 the body. A COMMIT that fails rolls back. An SQL error leaves the session
 usable (`isUsable()`); a storage error ends it.
 
-A body may commit _effects_ with its transaction: `tx.commitEffects(bytes)`
-puts them in the same tail entry, as the record `effects`, so they are
-stored exactly when the transaction is, even if it changes nothing, and stay
-until a later transaction commits others. `effects()` returns them. The SDK keeps a
-transaction's sends there, its outbox, and makes them once it commits.
+A body may set _records_ with its transaction, whole values by name kept
+beside the SQL, in no table: `tx.setRecord(name, bytes)` puts one in the same
+tail entry, so it is stored exactly when the transaction is, even if it
+changes no row, and stays until a later transaction sets it again.
+`record(name)` returns it. The SDK keeps a transaction's sends in the record
+`outbox`, and makes them once it commits.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
@@ -77,27 +78,27 @@ Three layers, each knowing only the one below it. A change stays private to
 the database until a call commits it, and the state's flush makes it durable.
 
 ```
-host       restate-objects (TypeScript): ctx.db, transaction(), the effects
+host       restate-objects (TypeScript): ctx.db, transaction(), the outbox
                │
                ▼
 database   Database: SQL on a private view of one file; each call that
            leaves no SQL transaction open commits: the pages it changed and
-           the effects, in one flush of its state
+           the records set, in one flush of its state
                │
                ▼
 store      one Restate object's key/value state: get · put · delete · sync
 ```
 
-| Layer        | Gives the layer above                                                                                                      | Keeps to itself                                                                                                   | Knows nothing of                    |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| **Store**    | `get`, `put`, `delete` and `sync` on one object's keys, writes in issue order; a crash keeps a prefix of the unsynced ones | Restate's own durability and fencing: one owner per object at a time                                              | What the keys mean                  |
-| **Database** | `query`, `execute`, `begin`, `commit(effects)`, `rollback`, `save`, `close`: each commit durable when its call returns     | The engine, its private view of the file and its WAL; the state's format (a tail, the head, packs); a warm engine | Restate, and what the effects say   |
-| **Host**     | The SDK API: `ctx.db` in an object handler                                                                                 | What goes in a transaction, and the effects to commit with it                                                     | How the database lays out its pages |
+| Layer        | Gives the layer above                                                                                                            | Keeps to itself                                                                                                   | Knows nothing of                    |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| **Store**    | `get`, `put`, `delete` and `sync` on one object's keys, writes in issue order; a crash keeps a prefix of the unsynced ones       | Restate's own durability and fencing: one owner per object at a time                                              | What the keys mean                  |
+| **Database** | `query`, `execute`, `begin`, `commit(records)`, `rollback`, `record`, `save`, `close`: each commit durable when its call returns | The engine, its private view of the file and its WAL; the state's format (a tail, the head, packs); a warm engine | Restate, and what the records say   |
+| **Host**     | The SDK API: `ctx.db` in an object handler                                                                                       | What goes in a transaction, and the records to commit with it                                                     | How the database lays out its pages |
 
 **When a change is durable.** When the call that commits it returns. A
 statement outside a transaction commits on its own; one in a transaction,
-with the transaction's `COMMIT` (or `commit(effects)`): the pages it changed
-and the effects go into one mutation of the state, whose flush puts one tail
+with the transaction's `COMMIT` (or `commit(records)`): the pages it changed
+and the records go into one mutation of the state, whose flush puts one tail
 entry, then the head naming it.
 
 **Failures.** An SQL error (syntax, a constraint) undoes only that statement.
@@ -105,14 +106,15 @@ A storage error, a cancelled call or a failed commit ends the session: the
 flush's outcome is unknown, so the host settles outstanding requests and
 opens a new one, reading whatever head last landed.
 
-**Effects.** `commit(effects)` stores the effects with the rows, in the same
-flush: the sends committed with them, an outbox, opaque to the storage.
+**Records.** `commit(records)` stores the records with the rows, in the same
+flush: what the host keeps beside the SQL, such as the sends committed with
+the rows (the outbox), opaque to the storage.
 
 All of it is one Rust crate, the addon, of two private modules: `state`
 ([`src/state`](src/state/README.md): its
 [architecture](src/state/docs/ARCHITECTURE.md), [design](src/state/docs/DESIGN.md)
-and [format](src/state/docs/FORMAT.md)), the storage of one file and the
-effects, and `sql` ([`src/sql`](src/sql/README.md)), the `Database` on it.
+and [format](src/state/docs/FORMAT.md)), the storage of one file and its
+records, and `sql` ([`src/sql`](src/sql/README.md)), the `Database` on it.
 Its one public type is `Database` (`src/lib.rs`), and
 [`src/node.rs`](src/node.rs) is the napi bindings, around it.
 

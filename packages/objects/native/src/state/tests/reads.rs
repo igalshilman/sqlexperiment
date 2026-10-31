@@ -33,7 +33,7 @@ fn a_part_of_a_pack_is_fetched_once_for_every_frame_in_it() -> Result<()> {
         // Checkpoint the tail into a pack, with a flush that writes a record.
         let mut mutation = state.mutation();
         mutation.checkpoint();
-        mutation.set_effects("x".into())?;
+        mutation.set_record("outbox", "x".into())?;
         let report = mutation.flush().await?;
         let pack_bytes = report.checkpoint.expect("a checkpoint").pack_bytes;
         let parts = pack_bytes.div_ceil(64 << 10) as u64;
@@ -69,7 +69,7 @@ async fn checkpointed(
     mutation.flush().await?;
     let mut mutation = state.mutation();
     mutation.checkpoint();
-    mutation.set_effects(seed.to_string().into())?;
+    mutation.set_record("outbox", seed.to_string().into())?;
     Ok(mutation.flush().await?.checkpoint.expect("a checkpoint"))
 }
 

@@ -51,12 +51,12 @@ async fn baseline() -> Result<MemoryKv> {
     Ok(memory)
 }
 
-/// The state of a store and its effects, through a plain session; its
+/// The state of a store and its outbox, through a plain session; its
 /// database checks out.
 async fn observe(store: MemoryKv) -> Result<(String, Bytes)> {
     let db = Database::new(options(None).open(Arc::new(store)).await?).await?;
     assert_eq!(integrity(&db).await?, "ok");
-    Ok((dump(&db).await?, db.effects().await?))
+    Ok((dump(&db).await?, db.record("outbox").await?))
 }
 
 /// A call to cancel, on a session it opens and prepares.
@@ -66,7 +66,7 @@ enum Call {
     Write,
     /// A read.
     Read,
-    /// The `COMMIT` of a transaction, with effects; a change in it leaves the
+    /// The `COMMIT` of a transaction, with a record; a change in it leaves the
     /// first page alone, and the read after it reads that page again, from
     /// the store.
     Commit,

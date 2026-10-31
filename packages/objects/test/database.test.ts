@@ -1,4 +1,4 @@
-// A database over an in-memory store, without the SDK: SQL, values, effects,
+// A database over an in-memory store, without the SDK: SQL, values, records,
 // and lost writes.
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
@@ -233,15 +233,22 @@ test('save refuses a transaction left open, whose changes are lost', async () =>
   await again.save();
 });
 
-test('effects a commit cannot hold are refused, and the session goes on', async () => {
+test('records a commit cannot hold are refused, and the session goes on', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
   await assert.rejects(
     db.transaction(async (tx) => {
       await tx.execute('INSERT INTO t VALUES(1)');
-      tx.commitEffects(new Uint8Array((16 << 20) + 1));
+      tx.setRecord('outbox', new Uint8Array((16 << 20) + 1));
     }),
     /exceed/,
+  );
+  await assert.rejects(
+    db.transaction(async (tx) => {
+      await tx.execute('INSERT INTO t VALUES(1)');
+      tx.setRecord('db', new Uint8Array());
+    }),
+    /cannot name a record/,
   );
   assert.ok(db.isUsable());
   assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
@@ -252,11 +259,11 @@ test('a call running meanwhile does not make the session look unusable', async (
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER)');
   for (let i = 0; i < 50; i++) {
-    // The body fails while effects() holds the session: the rollback still runs.
+    // The body fails while record() holds the session: the rollback still runs.
     await assert.rejects(
       db.transaction(async (tx) => {
         await tx.execute('INSERT INTO t VALUES(1)');
-        for (let j = 0; j < 4; j++) void db.effects();
+        for (let j = 0; j < 4; j++) void db.record('outbox');
         throw new Error('no');
       }),
       /no/,
@@ -274,29 +281,33 @@ test('a call running meanwhile does not make the session look unusable', async (
   assert.equal(db.isUsable(), false);
 });
 
-/** A session's effects, as text. */
-const text = async (session: Database) => new TextDecoder().decode(await session.effects());
+/** A session's record `name`, as text. */
+const text = async (session: Database, name = 'outbox') => new TextDecoder().decode(await session.record(name));
 
-test('effects commit with their transaction, and only then', async () => {
+const bytes = (value: string) => new TextEncoder().encode(value);
+
+test('records commit with their transaction, and only then', async () => {
   const backend = new Backend();
   const namespace = fresh();
   const db = await open(namespace, backend.request());
   await db.execute('CREATE TABLE t(id INTEGER)');
   assert.equal(await text(db), '');
-  // Even with a transaction that changes nothing.
+  // Even with a transaction that changes nothing; two records at once.
   let inside: string | undefined;
   await db.transaction(async (tx) => {
     await tx.query('SELECT * FROM t');
-    tx.commitEffects(new TextEncoder().encode('sends 1'));
+    tx.setRecord('outbox', bytes('sends 1'));
+    tx.setRecord('schema', bytes('1'));
     inside = await text(db);
   });
   assert.equal(inside, '');
   assert.equal(await text(db), 'sends 1');
-  // A rollback commits none; nor does a commit without effects change them.
+  assert.equal(await text(db, 'schema'), '1');
+  // A rollback commits none; nor does a commit without records change them.
   await assert.rejects(
     db.transaction(async (tx) => {
       await tx.execute('INSERT INTO t VALUES(2)');
-      tx.commitEffects(new TextEncoder().encode('sends 2'));
+      tx.setRecord('outbox', bytes('sends 2'));
       throw new Error('no');
     }),
     /no/,
@@ -304,11 +315,12 @@ test('effects commit with their transaction, and only then', async () => {
   await db.transaction((tx) => tx.execute('INSERT INTO t VALUES(3)'));
   assert.equal(await text(db), 'sends 1');
   await db.save();
-  // A later session opens with them; an empty transaction clears them.
+  // A later session opens with them; setting one empty clears it alone.
   const again = await open(namespace, backend.request());
   assert.equal(await text(again), 'sends 1');
-  await again.transaction(async (tx) => tx.commitEffects(new Uint8Array()));
+  await again.transaction(async (tx) => tx.setRecord('outbox', new Uint8Array()));
   assert.equal(await text(again), '');
+  assert.equal(await text(again, 'schema'), '1');
   await again.save();
 });
 
@@ -435,12 +447,9 @@ test('a reader reads beside the owner, writes nothing, and keeps the state it op
   await reader.execute('CREATE TABLE IF NOT EXISTS t(n INTEGER)');
   await reader.execute('INSERT INTO t VALUES (99)');
   assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
-  // It commits no effects.
-  await assert.rejects(
-    reader.transaction(async (tx) => tx.commitEffects(new TextEncoder().encode('sends'))),
-    /a reader commits no effects/,
-  );
-  assert.equal(await text(reader), '');
+  // Its records, too.
+  await reader.transaction(async (tx) => tx.setRecord('outbox', bytes('mine')));
+  assert.equal(await text(reader), 'mine');
 
   // The owner commits: the reader keeps the state it opened on.
   await owner.execute('INSERT INTO t VALUES (2)');
@@ -449,6 +458,7 @@ test('a reader reads beside the owner, writes nothing, and keeps the state it op
 
   const again = await open(ns, readerOf(backend), { reader: true });
   assert.deepEqual(await again.query('SELECT n FROM t ORDER BY n'), [[1], [2]]);
+  assert.equal(await text(again), '');
   await again.close();
   await owner.save();
 });

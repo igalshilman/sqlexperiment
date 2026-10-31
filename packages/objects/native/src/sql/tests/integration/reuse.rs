@@ -237,8 +237,12 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
                         Effect::After,
                         false,
                     );
-                    let (hit, _) =
-                        under(&store, plan, session.commit(Some(Bytes::from("e")))).await;
+                    let (hit, _) = under(
+                        &store,
+                        plan,
+                        session.commit([("outbox".into(), Bytes::from("e"))]),
+                    )
+                    .await;
                     assert!(hit);
                     session.close().await;
                 }

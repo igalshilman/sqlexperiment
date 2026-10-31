@@ -7,11 +7,11 @@
 //! when its call returns. Inside, three private modules, each on the one
 //! before:
 //!
-//! - `state`: the database's file and its effects over the key/value store,
+//! - `state`: the database's file and its records over the key/value store,
 //!   changed through a mutation that a flush makes durable at once
 //!   (`src/state/README.md`).
 //! - `sql`: the [`Database`], SQL on the state's file, each commit flushed
-//!   with the effects (`src/sql/README.md`).
+//!   with the host's records (`src/sql/README.md`).
 //! - `node`: the napi bindings, around [`Database`].
 //!
 //! With the feature `bench`, `simulation` is public too: the in-memory

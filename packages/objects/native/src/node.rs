@@ -21,6 +21,7 @@ use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
@@ -184,11 +185,15 @@ impl Database {
         self.0.begin().await.map_err(error)
     }
 
-    /// See [`crate::Database::commit`].
-    #[napi]
-    pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
-        let effects = effects.map(|effects| Bytes::copy_from_slice(&effects));
-        self.0.commit(effects).await.map_err(error)
+    /// See [`crate::Database::commit`]: `records` by name.
+    #[napi(ts_args_type = "records?: Record<string, Buffer>")]
+    pub async fn commit(&self, records: Option<HashMap<String, Buffer>>) -> Result<()> {
+        let records = (records.unwrap_or_default().into_iter())
+            .map(|(name, value)| (name, Bytes::copy_from_slice(&value)));
+        self.0
+            .commit(records.collect::<Vec<_>>())
+            .await
+            .map_err(error)
     }
 
     /// See [`crate::Database::rollback`].
@@ -203,11 +208,11 @@ impl Database {
         self.0.is_usable()
     }
 
-    /// See [`crate::Database::effects`].
+    /// See [`crate::Database::record`].
     #[napi]
-    pub async fn effects(&self) -> Result<Buffer> {
-        let effects = self.0.effects().await.map_err(error)?;
-        Ok(Buffer::from(effects.to_vec()))
+    pub async fn record(&self, name: String) -> Result<Buffer> {
+        let value = self.0.record(&name).await.map_err(error)?;
+        Ok(Buffer::from(value.to_vec()))
     }
 
     /// See [`crate::Database::save`].

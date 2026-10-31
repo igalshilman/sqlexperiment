@@ -114,9 +114,9 @@ struct Model {
     pending: Vec<String>,
     /// A reference engine that ran both.
     live: Arc<Connection>,
-    /// The record `effects`, as acknowledged, and as set since.
-    effects: Bytes,
-    pending_effects: Option<Bytes>,
+    /// The record `outbox`, as acknowledged, and as set since.
+    outbox: Bytes,
+    pending_outbox: Option<Bytes>,
 }
 
 impl Model {
@@ -125,8 +125,8 @@ impl Model {
             acknowledged: Vec::new(),
             pending: Vec::new(),
             live: replay(&[]),
-            effects: Bytes::new(),
-            pending_effects: None,
+            outbox: Bytes::new(),
+            pending_outbox: None,
         }
     }
 
@@ -139,11 +139,11 @@ impl Model {
         !self.live.get_auto_commit()
     }
 
-    /// The pending SQL and effects were acknowledged.
+    /// The pending SQL and outbox were acknowledged.
     fn acknowledge(&mut self) {
         self.acknowledged.append(&mut self.pending);
-        if let Some(effects) = self.pending_effects.take() {
-            self.effects = effects;
+        if let Some(outbox) = self.pending_outbox.take() {
+            self.outbox = outbox;
         }
     }
 
@@ -151,17 +151,17 @@ impl Model {
     fn acknowledged_state(&self) -> (String, Bytes) {
         (
             reference_dump(&replay(&self.acknowledged)),
-            self.effects.clone(),
+            self.outbox.clone(),
         )
     }
     fn pending_state(&self) -> (String, Bytes) {
         let all: Vec<String> = (self.acknowledged.iter().chain(&self.pending))
             .cloned()
             .collect();
-        let effects = self.pending_effects.clone();
+        let outbox = self.pending_outbox.clone();
         (
             reference_dump(&replay(&all)),
-            effects.unwrap_or(self.effects.clone()),
+            outbox.unwrap_or(self.outbox.clone()),
         )
     }
 
@@ -172,7 +172,7 @@ impl Model {
         let old = self.acknowledged_state();
         if *seen == old {
             self.pending.clear();
-            self.pending_effects = None;
+            self.pending_outbox = None;
         } else if unknown && *seen == self.pending_state() {
             self.acknowledge();
         } else {
@@ -190,7 +190,7 @@ impl Model {
             panic!(
                 "{case}: the store holds neither the acknowledged state{} nor the pending one ({unknown}).\n\
                  First difference from the acknowledged at line {first}:\n  store:     {:?}\n  reference: {:?}\n\
-                 effects: store {:?}, acknowledged {:?}, pending {:?}\npending SQL: {:?}",
+                 outbox: store {:?}, acknowledged {:?}, pending {:?}\npending SQL: {:?}",
                 if unknown {
                     ""
                 } else {
@@ -200,7 +200,7 @@ impl Model {
                 old_lines.get(first),
                 seen.1,
                 old.1,
-                self.pending_effects,
+                self.pending_outbox,
                 self.pending,
             );
         }
@@ -216,9 +216,9 @@ struct Config {
     summary: String,
 }
 
-/// What a session sees: its database as text, and its effects.
+/// What a session sees: its database as text, and its outbox.
 async fn view(db: &Database) -> Result<(String, Bytes)> {
-    Ok((dump(db).await?, db.effects().await?))
+    Ok((dump(db).await?, db.record("outbox").await?))
 }
 
 struct Campaign {
@@ -473,16 +473,18 @@ impl Campaign {
                 )
             }
             8 => {
-                let effects = Bytes::from(format!("effects {}", self.totals.calls));
+                let outbox = Bytes::from(format!("outbox {}", self.totals.calls));
                 let expected = match self.model.in_transaction() {
                     true => self.model.run("COMMIT").map(drop),
                     false => Ok(()),
                 };
                 if expected.is_ok() {
-                    self.model.pending_effects = Some(effects.clone());
+                    self.model.pending_outbox = Some(outbox.clone());
                 }
                 self.in_body = false;
-                let (hit, ended) = self.call(3, "commit", session.commit(Some(effects))).await;
+                let (hit, ended) = self
+                    .call(3, "commit", session.commit([("outbox".into(), outbox)]))
+                    .await;
                 (
                     hit,
                     ended.map(|()| Vec::new()),
@@ -633,7 +635,7 @@ impl<T> Ended<T> {
     }
 }
 
-/// The state of the store and its effects, through a session without the
+/// The state of the store and its outbox, through a session without the
 /// cache; its database checks out.
 async fn observe(memory: MemoryKv) -> Result<(String, Bytes)> {
     let db = Database::new(State::open(Arc::new(memory)).await?).await?;

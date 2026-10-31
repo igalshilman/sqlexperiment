@@ -10,7 +10,7 @@ fn a_parked_value_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         let open = || State::open(store.clone()).cached(shared_cache(), "parking");
         let state = open().await?;
         let mut mutation = state.mutation();
-        mutation.set_effects("1".into())?;
+        mutation.set_record("outbox", "1".into())?;
         mutation.flush().await?;
         state.park(7u32, 1).unwrap();
         drop(state);
@@ -22,7 +22,7 @@ fn a_parked_value_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         // A mutation changes nothing until it flushes: the state is still at the
         // last durable flush, before and after.
         let mut mutation = state.mutation();
-        mutation.set_effects("2".into())?;
+        mutation.set_record("outbox", "2".into())?;
         assert!(state.can_park());
         mutation.flush().await?;
         state.park(9u32, 1).unwrap();
@@ -32,7 +32,7 @@ fn a_parked_value_goes_to_the_next_state_if_nothing_changed() -> Result<()> {
         let state = open().await?;
         let other = open().await?;
         let mut mutation = other.mutation();
-        mutation.set_effects("3".into())?;
+        mutation.set_record("outbox", "3".into())?;
         mutation.flush().await?;
         drop((state, other));
         let state = open().await?;
