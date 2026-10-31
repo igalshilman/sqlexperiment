@@ -1,17 +1,17 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
-use restate_objects::sql::Sql;
+//! A write runs in a transaction, measured as its SQL, then its commit (the
+//! engine's checkpoint and the flush), apart.
+use restate_objects::sql::Database;
 use restate_objects::state::{
     Result, State,
+    kv::KvStore,
     simulation::{Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind},
 };
 use std::sync::Arc;
 
-/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await
+/// A session of the database in `store`.
+async fn open(store: Arc<impl KvStore + 'static>) -> Result<Database> {
+    Database::new(State::open(store).await?).await
 }
 
 #[derive(Clone, Copy)]
@@ -105,19 +105,19 @@ fn sum(s: &Stats) -> Traffic {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(&State::open(Arc::new(store.clone())).await?).await?;
+    let db = open(Arc::new(store.clone())).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, bucket INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_bucket ON t(bucket)").await?;
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x%10, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    save(db).await?;
+    db.save().await?;
     store.crash();
     Ok(store)
 }
 
 /// The database's pages in `base`.
 async fn db_pages(base: &MemoryKv) -> Result<usize> {
-    let mut db = Sql::open(&State::open(Arc::new(base.fork())).await?).await?;
+    let db = open(Arc::new(base.fork())).await?;
     Ok(db.query("PRAGMA page_count").await?[0][0]
         .as_int()
         .unwrap_or(0) as usize)
@@ -168,7 +168,7 @@ async fn reads(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: db_pages(base).await?,
         };
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
         for cache in ["cold", "warm"] {
             sample.cache = cache;
@@ -228,7 +228,7 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: db_pages(base).await?,
         };
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         sample.emit("open", &store, 0, 0);
         let id = case.rows / 2;
         let ids: Vec<_> = if op == "ten_scattered" {
@@ -239,21 +239,20 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             vec![id]
         };
         let before = db.io_stats();
+        db.begin().await?;
         match op {
             "read_only_save" => {
                 db.query("SELECT count(*) FROM t").await?;
             }
             "rollback" => {
-                db.execute("BEGIN").await?;
                 db.execute(&format!(
                     "UPDATE t SET payload=printf('%0{}d',0) WHERE id={id}",
                     case.payload
                 ))
                 .await?;
-                db.execute("ROLLBACK").await?;
+                db.rollback().await?;
             }
             "replace_payload" | "ten_adjacent" | "ten_scattered" => {
-                db.execute("BEGIN").await?;
                 for id in &ids {
                     db.execute(&format!(
                         "UPDATE t SET payload=printf('%0{}d',0) WHERE id={id}",
@@ -261,7 +260,6 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
                     ))
                     .await?;
                 }
-                db.execute("COMMIT").await?;
                 sample.logical_write = (ids.len() * case.payload) as u64;
             }
             "update_index" => {
@@ -291,19 +289,18 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             after.database_bytes_written - before.database_bytes_written,
             after.private_wal_bytes_written - before.private_wal_bytes_written,
         );
-        db.checkpoint().await?;
-        let checkpoint = db.io_stats();
-        sample.db_pages = (checkpoint.database_len / 4096) as usize;
+        db.commit(None).await?;
+        let committed = db.io_stats();
+        sample.db_pages = (committed.database_len / 4096) as usize;
         sample.emit(
-            "checkpoint",
+            "commit",
             &store,
-            checkpoint.database_bytes_written - after.database_bytes_written,
-            checkpoint.private_wal_bytes_written - after.private_wal_bytes_written,
+            committed.database_bytes_written - after.database_bytes_written,
+            committed.private_wal_bytes_written - after.private_wal_bytes_written,
         );
-        save(db).await?;
-        sample.emit("save", &store, 0, 0);
+        db.save().await?;
         store.crash();
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         let count = db.query("SELECT count(*) FROM t").await?[0][0]
             .as_int()
             .unwrap() as usize;
@@ -347,12 +344,12 @@ async fn writes(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     Ok(())
 }
 
-/// Crash a save, then measure the open that follows. A save puts its tail
-/// entry, then its head, in one sync.
+/// Crash a commit, then measure the open that follows. A commit puts its
+/// tail entry, then its head, in one sync.
 async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
     // (operation, effect of the failed sync, writes lost, committed)
     for (op, effect, lost, committed) in [
-        // Every write of the save.
+        // Every write of the commit.
         ("commit_lost", Effect::None, usize::MAX, false),
         // The head: the tail entry is stored, but nothing names it.
         ("head_lost", Effect::None, 1, false),
@@ -360,7 +357,8 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
         ("sync_ack_lost", Effect::After, 0, true),
     ] {
         let store = Arc::new(FaultKv::new(base.fork(), 7));
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
+        db.begin().await?;
         db.execute(&format!(
             "UPDATE t SET payload=printf('%0{}d',0) WHERE id={}",
             case.payload,
@@ -374,7 +372,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             effect,
             cancel: false,
         });
-        assert!(save(db).await.is_err());
+        assert!(db.commit(None).await.is_err());
         assert!(
             store.events().iter().any(|e| e.faulted),
             "the sync failpoint was not reached"
@@ -393,7 +391,7 @@ async fn recovery(base: &MemoryKv, case: Case, run: usize) -> Result<()> {
             logical_delete: 0,
             db_pages: db_pages(base).await?,
         };
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         sample.emit("recovery_open", &store.inner, 0, 0);
         let value = db
             .query(&format!("SELECT payload FROM t WHERE id={}", case.rows / 2))

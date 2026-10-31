@@ -1,6 +1,6 @@
 //! Exercises the normal library with an immediately-ready backend: no simulator,
 //! instrumentation, forced yields or checkpoint fault hooks are required.
-use crate::sql::Sql;
+use crate::sql::Database;
 use crate::state::{Result, State, kv::KvStore};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -9,14 +9,6 @@ use std::{
     io,
     sync::{Arc, Mutex},
 };
-
-/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> crate::state::Result<crate::state::FlushReport> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await
-}
 
 #[derive(Default)]
 struct Store(Mutex<BTreeMap<String, Bytes>>);
@@ -45,19 +37,20 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let mut db = require_send(Sql::open(&State::open(store.clone()).await?)).await?;
+        let db = require_send(Database::new(State::open(store.clone()).await?)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
         db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
-        save(db).await?;
-        let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+        require_send(db.save()).await?;
+        let db = Database::new(State::open(store.clone()).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
         );
+        db.begin().await?;
         db.execute("UPDATE t SET value='changed'").await?;
         drop(db);
-        let mut db = Sql::open(&State::open(store).await?).await?;
+        let db = Database::new(State::open(store).await?).await?;
         assert_eq!(
             db.query("SELECT value FROM t").await?[0][0].to_string(),
             "hello"
@@ -70,31 +63,27 @@ fn save_and_reopen_with_an_immediately_ready_backend() -> Result<()> {
     })
 }
 
-/// A transaction and a record, durable together at the mutation's flush.
+/// A transaction and its effects, durable together at its commit.
 #[test]
-fn a_mutation_flush_with_an_immediately_ready_backend() -> Result<()> {
+fn a_commit_with_effects_with_an_immediately_ready_backend() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(Store::default());
         fn require_send<T: Send>(value: T) -> T {
             value
         }
-        let state = State::open(store.clone()).await?;
-        let mut db = Sql::open(&state).await?;
+        let db = Database::new(State::open(store.clone()).await?).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)")
             .await?;
-        require_send(db.transaction(async |db| {
-            db.execute("INSERT INTO t VALUES (1, 'hello')").await?;
-            db.execute("INSERT INTO t VALUES (2, 'world')").await
-        }))
+        require_send(
+            db.transaction(async |db| db.execute("INSERT INTO t VALUES (1, 'hello')").await),
+        )
         .await?;
-        let mut mutation = state.mutation();
-        db.flush(&mut mutation).await?;
-        mutation.set(&state.record("note"), Bytes::from_static(b"two rows"))?;
-        require_send(mutation.flush()).await?;
+        db.begin().await?;
+        db.execute("INSERT INTO t VALUES (2, 'world')").await?;
+        require_send(db.commit(Some(Bytes::from_static(b"two rows")))).await?;
         drop(db);
-        let state = State::open(store).await?;
-        assert_eq!(state.record("note").get(), &b"two rows"[..]);
-        let mut db = Sql::open(&state).await?;
+        let db = Database::new(State::open(store).await?).await?;
+        assert_eq!(db.effects().await?, &b"two rows"[..]);
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(2)

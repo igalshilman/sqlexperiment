@@ -3,12 +3,12 @@
 //! A 10,000-row table with JSON payloads (half random hex) is bulk loaded.
 //! Each measured session opens, runs four skewed point lookups (90% within a
 //! hot tenth of the rows) and a 50-row range scan; every tenth session also
-//! updates a row and saves. All sessions share one `PageCache`, whose memory is
+//! updates a row, which commits. All sessions share one `PageCache`, whose memory is
 //! sized as a fraction of the logical database; the rest spills to a 1 GiB disk
 //! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
-use restate_objects::sql::Sql;
+use restate_objects::sql::Database;
 use restate_objects::state::{
     PageCache, Result, State,
     kv::KvStore,
@@ -22,14 +22,6 @@ use std::{
     },
     time::Instant,
 };
-
-/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await
-}
 
 struct Counting;
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -62,7 +54,7 @@ type Store = Arc<LatencyKv<MemoryKv>>;
 async fn baseline() -> Result<(MemoryKv, u64)> {
     let store = MemoryKv::default();
     let kv: Arc<dyn KvStore> = Arc::new(store.clone());
-    let mut db = Sql::open(&State::open(kv.clone()).await?).await?;
+    let db = Database::new(State::open(kv.clone()).await?).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, doc TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -72,8 +64,8 @@ async fn baseline() -> Result<(MemoryKv, u64)> {
          'tags', json_array('alpha', 'beta', i % 7), 'note', hex(randomblob(40 + i % 30))) FROM x"
     ))
     .await?;
-    save(db).await?;
-    let pages = Sql::open(&State::open(kv).await?)
+    db.save().await?;
+    let pages = Database::new(State::open(kv).await?)
         .await?
         .io_stats()
         .database_len
@@ -96,7 +88,7 @@ fn row(state: &mut u64) -> u64 {
 
 async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> Result<()> {
     let kv: Arc<dyn KvStore> = store.clone();
-    let mut db = Sql::open(&State::open(kv).cached(cache, "bench").await?).await?;
+    let db = Database::new(State::open(kv).cached(cache, "bench").await?).await?;
     for _ in 0..4 {
         let id = row(state);
         let rows = db
@@ -116,7 +108,7 @@ async fn session(store: &Store, cache: &PageCache, n: u64, state: &mut u64) -> R
         let id = row(state);
         db.execute(&format!("UPDATE t SET n = n + 1 WHERE id = {id}"))
             .await?;
-        save(db).await?;
+        db.save().await?;
     }
     Ok(())
 }

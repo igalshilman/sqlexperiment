@@ -346,11 +346,10 @@ impl World {
             pending.apply(&op);
             if self.rng.percent(30) {
                 // The state reads as last flushed, whatever the mutation holds.
-                let name = self.rng.pick(&FILES);
-                let index = self.rng.below(self.model.len(name).div_ceil(4096) + 2);
-                let read = text(session.file(name).read(index).await)?;
-                if read != self.model.page(name, index) {
-                    return Err(format!("{name}: page {index} not as flushed"));
+                let index = self.rng.below(self.model.len().div_ceil(4096) + 2);
+                let read = text(session.file().read(index).await)?;
+                if read != self.model.page(index) {
+                    return Err(format!("page {index} not as flushed"));
                 }
             }
         }
@@ -603,7 +602,7 @@ impl World {
         };
         let session = text(Session::open(self.store.clone(), setup).await)?;
         for tick in 0..3 {
-            let ops = [Op::Set("progress", format!("tick {tick}").into())];
+            let ops = [Op::Effects(format!("tick {tick}").into())];
             text(session.flush(&ops).await)?;
         }
         // The flushes' collections list S3 only around a promotion: one
@@ -694,12 +693,10 @@ fn trace(line: impl FnOnce() -> String) {
 
 fn describe(op: &Op) -> String {
     match op {
-        Op::Set(name, value) => format!("set {name} to {} bytes", value.len()),
-        Op::Write(name, index, Some(image)) => {
-            format!("write {name} page {index}: {:02x?}", &image[..4])
-        }
-        Op::Write(name, index, None) => format!("hole {name} page {index}"),
-        Op::SetLen(name, len) => format!("set_len {name} {len}"),
+        Op::Effects(value) => format!("set effects to {} bytes", value.len()),
+        Op::Write(index, Some(image)) => format!("write page {index}: {:02x?}", &image[..4]),
+        Op::Write(index, None) => format!("hole page {index}"),
+        Op::SetLen(len) => format!("set_len {len}"),
     }
 }
 

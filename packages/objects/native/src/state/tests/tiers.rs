@@ -32,10 +32,9 @@ async fn write(
     pages: std::ops::Range<u64>,
     seed: u64,
 ) -> Result<crate::state::FlushReport> {
-    let file = state.file("db")?;
     let mut mutation = state.mutation();
     for n in pages {
-        mutation.write(&file, n, Some(noise(seed + n)))?;
+        mutation.write(n, Some(noise(seed + n)))?;
     }
     mutation.flush().await
 }
@@ -106,7 +105,7 @@ fn a_full_l0_is_promoted_to_s3_in_one_put() -> Result<()> {
             .checkpoints(Arc::new(s3.clone()))
             .options(options())
             .await?;
-        let file = cold.file("db")?;
+        let file = cold.file();
         for n in 0..48 {
             let seed = if n < 2 { 7 } else { 0 };
             assert_eq!(file.read(n).await?, Some(noise(seed + n)), "page {n}");
@@ -158,7 +157,7 @@ fn a_cold_read_goes_to_the_tier_its_frame_is_in() -> Result<()> {
                 ..options()
             })
             .await?;
-        let file = cold.file("db")?;
+        let file = cold.file();
         let gets = s3.gets();
         store.reset_stats();
         assert_eq!(file.read(64).await?, Some(noise(64)));
@@ -197,7 +196,7 @@ fn a_failed_promotion_leaves_l0_as_it_was() -> Result<()> {
             promoted |= report.checkpoint.is_some_and(|c| c.promoted);
         }
         assert!(promoted, "a promotion once S3 is back");
-        let file = state.file("db")?;
+        let file = state.file();
         for n in 0..48 {
             assert_eq!(file.read(n).await?, Some(noise(n)), "page {n}");
         }
@@ -220,7 +219,7 @@ fn an_open_without_s3_of_a_state_in_l1_fails_clearly() -> Result<()> {
         write(&state, 0..32, 0).await?;
         write(&state, 0..1, 1).await?;
         let error = match State::open(store.clone()).await {
-            Ok(without) => without.file("db")?.read(5).await.err(),
+            Ok(without) => without.file().read(5).await.err(),
             Err(error) => Some(error),
         };
         let error = error.expect("an error").to_string();

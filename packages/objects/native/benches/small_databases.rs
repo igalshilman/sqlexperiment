@@ -1,7 +1,8 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use restate_objects::sql::Sql;
+use restate_objects::sql::Database;
 use restate_objects::state::{
     Result, State,
+    kv::KvStore,
     simulation::{MemoryKv, Stats},
 };
 use std::{
@@ -9,12 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> restate_objects::state::Result<restate_objects::state::FlushReport> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await
+/// A session of the database in `store`.
+async fn open(store: Arc<impl KvStore + 'static>) -> Result<Database> {
+    Database::new(State::open(store).await?).await
 }
 
 #[derive(Clone, Copy)]
@@ -25,14 +23,14 @@ struct Case {
 }
 async fn baseline(case: Case) -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(&State::open(Arc::new(store.clone())).await?).await?;
+    let db = open(Arc::new(store.clone())).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER, note INTEGER, payload TEXT)").await?;
     for column in ["a", "b", "c"].into_iter().take(case.indexes) {
         db.execute(&format!("CREATE INDEX by_{column} ON t({column})"))
             .await?;
     }
     db.execute(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{}) INSERT INTO t SELECT x, x, x, x, 0, printf('%0{}d',x) FROM n", case.rows, case.payload)).await?;
-    save(db).await?;
+    db.save().await?;
     store.crash();
     Ok(store)
 }
@@ -63,10 +61,7 @@ fn print_row(
 }
 async fn run(case: Case, repeats: usize) -> Result<()> {
     let base = baseline(case).await?;
-    let db_bytes = Sql::open(&State::open(Arc::new(base.fork())).await?)
-        .await?
-        .io_stats()
-        .database_len;
+    let db_bytes = open(Arc::new(base.fork())).await?.io_stats().database_len;
     let before = base.stored_bytes();
     let id = case.rows / 2;
     let query = format!("SELECT id, length(payload) FROM t WHERE id={id}");
@@ -79,15 +74,15 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             "update_a",
             "insert",
             "delete",
-            "ten_updates_one_save",
-            "ten_updates_ten_saves",
+            "ten_updates_one_commit",
+            "ten_updates_ten_commits",
         ] {
             if op == "secondary_lookup" && case.indexes == 0 {
                 continue;
             }
             let store = Arc::new(base.fork());
             let mut warm = if op == "warm_pk" {
-                let mut db = Sql::open(&State::open(store.clone()).await?).await?;
+                let db = open(store.clone()).await?;
                 db.query(&query).await?;
                 Some(db)
             } else {
@@ -95,9 +90,9 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             };
             store.reset_stats();
             let start = Instant::now();
-            let mut db = match warm.take() {
+            let db = match warm.take() {
                 Some(db) => db,
-                None => Sql::open(&State::open(store.clone()).await?).await?,
+                None => open(store.clone()).await?,
             };
             match op {
                 "cold_pk" | "warm_pk" | "secondary_lookup" => {
@@ -139,19 +134,22 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
                     .await?
                 }
                 "delete" => db.execute(&format!("DELETE FROM t WHERE id={id}")).await?,
-                "ten_updates_one_save" | "ten_updates_ten_saves" => {
+                "ten_updates_one_commit" | "ten_updates_ten_commits" => {
+                    // Each statement commits, unless in a transaction.
+                    if op == "ten_updates_one_commit" {
+                        db.begin().await?;
+                    }
                     for n in 1..=10 {
                         db.execute(&format!("UPDATE t SET note={n} WHERE id={id}"))
                             .await?;
-                        if op == "ten_updates_ten_saves" && n < 10 {
-                            save(db).await?;
-                            db = Sql::open(&State::open(store.clone()).await?).await?;
-                        }
+                    }
+                    if op == "ten_updates_one_commit" {
+                        db.commit(None).await?;
                     }
                 }
                 _ => unreachable!(),
             }
-            save(db).await?;
+            db.save().await?;
             let elapsed = start.elapsed();
             let stats = store.stats();
             print_row(
@@ -165,7 +163,7 @@ async fn run(case: Case, repeats: usize) -> Result<()> {
             // Validate results after timing/count capture, with simulated loss of
             // all unacknowledged state and a fresh engine.
             store.crash();
-            let mut reopened = Sql::open(&State::open(store.clone()).await?).await?;
+            let reopened = open(store.clone()).await?;
             let count = reopened.query("SELECT count(*) FROM t").await?[0][0].to_string();
             let expected_count =
                 case.rows + usize::from(op == "insert") - usize::from(op == "delete");

@@ -311,7 +311,7 @@ impl KvIo {
     ) -> io::Result<Arc<Self>> {
         let state = crate::state::State::open(store).options(options).await;
         let state = state.map_err(io::Error::other)?;
-        let file = state.file(crate::sql::DB_FILE).map_err(io::Error::other)?;
+        let file = state.file();
         let io = Self::new(file, crate::sql::MAX_PRIVATE_BYTES);
         *io.state.lock().unwrap() = Some(state);
         Ok(io)
@@ -720,7 +720,7 @@ impl KvIo {
         if self.pending_count() != 0 {
             return Err(invalid("cannot flush pages with pending I/O"));
         }
-        let file = self.file()?;
+        self.file()?;
         let mut private = self.private.lock().unwrap();
         if private.sizes[WAL] != 0 {
             return Err(invalid("the engine WAL is not checkpointed"));
@@ -748,11 +748,11 @@ impl KvIo {
         }
         for (block, page) in &private.flushed {
             mutation
-                .write(&file, *block, page.clone())
+                .write(*block, page.clone())
                 .map_err(io::Error::other)?;
         }
         mutation
-            .set_len(&file, private.sizes[DB])
+            .set_len(private.sizes[DB])
             .map_err(io::Error::other)
     }
 

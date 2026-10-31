@@ -58,7 +58,7 @@ async fn populated() -> Result<Arc<ControlledKv>> {
         frame_pages: 1,
         ..StateOptions::default()
     };
-    let mut db = Db::open(store.clone(), options).await?;
+    let db = Db::open(store.clone(), options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10)").await?;
@@ -80,7 +80,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
         // Open reads the schema page; the query reads the table's.
-        let mut db = Db::open(store.clone(), no_prefetch()).await?;
+        let db = Db::open(store.clone(), no_prefetch()).await?;
         store.fail_reads.store(true, Ordering::SeqCst);
         match db.query("SELECT n FROM t").await {
             Ok(_) => panic!("expected injected failure"),
@@ -88,7 +88,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
         }
         drop(db);
         store.fail_reads.store(false, Ordering::SeqCst);
-        let mut db = Db::open(store, StateOptions::default()).await?;
+        let db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })
@@ -98,7 +98,7 @@ fn backend_read_error_reaches_caller_and_saved_state_survives() -> Result<()> {
 fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Result<()> {
     futures::executor::block_on(async {
         let store = populated().await?;
-        let mut db = Db::open(store.clone(), no_prefetch()).await?;
+        let db = Db::open(store.clone(), no_prefetch()).await?;
         let (started, waiting) = oneshot::channel();
         *store.gate.lock().unwrap() = Some(started);
         store.inner.reset_stats();
@@ -120,7 +120,7 @@ fn cancellation_during_pending_kv_read_poison_session_without_publishing() -> Re
         );
         drop(db);
         assert_eq!(store.inner.stats().puts, 0);
-        let mut db = Db::open(store, StateOptions::default()).await?;
+        let db = Db::open(store, StateOptions::default()).await?;
         assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
         Ok(())
     })

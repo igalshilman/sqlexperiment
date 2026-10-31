@@ -18,7 +18,7 @@ use futures::{
     future::BoxFuture,
     task::{ArcWake, waker},
 };
-use restate_objects::sql::{Sql, Value};
+use restate_objects::sql::{Database, Value};
 use restate_objects::state::{
     Result, State,
     blobs::BlobStore,
@@ -225,7 +225,7 @@ impl Stores {
         }
     }
 
-    async fn open(&self) -> Result<Sql> {
+    async fn open(&self) -> Result<Database> {
         let mut open = State::open(self.restate.clone());
         if let Ok(bytes) = std::env::var("L0_BYTES") {
             open = open.options(restate_objects::state::StateOptions {
@@ -236,7 +236,7 @@ impl Stores {
         if let Some((_, s3)) = &self.s3 {
             open = open.checkpoints(s3.clone());
         }
-        Sql::open(&open.await?).await
+        Database::new(open.await?).await
     }
 
     /// Requests so far: Restate's gets, S3's GETs.
@@ -246,25 +246,17 @@ impl Stores {
     }
 }
 
-async fn save(mut db: Sql) -> Result<()> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await?;
-    Ok(())
-}
-
 /// A table of `rows` rows of 256 bytes, indexed on `a`, then `aged` flushes
 /// of a row each, so that the tail holds what a live database's does.
 async fn load(stores: &Stores, rows: i64, aged: i64) -> Result<()> {
-    let mut db = stores.open().await?;
+    let db = stores.open().await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_a ON t(a)").await?;
-    save(db).await?;
+    db.save().await?;
     let payload = |id: i64| Value::build_text(text(id));
     for batch in (1..=rows).collect::<Vec<_>>().chunks(100_000) {
-        let mut db = stores.open().await?;
+        let db = stores.open().await?;
         db.execute("BEGIN").await?;
         for &id in batch {
             db.execute_with(
@@ -274,16 +266,16 @@ async fn load(stores: &Stores, rows: i64, aged: i64) -> Result<()> {
             .await?;
         }
         db.execute("COMMIT").await?;
-        save(db).await?;
+        db.save().await?;
     }
     for i in 0..aged {
-        let mut db = stores.open().await?;
+        let db = stores.open().await?;
         db.execute_with(
             "UPDATE t SET payload = ? WHERE id = ?",
             [payload(-i), Value::from_i64(key(rows, i))],
         )
         .await?;
-        save(db).await?;
+        db.save().await?;
     }
     Ok(())
 }
@@ -379,7 +371,7 @@ async fn run(clock: &Clock, database: &str, rows: i64) -> Result<()> {
         for i in 0..SAMPLES {
             let k = Value::from_i64(key(rows, i));
             let before = now();
-            let mut db = stores.open().await?;
+            let db = stores.open().await?;
             let opened = now();
             open.add(before, opened);
             db.query_with(query.sql, [k]).await?;

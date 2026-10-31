@@ -148,7 +148,7 @@ fn dropping_the_cache_frees_parked_values() -> crate::state::Result<()> {
             .await?;
         let freed = Arc::new(());
         let value = (namespace, freed.clone());
-        assert!(state.park("engine", value, 1).is_ok());
+        assert!(state.park(value, 1).is_ok());
         assert_eq!(cache.parked.lock().unwrap().parked.len(), 1);
         drop(state);
         let shared = Arc::downgrade(&cache.shared);

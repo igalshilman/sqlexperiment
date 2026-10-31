@@ -17,7 +17,7 @@ async fn baseline() -> Result<MemoryKv> {
         frame_pages: 1,
         ..StateOptions::default()
     };
-    let mut db = Db::open(Arc::new(store.clone()), options).await?;
+    let db = Db::open(Arc::new(store.clone()), options).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -41,7 +41,7 @@ fn plan(operation: Operation, prefix: &str, nth: usize, effect: Effect, cancel: 
     }
 }
 async fn check(store: Arc<dyn KvStore>, changed: bool) -> Result<()> {
-    let mut db = Db::open(store, StateOptions::default()).await?;
+    let db = Db::open(store, StateOptions::default()).await?;
     let rows = db
         .query("SELECT id,n,length(payload),substr(payload,-2) FROM t ORDER BY id")
         .await?;
@@ -84,7 +84,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
         ] {
             let probe = Arc::new(FaultKv::new(base.fork(), 7));
             if let Some(sql) = sql {
-                let mut db = Db::open(probe.clone(), StateOptions::default()).await?;
+                let db = Db::open(probe.clone(), StateOptions::default()).await?;
                 let _gate = probe.arm(plan(Operation::Get, "", usize::MAX, Effect::None, false));
                 db.query(sql).await?;
             } else {
@@ -129,7 +129,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
                         } else {
                             assert!(future.await.is_err());
                         }
-                        if let Some(mut db) = session {
+                        if let Some(db) = session {
                             assert!(
                                 db.query("SELECT 1")
                                     .await
@@ -160,7 +160,7 @@ fn every_read_can_error_or_cancel_before_or_after_delivery() -> Result<()> {
     })
 }
 
-/// A flush that fails, at the put of its tail entry or at its sync, has an
+/// A commit that fails, at the put of its tail entry or at its sync, has an
 /// unknown outcome: after a crash it is there only if the sync stored it.
 #[test]
 fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
@@ -170,13 +170,11 @@ fn a_failed_flush_is_there_only_if_its_sync_stored_it() -> Result<()> {
         for (operation, prefix) in [(Operation::Put, "v22/tail/"), (Operation::Sync, "")] {
             for effect in [Effect::None, Effect::After] {
                 let store = Arc::new(FaultKv::new(base.fork(), 7));
-                // The save puts its tail entry, then its head.
-                let mut db = Db::open(store.clone(), collecting()).await?;
-                db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)")
-                    .await?;
+                // The commit puts its tail entry, then its head.
+                let db = Db::open(store.clone(), collecting()).await?;
                 let _gate = store.arm(plan(operation, prefix, 1, effect, false));
-                let saved = db.save().await;
-                assert!(saved.is_err());
+                let update = db.execute("UPDATE t SET n=99,payload=printf('%09000d',0)");
+                assert!(update.await.is_err());
                 assert_eq!(store.active(), 0, "the failed sync must settle");
                 store.disarm();
                 store.inner.crash();

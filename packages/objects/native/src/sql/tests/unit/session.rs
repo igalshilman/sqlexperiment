@@ -5,34 +5,35 @@ use futures::{
     future::{Either, select},
 };
 
-/// Flush `db`'s SQL in a mutation of its state, and the mutation, ending the session.
-async fn save(mut db: Sql) -> crate::sql::Result<crate::state::FlushReport> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    mutation.flush().await
+/// A session of the database in `store`, without the page cache.
+async fn open(store: Arc<MemoryKv>) -> Result<Database> {
+    Database::new(crate::state::State::open(store).await?).await
 }
 
 async fn baseline() -> Result<MemoryKv> {
     let store = MemoryKv::default();
-    let mut db = Sql::open(&crate::state::State::open(Arc::new(store.clone())).await?).await?;
+    let db = open(Arc::new(store.clone())).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("INSERT INTO t VALUES(1,10,printf('%09000d',1))")
         .await?;
-    save(db).await?;
+    db.save().await?;
     store.crash();
     Ok(store)
 }
 
-async fn changed(store: MemoryKv) -> Result<Sql> {
-    let mut db = Sql::open(&crate::state::State::open(Arc::new(store)).await?).await?;
-    db.execute("UPDATE t SET n=20, payload=printf('%09000d',2)")
-        .await?;
-    assert!(db.io_stats().private_wal_len > 0);
+const UPDATE: &str = "UPDATE t SET n=20, payload=printf('%09000d',2)";
+
+/// A session in a transaction that changed the row.
+async fn changed(store: MemoryKv) -> Result<Database> {
+    let db = open(Arc::new(store)).await?;
+    db.begin().await?;
+    db.execute(UPDATE).await?;
     Ok(db)
 }
 
+/// A commit that fails or is cancelled at any local I/O (the engine's
+/// `COMMIT`, its checkpoint, the move of its pages) publishes nothing.
 #[test]
 fn interrupted_checkpoint_never_publishes() -> Result<()> {
     futures::executor::block_on(async {
@@ -40,7 +41,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
         let probe = changed(base.fork()).await?;
         let io = probe.io.clone();
         let _unused = io.arm_fault(usize::MAX, false, false);
-        save(probe).await?;
+        probe.commit(None).await?;
         let count = io.fault_ops();
         assert!(count > 0);
         for at in 1..=count {
@@ -51,7 +52,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                     store.reset_stats();
                     let gate = db.io.arm_fault(at, after, cancel);
                     if cancel {
-                        match select(save(db).boxed(), gate).await {
+                        match select(db.commit(None).boxed(), gate).await {
                             Either::Left(_) => panic!("checkpoint missed cancellation point"),
                             Either::Right((signal, pending)) => {
                                 signal?;
@@ -60,7 +61,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                         }
                     } else {
                         assert!(
-                            save(db)
+                            db.commit(None)
                                 .await
                                 .unwrap_err()
                                 .to_string()
@@ -69,8 +70,7 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
                     }
                     assert_eq!(store.stats().puts, 0);
                     store.crash();
-                    let mut db =
-                        Sql::open(&crate::state::State::open(Arc::new(store)).await?).await?;
+                    let db = open(Arc::new(store)).await?;
                     assert_eq!(db.query("SELECT n FROM t").await?[0][0].to_string(), "10");
                     assert_eq!(
                         db.query("PRAGMA integrity_check").await?[0][0].to_string(),
@@ -93,10 +93,15 @@ fn interrupted_checkpoint_never_publishes() -> Result<()> {
 fn a_flush_into_a_mutation_rejects_an_engine_wal_not_checkpointed() -> Result<()> {
     futures::executor::block_on(async {
         let store = baseline().await?;
-        let db = changed(store.clone()).await?;
+        let db = open(Arc::new(store.clone())).await?;
+        // Committed in the engine alone, as no call of the session leaves it.
+        let mut engine = db.engine.lock().await;
+        let engine = engine.as_mut().unwrap();
+        engine.execute(UPDATE).await?;
+        assert!(engine.io.wal_len() > 0);
         store.reset_stats();
         let mut mutation = db.state().mutation();
-        let error = db.io.flush_into(&mut mutation).unwrap_err().to_string();
+        let error = engine.io.flush_into(&mut mutation).unwrap_err().to_string();
         assert!(
             error.contains("the engine WAL is not checkpointed"),
             "{error}"
@@ -111,7 +116,7 @@ fn a_flush_into_a_mutation_rejects_an_engine_wal_not_checkpointed() -> Result<()
 fn cached_queries_yield_to_host_and_cancellation_poisons_the_view() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open(&crate::state::State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         db.execute("CREATE TABLE t(n INTEGER)").await?;
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200) INSERT INTO t SELECT x FROM n").await?;
         let expected = db.query("SELECT n FROM t ORDER BY n").await?;
@@ -143,7 +148,7 @@ fn cached_queries_yield_to_host_and_cancellation_poisons_the_view() -> Result<()
 fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
-        let mut db = Sql::open(&crate::state::State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
             .await?;
         db.execute("CREATE INDEX by_n ON t(n)").await?;
@@ -152,9 +157,9 @@ fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
             db.execute(&format!("CREATE TABLE schema_{n}(a INTEGER, b TEXT, c TEXT DEFAULT 'some schema text to span multiple pages')")).await?;
         }
         db.execute("ANALYZE").await?;
-        save(db).await?;
+        db.save().await?;
         store.crash();
-        let mut db = Sql::open(&crate::state::State::open(store.clone()).await?).await?;
+        let db = open(store.clone()).await?;
         assert!(!db.query("SELECT * FROM sqlite_stat1").await?.is_empty());
         db.execute("PRAGMA cache_size=5").await?;
         db.execute("PRAGMA shrink_memory").await?;
@@ -175,8 +180,8 @@ fn host_driver_handles_cold_schema_stats_and_cache_eviction() -> Result<()> {
         db.execute("UPDATE t SET extra=12 WHERE id=75").await?;
         db.execute("DROP INDEX by_n").await?;
         db.checkpoint().await?;
-        save(db).await?;
-        let mut db = Sql::open(&crate::state::State::open(store).await?).await?;
+        db.save().await?;
+        let db = open(store).await?;
         assert_eq!(
             db.query("SELECT extra FROM t WHERE id=75").await?[0][0].as_int(),
             Some(12)

@@ -59,18 +59,12 @@ fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
         let store: Arc<dyn KvStore> = fault.clone();
         let (a, b) = (fresh_namespace(), fresh_namespace());
         let mut model = Model::default();
-        flush(
-            &store,
-            Some(&a),
-            &mut model,
-            &[Op::Write("db", 0, Some(page(1)))],
-        )
-        .await?;
+        flush(&store, Some(&a), &mut model, &[Op::Write(0, Some(page(1)))]).await?;
 
         // A's flush fails at its sync: its writes are visible.
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         let _gate = fault.arm(failing_sync());
-        let write = [Op::Write("db", 0, Some(page(2)))];
+        let write = [Op::Write(0, Some(page(2)))];
         assert!(session.flush(&write).await.is_err());
         fault.disarm();
         drop(session);
@@ -88,13 +82,7 @@ fn a_cache_that_read_a_lost_flush_never_serves_it() -> Result<()> {
         drop(session);
 
         // B, another process, flushes another page.
-        flush(
-            &store,
-            Some(&b),
-            &mut model,
-            &[Op::Write("db", 0, Some(page(3)))],
-        )
-        .await?;
+        flush(&store, Some(&b), &mut model, &[Op::Write(0, Some(page(3)))]).await?;
         // A reads B's page.
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
@@ -113,20 +101,14 @@ fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<
         let store: Arc<dyn KvStore> = fault.clone();
         let (a, b) = (fresh_namespace(), fresh_namespace());
         let mut model = Model::default();
-        flush(
-            &store,
-            Some(&a),
-            &mut model,
-            &[Op::Write("db", 0, Some(page(1)))],
-        )
-        .await?;
+        flush(&store, Some(&a), &mut model, &[Op::Write(0, Some(page(1)))]).await?;
 
         let first = Session::open(store.clone(), options(Some(&a))).await?;
         let stuck = fault.arm(Failpoint {
             cancel: true,
             ..failing_sync()
         });
-        let write = [Op::Write("db", 0, Some(page(2)))];
+        let write = [Op::Write(0, Some(page(2)))];
         let running = Box::pin(first.flush(&write));
         let Either::Right((_, running)) = futures::future::select(running, stuck).await else {
             panic!("the flush did not wait on its sync");
@@ -145,13 +127,7 @@ fn a_state_opened_beside_a_running_flush_caches_nothing_it_may_lose() -> Result<
         drop(session);
 
         // Another process flushes, at the versions the lost flush used.
-        flush(
-            &store,
-            Some(&b),
-            &mut model,
-            &[Op::Write("db", 0, Some(page(3)))],
-        )
-        .await?;
+        flush(&store, Some(&b), &mut model, &[Op::Write(0, Some(page(3)))]).await?;
         let session = Session::open(store.clone(), options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
         Ok(())
@@ -168,26 +144,14 @@ fn a_namespace_made_again_never_reads_the_old_databases_pages() -> Result<()> {
         let a = fresh_namespace();
         let old: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let mut model = Model::default();
-        flush(
-            &old,
-            Some(&a),
-            &mut model,
-            &[Op::Write("db", 0, Some(page(1)))],
-        )
-        .await?;
+        flush(&old, Some(&a), &mut model, &[Op::Write(0, Some(page(1)))]).await?;
         let session = Session::open(old, options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
         drop(session);
 
         let cleared: Arc<dyn KvStore> = Arc::new(MemoryKv::default());
         let mut model = Model::default();
-        flush(
-            &cleared,
-            None,
-            &mut model,
-            &[Op::Write("db", 0, Some(page(2)))],
-        )
-        .await?;
+        flush(&cleared, None, &mut model, &[Op::Write(0, Some(page(2)))]).await?;
         let session = Session::open(cleared, options(Some(&a))).await?;
         assert_eq!(model.differs(&session).await?, None);
         Ok(())
@@ -230,7 +194,7 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
             let flushes = rng.pick(&[0, 1, grace - 1, grace, grace + 4]);
             for _ in 0..flushes {
                 // Pages the reader reads often, and anything else.
-                let hot = Op::Write("db", rng.below(4), Some(varied(&mut rng)));
+                let hot = Op::Write(rng.below(4), Some(varied(&mut rng)));
                 let ops = [hot, Op::random(&mut rng)];
                 flush(&store, Some(&owner), &mut model, &ops).await?;
                 // A worker collects garbage beside them.
@@ -238,11 +202,10 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                 worker.collect_garbage().await?;
             }
             for _ in 0..16 {
-                let name = rng.pick(&FILES);
-                let index = rng.below(opened.len(name).div_ceil(4096) + 1);
-                match reader.file(name).read(index).await {
+                let index = rng.below(opened.len().div_ceil(4096) + 1);
+                match reader.file().read(index).await {
                     Ok(page) => {
-                        assert_eq!(page, opened.page(name, index), "round {round}");
+                        assert_eq!(page, opened.page(index), "round {round}");
                         read += 1;
                     }
                     Err(error) if flushes >= grace => {
@@ -252,12 +215,10 @@ fn a_reader_beside_a_flushing_owner_reads_what_it_opened() -> Result<()> {
                     Err(error) => panic!("round {round}: {error}"),
                 }
             }
-            for name in RECORDS {
-                assert_eq!(reader.state.record(name).get(), opened.record(name));
-            }
+            assert_eq!(reader.state.effects(), opened.effects());
             // Its mutations never flush.
             let keys = memory.keys();
-            let error = reader.flush(&[Op::Set("progress", "reader".into())]).await;
+            let error = reader.flush(&[Op::Effects("reader".into())]).await;
             let error = error.unwrap_err().to_string();
             assert!(error.contains("a reader writes nothing"), "{error}");
             assert_eq!(memory.keys(), keys);
@@ -285,19 +246,16 @@ fn an_open_session_reads_its_state_while_another_flushes() -> Result<()> {
         let opened = model.clone();
         let writer = Session::open(store.clone(), options(Some(&cache))).await?;
         for n in 0..5 {
-            let ops = [
-                Op::Write("db", n, Some(page(100 + n))),
-                Op::random(&mut rng),
-            ];
+            let ops = [Op::Write(n, Some(page(100 + n))), Op::random(&mut rng)];
             writer.flush(&ops).await?;
             model = model.applied(&ops);
             assert_eq!(opened.differs(&open).await?, None);
         }
-        let late = [Op::Set("progress", "late".into())];
+        let late = [Op::Effects("late".into())];
         let error = open.flush(&late).await.unwrap_err().to_string();
         assert!(error.contains("another state flushed"), "{error}");
         drop(open);
-        let ops = [Op::Write("db", 0, Some(page(7)))];
+        let ops = [Op::Write(0, Some(page(7)))];
         writer.flush(&ops).await?;
         model = model.applied(&ops);
         drop(writer);

@@ -3,11 +3,12 @@
 //!
 //! Three modules, each on the one before; only the addon is public:
 //!
-//! - [`state`]: records and paged files over the key/value store, changed
-//!   through a mutation that a flush makes durable at once (`src/state/README.md`).
-//! - [`sql`]: SQLite-compatible SQL in the state's file `db`, flushed with it
-//!   (`src/sql/README.md`).
-//! - `node`: the napi bindings, around [`sql::binding::Session`].
+//! - [`state`]: one paged file and the effects over the key/value store,
+//!   changed through a mutation that a flush makes durable at once
+//!   (`src/state/README.md`).
+//! - [`sql`]: the [`sql::Database`], SQLite-compatible SQL in the state's
+//!   file, each commit flushed with the effects (`src/sql/README.md`).
+//! - `node`: the napi bindings, around [`sql::Database`].
 //!
 //! With the feature `bench`, `state` and `sql` are public instead, for the
 //! benchmarks, and the addon is left out.

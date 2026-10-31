@@ -1,9 +1,9 @@
-//! The bindings' session (`binding::Session`) under storage faults: what a
+//! The database's session (`Database`) under storage faults: what a
 //! failed call leaves, effects and their transaction under a crash, and a
 //! reader beside its owner.
 use super::fault::{Ended, every_failure, failpoint, probe, under};
 use super::host::StateSetup;
-use crate::sql::{Sql, binding::Session};
+use crate::sql::Database;
 use crate::state::simulation::Namespace;
 use crate::state::{
     Result, StateOptions,
@@ -26,19 +26,19 @@ fn options(cache: Option<Namespace>) -> StateSetup {
     }
 }
 
-async fn open(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Session> {
-    async { Session::new(options(cache).open(store).await?).await }.await
+async fn open(store: Arc<dyn KvStore>, cache: Option<Namespace>) -> Result<Database> {
+    async { Database::new(options(cache).open(store).await?).await }.await
 }
 
 /// Insert pair `i`: two rows whose `n` cancel out, one with a body past a page.
-async fn insert_pair(session: &Session, i: i64) -> Result<()> {
+async fn insert_pair(session: &Database, i: i64) -> Result<()> {
     let sql = format!(
         "INSERT INTO t VALUES({}, {i}, printf('%05000d', {i})), ({}, {}, 'x')",
         2 * i,
         2 * i + 1,
         -i
     );
-    session.query(&sql, None).await.map(drop)
+    session.query_columns(&sql, None).await.map(drop)
 }
 
 /// What a commit of `pairs` pairs sets as its effects.
@@ -50,9 +50,12 @@ fn effects(pairs: i64) -> Bytes {
 /// database checks out.
 async fn observe(store: Arc<dyn KvStore>) -> Result<(i64, Bytes)> {
     let session = open(store, None).await?;
-    let (_, rows) = (session.query("SELECT count(*), coalesce(sum(n), 0) FROM t", None)).await?;
+    let (_, rows) =
+        (session.query_columns("SELECT count(*), coalesce(sum(n), 0) FROM t", None)).await?;
     assert_eq!(rows[0][1].as_int(), Some(0), "pairs commit whole");
-    let (_, check) = session.query("PRAGMA integrity_check", None).await?;
+    let (_, check) = session
+        .query_columns("PRAGMA integrity_check", None)
+        .await?;
     assert_eq!(check[0][0].to_string(), "ok");
     let effects = session.effects().await?;
     session.close().await;
@@ -64,17 +67,17 @@ async fn baseline() -> Result<MemoryKv> {
     let memory = MemoryKv::default();
     let session = open(Arc::new(memory.clone()), None).await?;
     let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)";
-    session.query(schema, None).await?;
+    session.query_columns(schema, None).await?;
     session.begin().await?;
     for i in 0..20 {
         insert_pair(&session, i).await?;
     }
     session.commit(Some(effects(20))).await?;
     // More flushes: tail entries over the checkpoint, read from the store.
-    session.query("CREATE TABLE a(x)", None).await?;
+    session.query_columns("CREATE TABLE a(x)", None).await?;
     for k in 0..4 {
         session
-            .query(&format!("INSERT INTO a VALUES({k})"), None)
+            .query_columns(&format!("INSERT INTO a VALUES({k})"), None)
             .await?;
     }
     session.save().await?;
@@ -93,7 +96,7 @@ enum Call {
 }
 
 impl Call {
-    async fn prepare(self, session: &Session) -> Result<()> {
+    async fn prepare(self, session: &Database) -> Result<()> {
         match self {
             Call::CommitWithEffects | Call::Rollback => {
                 session.begin().await?;
@@ -104,11 +107,11 @@ impl Call {
         }
     }
 
-    async fn run(self, session: &Session) -> Result<()> {
+    async fn run(self, session: &Database) -> Result<()> {
         match self {
             Call::Read => {
                 let sql = "SELECT sum(length(body)) FROM t";
-                session.query(sql, None).await.map(drop)
+                session.query_columns(sql, None).await.map(drop)
             }
             Call::Write => insert_pair(session, 20).await,
             Call::Begin => session.begin().await,
@@ -178,7 +181,10 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
                         assert_eq!(session.effects().await?, old.1, "{case}: effects")
                     }
                 }
-                assert!(session.query("SELECT 1", None).await.is_err(), "{case}");
+                assert!(
+                    session.query_columns("SELECT 1", None).await.is_err(),
+                    "{case}"
+                );
                 assert!(session.begin().await.is_err(), "{case}");
                 assert!(
                     session.commit(Some(Bytes::from("late"))).await.is_err(),
@@ -191,10 +197,7 @@ fn a_storage_fault_in_any_call_ends_the_session() -> Result<()> {
                     "{case}: rollback"
                 );
                 let saved = session.save().await.unwrap_err().to_string();
-                assert!(
-                    saved.contains("a failure ended the session") || saved.contains("closed"),
-                    "{case}: {saved}"
-                );
+                assert!(saved.contains("the session ended"), "{case}: {saved}");
                 assert!(session.effects().await.is_err(), "{case}: closed");
 
                 let mut seen = vec![observe(Arc::new(memory.fork())).await?];
@@ -247,7 +250,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
     let store = Arc::new(MonitorKv::new(FaultKv::new(memory.clone(), nth as u64)));
     let session = open(store.clone(), cache.clone()).await?;
     let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)";
-    session.query(schema, None).await?;
+    session.query_columns(schema, None).await?;
     let (mut acknowledged, plan) = (0, failpoint(Operation::Sync, "", nth, Effect::None, false));
     let (hit, _) = under(&store, plan, async {
         for i in 0..24 {
@@ -255,7 +258,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
             insert_pair(&session, i).await?;
             if i % 5 == 4 {
                 session
-                    .query("UPDATE t SET body = 'y' WHERE n < 0", None)
+                    .query_columns("UPDATE t SET body = 'y' WHERE n < 0", None)
                     .await?;
             }
             session.commit(Some(effects(i + 1))).await?;
@@ -307,7 +310,7 @@ async fn crash_at_sync(cached: bool, nth: usize) -> Result<Option<usize>> {
 /// The result of `sql` on a store, through a plain session.
 async fn expected(store: MemoryKv, sql: &str) -> Result<String> {
     let state = options(None).open(Arc::new(store)).await?;
-    let mut session = Sql::open(&state).await?;
+    let session = Database::new(state).await?;
     Ok(format!("{:?}", session.query(sql).await?))
 }
 
@@ -324,16 +327,16 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
         let cache = fresh_namespace();
         let mut owner = open(owner_store.clone(), Some(cache.clone())).await?;
         let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)";
-        owner.query(schema, None).await?;
+        owner.query_columns(schema, None).await?;
         owner.begin().await?;
         for i in 0..60 {
             insert_pair(&owner, i).await?;
         }
         owner.commit(None).await?;
-        owner.query("CREATE TABLE a(x)", None).await?;
+        owner.query_columns("CREATE TABLE a(x)", None).await?;
         for k in 0..4 {
             owner
-                .query(&format!("INSERT INTO a VALUES({k})"), None)
+                .query_columns(&format!("INSERT INTO a VALUES({k})"), None)
                 .await?;
         }
         let queries = [
@@ -347,7 +350,7 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
             let reader_store = Arc::new(FaultKv::new(memory.clone(), round));
             let shared = (round % 2 == 1 && round % 5 != 0).then(|| cache.clone());
             let reader =
-                Session::new(options(shared).open(reader_store.clone()).reader().await?).await?;
+                Database::new(options(shared).open(reader_store.clone()).reader().await?).await?;
             // Now and then its first read fails, which ends it.
             if round % 5 == 0 {
                 let plan = failpoint(
@@ -357,18 +360,19 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                     Effect::None,
                     round % 2 == 0,
                 );
-                let (hit, ended) = under(&reader_store, plan, reader.query(queries[0], None)).await;
+                let (hit, ended) =
+                    under(&reader_store, plan, reader.query_columns(queries[0], None)).await;
                 assert!(
                     hit && ended.failed(),
                     "round {round}: {hit} {:?}",
                     matches!(ended, Ended::Returned(Ok(_)))
                 );
                 assert!(!reader.is_usable());
-                assert!(reader.query(queries[0], None).await.is_err());
+                assert!(reader.query_columns(queries[0], None).await.is_err());
                 faults += 1;
                 continue;
             }
-            let first = reader.query(queries[0], None).await?;
+            let first = reader.query_columns(queries[0], None).await?;
             assert_eq!(
                 format!("{:?}", first.1),
                 expected(snapshot.fork(), queries[0]).await?
@@ -387,19 +391,20 @@ fn a_reader_sees_one_flushed_state_beside_its_owner() -> Result<()> {
                         [Effect::None, Effect::After][round as usize % 2],
                         false,
                     );
-                    let (_, ended) = under(&owner_store, plan, owner.query(&sql, None)).await;
+                    let (_, ended) =
+                        under(&owner_store, plan, owner.query_columns(&sql, None)).await;
                     assert!(ended.failed());
                     assert!(!owner.is_usable());
                     owner.close().await;
                     owner = open(owner_store.clone(), Some(cache.clone())).await?;
                 } else {
-                    owner.query(&sql, None).await?;
+                    owner.query_columns(&sql, None).await?;
                     flushed = true;
                 }
             }
             // The reader reads on, the state it opened on.
             for sql in queries {
-                let (_, rows) = reader.query(sql, None).await?;
+                let (_, rows) = reader.query_columns(sql, None).await?;
                 let opened = expected(snapshot.fork(), sql).await?;
                 assert_eq!(format!("{rows:?}"), opened, "round {round}, {sql}");
                 match flushed {
@@ -431,13 +436,14 @@ fn a_storage_fault_in_a_transaction_body_is_reported_as_itself() -> Result<()> {
             let store = Arc::new(FaultKv::new(memory.fork(), 0));
             let session = open(store.clone(), None).await?;
             session.begin().await?;
-            let (events, result) = probe(&store, session.query(statement, None)).await;
+            let (events, result) = probe(&store, session.query_columns(statement, None)).await;
             result?;
             for plan in every_failure(&events).into_iter().filter(|p| !p.cancel) {
                 let store = Arc::new(FaultKv::new(memory.fork(), 0));
                 let session = open(store.clone(), None).await?;
                 session.begin().await?;
-                let (hit, ended) = under(&store, plan, session.query(statement, None)).await;
+                let (hit, ended) =
+                    under(&store, plan, session.query_columns(statement, None)).await;
                 let Ended::Returned(Err(error)) = ended else {
                     continue;
                 };
@@ -449,7 +455,7 @@ fn a_storage_fault_in_a_transaction_body_is_reported_as_itself() -> Result<()> {
                     "{statement}: a storage fault reported as {message:?}"
                 );
                 assert!(!session.is_usable(), "{statement}: the session went on");
-                assert!(session.query("SELECT 1", None).await.is_err());
+                assert!(session.query_columns("SELECT 1", None).await.is_err());
             }
         }
         assert!(cases > 0, "no fault failed a statement");

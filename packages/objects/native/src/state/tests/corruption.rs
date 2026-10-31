@@ -26,9 +26,7 @@ async fn flushed() -> Result<(MemoryKv, Model)> {
     let mut rng = Rng::new(0xbad);
     for _ in 0..5 {
         let session = Session::open(Arc::new(memory.clone()), options()).await?;
-        for name in FILES {
-            session.file(name).read(1).await?;
-        }
+        session.file().read(1).await?;
         let ops: Vec<Op> = (0..10).map(|_| Op::random(&mut rng)).collect();
         session.flush(&ops).await?;
         model = model.applied(&ops);

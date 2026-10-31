@@ -28,23 +28,22 @@ fn options(cache: Option<&Namespace>) -> StateSetup {
 async fn baseline(cache: Option<&Namespace>) -> Result<MemoryKv> {
     let store = MemoryKv::default();
     let kv = Arc::new(store.clone());
-    let mut db = Db::open(kv.clone(), options(cache)).await?;
+    let db = Db::open(kv.clone(), options(cache)).await?;
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, payload TEXT)")
         .await?;
     db.execute("CREATE INDEX by_n ON t(n)").await?;
     db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<40) INSERT INTO t SELECT x,x,printf('%0300d',x) FROM n").await?;
     db.save().await?;
-    let mut db = Db::open(kv, options(cache)).await?;
+    let db = Db::open(kv, options(cache)).await?;
     db.execute("UPDATE t SET n = n + 100 WHERE id % 3 = 0")
         .await?;
-    db.flush().await?;
     db.state().collect_garbage().await?;
     Ok(store)
 }
 
 /// Returns whether the update `n = 7000` is visible; it must be all or nothing.
 async fn changed(store: Arc<FaultKv>, options: StateSetup) -> Result<bool> {
-    let mut db = Db::open(store, options).await?;
+    let db = Db::open(store, options).await?;
     let rows = db
         .query("SELECT count(*), sum(n = 7000), sum(length(payload)) FROM t")
         .await?;
@@ -71,8 +70,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                             let cache = cached.then(fresh_namespace);
                             let base = baseline(cache.as_ref()).await?;
                             let store = Arc::new(FaultKv::new(base, nth as u64));
-                            let mut db = Db::open(store.clone(), options(cache.as_ref())).await?;
-                            db.execute("UPDATE t SET n = 7000").await?;
+                            let db = Db::open(store.clone(), options(cache.as_ref())).await?;
                             let _gate = store.arm(Failpoint {
                                 operation,
                                 key_prefix: String::new(),
@@ -80,7 +78,8 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                 effect,
                                 cancel: false,
                             });
-                            let (flushed, result) = match db.flush().await {
+                            let (flushed, result) = match db.execute("UPDATE t SET n = 7000").await
+                            {
                                 Ok(_) => (true, db.state().collect_garbage().await.map(drop)),
                                 Err(error) => (false, Err(error)),
                             };
@@ -102,7 +101,7 @@ fn every_save_mutation_fails_atomically() -> Result<()> {
                                 assert!(durable, "acknowledged save was lost");
                             }
                             // The next save works and survives a crash.
-                            let mut db = Db::open(store.clone(), options(cache.as_ref())).await?;
+                            let db = Db::open(store.clone(), options(cache.as_ref())).await?;
                             db.execute("UPDATE t SET n = 7000").await?;
                             db.save().await?;
                             store.inner.crash();

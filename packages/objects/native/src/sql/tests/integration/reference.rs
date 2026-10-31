@@ -1,6 +1,6 @@
 //! A reference engine on plain memory, outside this crate's storage, and the
 //! state of a database as text, to compare a session's with it.
-use crate::sql::{Rows, Sql, Value};
+use crate::sql::{Rows, Value};
 use crate::state::Result;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use turso_core::{Connection, Database, IO, MemoryIO, SqliteDialect, StepResult};
+use turso_core::{Connection, IO, MemoryIO, SqliteDialect, StepResult};
 
 /// A new, empty reference engine.
 pub fn oracle() -> Arc<Connection> {
@@ -17,14 +17,14 @@ pub fn oracle() -> Arc<Connection> {
     static DATABASES: AtomicU64 = AtomicU64::new(0);
     let path = format!("oracle-{}.db", DATABASES.fetch_add(1, Ordering::Relaxed));
     let io: Arc<dyn IO> = Arc::new(MemoryIO::new());
-    Database::open_file(io, &path, Arc::new(SqliteDialect))
+    turso_core::Database::open_file(io, &path, Arc::new(SqliteDialect))
         .unwrap()
         .connect()
         .unwrap()
 }
 
 /// Run `sql` (one or more statements) on the reference engine, as
-/// [`Sql::query`] does: the rows of its last statement, or the first error,
+/// [`crate::sql::Database::query`] does: the rows of its last statement, or the first error,
 /// after which no statement runs.
 pub fn run(connection: &Arc<Connection>, sql: &str) -> std::result::Result<Rows, String> {
     let mut remaining = sql;
@@ -104,8 +104,8 @@ pub async fn dump_of(mut query: impl AsyncFnMut(&str) -> Result<Rows>) -> Result
 }
 
 /// [`dump_of`] a session's database.
-pub async fn dump(sql: &mut Sql) -> Result<String> {
-    dump_of(async |query| sql.query(query).await).await
+pub async fn dump(db: &crate::sql::Database) -> Result<String> {
+    dump_of(async |query| db.query(query).await).await
 }
 
 /// [`dump`] of the reference engine.
@@ -120,6 +120,6 @@ pub fn reference_dump(connection: &Arc<Connection>) -> String {
 }
 
 /// `PRAGMA integrity_check` of a session's database: "ok" when it is.
-pub async fn integrity(sql: &mut Sql) -> Result<String> {
-    Ok(sql.query("PRAGMA integrity_check").await?[0][0].to_string())
+pub async fn integrity(db: &crate::sql::Database) -> Result<String> {
+    Ok(db.query("PRAGMA integrity_check").await?[0][0].to_string())
 }

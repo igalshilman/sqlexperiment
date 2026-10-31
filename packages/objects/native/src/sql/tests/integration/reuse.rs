@@ -4,10 +4,10 @@
 use super::host::StateSetup;
 use super::{
     fault::{failpoint, poll_at_most, under},
-    host::{Db, Durability, Setup},
+    host::Db,
     reference::{dump, integrity},
 };
-use crate::sql::{Sql, binding::Session};
+use crate::sql::Database;
 use crate::state::simulation::Namespace;
 use crate::state::{
     Result, State, StateOptions,
@@ -17,25 +17,22 @@ use crate::state::{
 use bytes::Bytes;
 use std::sync::Arc;
 
-fn owner(cache: &Namespace) -> Setup {
-    Setup(
-        StateSetup {
-            options: StateOptions {
-                checkpoint_entries: 4,
-                ..StateOptions::default()
-            },
-            cache: Some(cache.clone()),
-            packs: None,
+fn owner(cache: &Namespace) -> StateSetup {
+    StateSetup {
+        options: StateOptions {
+            checkpoint_entries: 4,
+            ..StateOptions::default()
         },
-        Durability::Commit,
-    )
+        cache: Some(cache.clone()),
+        packs: None,
+    }
 }
 
 /// The flushed state, through a session without the cache.
 async fn flushed(store: Arc<dyn KvStore>) -> Result<String> {
-    let mut sql = Sql::open(&State::open(store).await?).await?;
-    assert_eq!(integrity(&mut sql).await?, "ok");
-    dump(&mut sql).await
+    let db = Database::new(State::open(store).await?).await?;
+    assert_eq!(integrity(&db).await?, "ok");
+    dump(&db).await
 }
 
 /// A store with a table of 40 rows, some past a page, and an owner whose
@@ -43,7 +40,7 @@ async fn flushed(store: Arc<dyn KvStore>) -> Result<String> {
 async fn parked() -> Result<(Arc<FaultKv>, Namespace)> {
     let store = Arc::new(FaultKv::new(MemoryKv::default(), 0));
     let cache = fresh_namespace();
-    let mut db = Db::open(store.clone(), owner(&cache)).await?;
+    let db = Db::open(store.clone(), owner(&cache)).await?;
     db.execute(
         "CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER, body TEXT); CREATE INDEX t_n ON t(n)",
     )
@@ -192,14 +189,14 @@ fn the_next_session_continues_only_a_clean_engine() -> Result<()> {
             ending.run(&mut db, &store).await?;
             drop(db);
             let expected = flushed(store.clone()).await?;
-            let mut db = Db::open(store.clone(), owner(&cache)).await?;
+            let db = Db::open(store.clone(), owner(&cache)).await?;
             assert_eq!(db.reused_engine(), ending.parks(), "{ending:?}");
-            assert_eq!(dump(&mut db).await?, expected, "{ending:?}");
-            assert_eq!(integrity(&mut db).await?, "ok", "{ending:?}");
+            assert_eq!(dump(&db).await?, expected, "{ending:?}");
+            assert_eq!(integrity(&db).await?, "ok", "{ending:?}");
             // It goes on: what it flushes on top is what the store holds.
             db.execute("UPDATE t SET n = n * 2, body = body || 'z' WHERE id % 3 = 0; INSERT INTO t VALUES(200, 0, 'after'); CREATE TABLE u(x)")
                 .await?;
-            let after = dump(&mut db).await?;
+            let after = dump(&db).await?;
             drop(db);
             assert_eq!(flushed(store.clone()).await?, after, "{ending:?}");
         }
@@ -207,7 +204,7 @@ fn the_next_session_continues_only_a_clean_engine() -> Result<()> {
     })
 }
 
-/// The same through the bindings' session: a cancelled call, a failed
+/// The same through the addon's calls: a cancelled call, a failed
 /// flush, a transaction left open, `save` after a failure, and a clean
 /// `save` hand the next session exactly the flushed state.
 #[test]
@@ -215,25 +212,24 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
     futures::executor::block_on(async {
         for case in 0..6 {
             let (store, cache) = parked().await?;
-            let options = owner(&cache).0;
-            let open = || async { Session::new(options.clone().open(store.clone()).await?).await };
+            let open = || async { Database::new(owner(&cache).open(store.clone()).await?).await };
             let session = open().await?;
             match case {
-                0 => assert!(poll_at_most(session.query(LONG_WRITE, None), 3).is_none()),
+                0 => assert!(poll_at_most(session.execute(LONG_WRITE), 3).is_none()),
                 1 => {
                     let plan = failpoint(Operation::Sync, "", 1, Effect::None, false);
-                    let (hit, _) = under(&store, plan, session.query(LONG_WRITE, None)).await;
+                    let (hit, _) = under(&store, plan, session.execute(LONG_WRITE)).await;
                     assert!(hit);
                     assert!(session.save().await.is_err());
                 }
                 2 => {
                     session.begin().await?;
-                    session.query("DELETE FROM t WHERE id < 10", None).await?;
+                    session.execute("DELETE FROM t WHERE id < 10").await?;
                     assert!(session.save().await.is_err(), "a transaction left open");
                 }
                 3 => {
                     session.begin().await?;
-                    session.query(LONG_WRITE, None).await?;
+                    session.execute(LONG_WRITE).await?;
                     let plan = failpoint(
                         Operation::Put,
                         crate::state::HEAD_KEY,
@@ -248,15 +244,13 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
                 }
                 4 => {
                     session.begin().await?;
-                    session
-                        .query("INSERT INTO t VALUES(100, 0, 'x')", None)
-                        .await?;
+                    session.execute("INSERT INTO t VALUES(100, 0, 'x')").await?;
                     session.rollback().await?;
                     session.save().await?;
                 }
                 _ => {
                     session.begin().await?;
-                    assert!(poll_at_most(session.query(LONG_WRITE, None), 2).is_none());
+                    assert!(poll_at_most(session.execute(LONG_WRITE), 2).is_none());
                     assert!(!session.is_usable());
                     assert!(session.rollback().await.is_err());
                 }
@@ -264,22 +258,17 @@ fn a_session_hands_on_only_the_flushed_state() -> Result<()> {
             drop(session);
             let expected = flushed(store.clone()).await?;
             let session = open().await?;
-            let mut seen = session_dump(&session).await?;
+            let mut seen = dump(&session).await?;
             assert_eq!(seen, expected, "case {case}");
             session
-                .query(
+                .execute(
                     "UPDATE t SET n = -n WHERE id % 4 = 1; INSERT INTO t VALUES(200, 0, 'after')",
-                    None,
                 )
                 .await?;
-            seen = session_dump(&session).await?;
+            seen = dump(&session).await?;
             session.save().await?;
             assert_eq!(flushed(store.clone()).await?, seen, "case {case}");
         }
         Ok(())
     })
-}
-
-async fn session_dump(session: &Session) -> Result<String> {
-    super::reference::dump_of(async |sql| Ok(session.query(sql, None).await?.1)).await
 }

@@ -25,7 +25,7 @@ async fn summary(db: &mut Db) -> Result<(i64, i64)> {
 fn sql_sessions_match_a_model_across_checkpoint_intervals() -> Result<()> {
     futures::executor::block_on(async {
         let store = MemoryKv::default();
-        let mut db = Db::open(Arc::new(store.clone()), options(3)).await?;
+        let db = Db::open(Arc::new(store.clone()), options(3)).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)")
             .await?;
         db.save().await?;
@@ -33,7 +33,7 @@ fn sql_sessions_match_a_model_across_checkpoint_intervals() -> Result<()> {
         let mut model = std::collections::BTreeMap::new();
         for round in 0..24i64 {
             let every = [3, 3, 1, 8][(round / 6) as usize];
-            let mut db = Db::open(Arc::new(store.clone()), options(every)).await?;
+            let db = Db::open(Arc::new(store.clone()), options(every)).await?;
             let start = round * 25;
             db.execute(&format!(
                 "WITH RECURSIVE n(x) AS (VALUES({start}) UNION ALL SELECT x+1 FROM n WHERE x<{}) \
@@ -53,7 +53,6 @@ fn sql_sessions_match_a_model_across_checkpoint_intervals() -> Result<()> {
             if round == 10 {
                 db.execute("CREATE INDEX by_payload ON t(payload)").await?;
             }
-            db.flush().await?;
             db.state().collect_garbage().await?;
             assert_eq!(
                 store.packs(),
@@ -74,7 +73,7 @@ fn sql_sessions_match_a_model_across_checkpoint_intervals() -> Result<()> {
                 "round {round}: {stored} bytes stored for {pages} pages"
             );
         }
-        let mut db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;
+        let db = Db::open(Arc::new(store.clone()), StateOptions::default()).await?;
         let rows = db
             .query("SELECT count(*) FROM t INDEXED BY by_payload WHERE payload > ''")
             .await?;

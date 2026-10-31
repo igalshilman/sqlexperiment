@@ -13,13 +13,13 @@ fn private_changes_are_bounded() -> Result<()> {
             max_private_bytes: 1 << 20,
             ..SqlOptions::default()
         };
-        let mut db = Db::open_with(store.clone(), options(), limits()).await?;
+        let db = Db::open_with(store.clone(), options(), limits()).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
             .await?;
         db.execute("INSERT INTO t VALUES(1, randomblob(100000))")
             .await?;
         db.save().await?;
-        let mut db = Db::open_with(store.clone(), options(), limits()).await?;
+        let db = Db::open_with(store.clone(), options(), limits()).await?;
         let error = db
             .execute("INSERT INTO t SELECT value, randomblob(100000) FROM (WITH RECURSIVE n(value) AS (VALUES(2) UNION ALL SELECT value + 1 FROM n WHERE value < 40) SELECT value FROM n)")
             .await
@@ -27,7 +27,7 @@ fn private_changes_are_bounded() -> Result<()> {
         assert!(error.to_string().contains("max_private_bytes"), "{error}");
         assert!(db.execute("SELECT 1").await.is_err(), "poisoned");
         drop(db);
-        let mut db = Db::open_with(store, options(), limits()).await?;
+        let db = Db::open_with(store, options(), limits()).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(1)
@@ -44,7 +44,7 @@ fn result_rows_are_bounded() -> Result<()> {
             max_result_bytes: 64 << 10,
             ..SqlOptions::default()
         };
-        let mut db = Db::open_with(store, StateOptions::default(), limits).await?;
+        let db = Db::open_with(store, StateOptions::default(), limits).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
             .await?;
         for i in 0..20 {
@@ -68,7 +68,7 @@ fn a_transaction_within_the_limit_flushes() -> Result<()> {
             max_private_bytes: 1 << 20,
             ..SqlOptions::default()
         };
-        let mut db = Db::open_with(store.clone(), StateOptions::default(), limits).await?;
+        let db = Db::open_with(store.clone(), StateOptions::default(), limits).await?;
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
             .await?;
         // About 600 KiB: over half the limit, which the mutation and the
@@ -76,7 +76,7 @@ fn a_transaction_within_the_limit_flushes() -> Result<()> {
         db.execute("INSERT INTO t SELECT value, randomblob(100000) FROM (WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 6) SELECT value FROM n)")
             .await?;
         db.save().await?;
-        let mut db = Db::open_with(store, StateOptions::default(), SqlOptions::default()).await?;
+        let db = Db::open_with(store, StateOptions::default(), SqlOptions::default()).await?;
         assert_eq!(
             db.query("SELECT count(*) FROM t").await?[0][0].as_int(),
             Some(6)
@@ -93,7 +93,7 @@ fn a_statement_past_the_largest_file_fails_alone() -> Result<()> {
     futures::executor::block_on(async {
         let store = Arc::new(MemoryKv::default());
         let largest = Some((crate::state::MAX_FILE_BYTES / 4096) as i64);
-        let mut db = Db::open(store.clone(), StateOptions::default()).await?;
+        let db = Db::open(store.clone(), StateOptions::default()).await?;
         let pages = db.query("PRAGMA max_page_count").await?;
         assert_eq!(pages[0][0].as_int(), largest);
         db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB)")
@@ -107,7 +107,7 @@ fn a_statement_past_the_largest_file_fails_alone() -> Result<()> {
         db.execute("INSERT INTO t VALUES(2, zeroblob(1000))")
             .await?;
         db.save().await?;
-        let mut db = Db::open(store, StateOptions::default()).await?;
+        let db = Db::open(store, StateOptions::default()).await?;
         let pages = db.query("PRAGMA max_page_count").await?;
         assert_eq!(pages[0][0].as_int(), largest, "a session's own cap");
         assert_eq!(db.query("SELECT id FROM t").await?.len(), 1);

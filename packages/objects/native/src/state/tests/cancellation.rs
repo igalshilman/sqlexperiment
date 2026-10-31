@@ -77,8 +77,8 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 for op in &ops {
                     session.apply(&mut mutation, op)?;
                 }
-                let receipt = mutation.receipt();
                 let state = &session.state;
+                let version = state.version();
                 match poll_times(mutation.flush(), polls) {
                     Some(outcome) => {
                         outcome?;
@@ -89,7 +89,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                     // the future.
                     None if polls == 0 => {
                         assert!(state.is_usable());
-                        assert!(receipt.is_discarded());
+                        assert_eq!(state.version(), version);
                         assert_eq!(memory.unsynced(), vec![]);
                         assert_eq!(old.differs(&session).await?, None);
                         continue;
@@ -98,7 +98,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 }
                 let case = format!("cached {cached}, crash {crash}, dropped after {polls} polls");
                 assert!(!state.is_usable(), "{case}");
-                if receipt.is_flushed() {
+                if state.version() > version {
                     // Dropped while it collected garbage, after it landed.
                     drop(session);
                     let reopened = Session::open(store.clone(), options(cache)).await?;
@@ -106,10 +106,6 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                     assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
                     continue;
                 }
-                assert!(
-                    !receipt.is_flushed() && !receipt.is_discarded(),
-                    "{case}: an unknown outcome settles the receipt neither way"
-                );
                 let error = state.mutation().flush().await.unwrap_err().to_string();
                 assert!(error.contains("ended"), "{case}: {error}");
                 drop(session);
@@ -125,7 +121,7 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 assert_eq!(whole, head_queued && !crash, "{case}");
                 landed[usize::from(whole)] += 1;
                 // It goes on, durably.
-                let after = [Op::Set("state", "after".into())];
+                let after = [Op::Effects("after".into())];
                 reopened.flush(&after).await?;
                 drop(reopened);
                 memory.crash();
@@ -138,13 +134,9 @@ fn a_flush_cancelled_after_any_number_of_polls_lands_wholly_or_not_at_all() -> R
                 );
                 assert_eq!(store.violations(), Vec::<String>::new(), "{case}");
             }
-            // Some drops came after the head went out (and, uncached, some
-            // while the flush still fetched what it builds on).
+            // Some drops came after the head went out.
             if !crash {
-                assert!(
-                    landed[1] > 0 && (cached || landed[0] > 0),
-                    "cached {cached}: {landed:?}"
-                );
+                assert!(landed[1] > 0, "cached {cached}: {landed:?}");
             }
         }
         Ok(())

@@ -18,7 +18,7 @@
 //! store, and the rows are what S3 would bill:
 //! requests and bytes per flush, and dollars per million flushes and per
 //! month stored, at S3 Standard's and S3 Express One Zone's prices.
-use restate_objects::sql::{Sql, Value};
+use restate_objects::sql::{Database, Value};
 use restate_objects::state::{
     Result, State, StateOptions,
     kv::KvStore,
@@ -97,7 +97,7 @@ struct Stores {
     s3: Option<MemoryBlobs>,
 }
 
-async fn open(stores: &Stores, cache: &Option<Namespace>) -> Result<Sql> {
+async fn open(stores: &Stores, cache: &Option<Namespace>) -> Result<Database> {
     let kv: Arc<dyn KvStore> = stores.restate.clone();
     let mut open = State::open(kv).options(options());
     if let Some(s3) = &stores.s3 {
@@ -106,19 +106,7 @@ async fn open(stores: &Stores, cache: &Option<Namespace>) -> Result<Sql> {
     if let Some(ns) = cache {
         open = open.cached(&ns.cache, &ns.key);
     }
-    Sql::open(&open.await?).await
-}
-
-/// Flush the SQL, and `effects` as the record `effects`, in one mutation.
-async fn save(mut db: Sql, effects: Option<String>) -> Result<()> {
-    let state = db.state();
-    let mut mutation = state.mutation();
-    db.flush(&mut mutation).await?;
-    if let Some(effects) = effects {
-        mutation.set(&state.record("effects"), effects.into())?;
-    }
-    mutation.flush().await?;
-    Ok(())
+    Database::new(open.await?).await
 }
 
 #[derive(Clone, Copy)]
@@ -207,7 +195,7 @@ async fn load(stores: &Stores, w: Workload, words: &mut Words) -> Result<()> {
     if w.name.starts_with("chat") {
         db.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY, role TEXT, text TEXT)")
             .await?;
-        return save(db, None).await;
+        return db.save().await;
     }
     db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, payload TEXT)")
         .await?;
@@ -227,20 +215,22 @@ async fn load(stores: &Stores, w: Workload, words: &mut Words) -> Result<()> {
             .await?;
         }
         db.execute("COMMIT").await?;
-        save(db, None).await?;
+        db.save().await?;
         db = open(stores, &None).await?;
     }
-    save(db, None).await
+    db.save().await
 }
 
 fn row(w: Workload, i: u64, n: u64) -> i64 {
     ((i * 7919 + n * 104_729) % w.rows + 1) as i64
 }
 
-async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Option<String>> {
+/// A flush of `w`: one commit.
+async fn step(db: &Database, w: Workload, i: u64, words: &mut Words) -> Result<()> {
     match w.name {
         "chat+effects" => {
             let text = words.text(w.payload);
+            db.begin().await?;
             db.execute_with(
                 "INSERT INTO messages(role, text) VALUES(?, ?)",
                 [
@@ -256,7 +246,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
             let effects = format!(
                 r#"{{"sends":[{{"service":"Notifier","handler":"message","key":"session-17","idempotencyKey":"inv_1{i:015x}-{i}","input":{{"id":{i},"text":"{text}"}}}}]}}"#
             );
-            Ok(Some(effects))
+            db.commit(Some(effects.into())).await
         }
         name if name.ends_with("update 1") => {
             db.execute_with(
@@ -266,8 +256,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
                     Value::from_i64(row(w, i, 0)),
                 ],
             )
-            .await?;
-            Ok(None)
+            .await
         }
         name if name.ends_with("update 10") => {
             db.execute("BEGIN").await?;
@@ -278,8 +267,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
                 )
                 .await?;
             }
-            db.execute("COMMIT").await?;
-            Ok(None)
+            db.execute("COMMIT").await
         }
         "10k: insert 1" => {
             let id = (w.rows + i + 1) as i64;
@@ -291,8 +279,7 @@ async fn step(db: &mut Sql, w: Workload, i: u64, words: &mut Words) -> Result<Op
                     Value::build_text(words.text(w.payload)),
                 ],
             )
-            .await?;
-            Ok(None)
+            .await
         }
         _ => unreachable!(),
     }
@@ -322,14 +309,16 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         cached.then(|| Namespace::new(&open_cache(cache_config(256 << 20, 1 << 30)), "bench"));
     // Warm the owner, and its cache with every frame, and checkpoint the load,
     // outside the measurement.
-    let mut db = open(&stores, &cache).await?;
+    let db = open(&stores, &cache).await?;
     if !w.name.starts_with("chat") {
         db.query("SELECT count(*), sum(length(payload)) FROM t")
             .await?;
         db.query("SELECT count(*) FROM t INDEXED BY by_a WHERE a > 0")
             .await?;
     }
-    save(db, Some("warm".into())).await?;
+    db.begin().await?;
+    db.commit(Some("warm".into())).await?;
+    db.save().await?;
     stores.restate.reset();
     memory.reset_stats();
     let s3_before = stores
@@ -337,9 +326,9 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
         .as_ref()
         .map(|s3| (s3.puts(), s3.gets(), s3.lists(), s3.uploaded()));
     for i in 0..w.flushes {
-        let mut db = open(&stores, &cache).await?;
-        let effects = step(&mut db, w, i, &mut words).await?;
-        save(db, effects).await?;
+        let db = open(&stores, &cache).await?;
+        step(&db, w, i, &mut words).await?;
+        db.save().await?;
     }
     let s = memory.stats();
     let rts = stores.restate.round_trips();
@@ -350,7 +339,7 @@ async fn run(w: Workload, cached: bool) -> Result<()> {
     stores.restate.reset();
     memory.reset_stats();
     let s3_cold = stores.s3.as_ref().map(|s3| s3.gets());
-    let mut db = open(&stores, &None).await?;
+    let db = open(&stores, &None).await?;
     let probe = match w.name {
         "chat+effects" => "SELECT text FROM messages WHERE id = 7",
         _ => "SELECT payload FROM t WHERE id = 4242",

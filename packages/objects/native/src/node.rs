@@ -1,7 +1,7 @@
 //! Node.js bindings: SQL over a key/value store implemented in JavaScript.
 //!
-//! The host passes one dispatcher function, `([op, key, value])`, which `index.js`
-//! builds from a store object `{ get, set, clear, sync, keys? }`. Every request
+//! The host passes one dispatcher function, `([op, key, value])`, which
+//! `src/database.ts` builds from a store object `{ get, set, clear, sync, keys? }`. Every request
 //! goes through it in the order it was issued, so a read sees the writes
 //! before it. With `keys`, a checkpoint deletes the packs no checkpoint
 //! needs (see [`crate::state::State::collect_garbage`]); a store without keeps its
@@ -11,8 +11,7 @@
 //! is stored. The object's state keeps writes in issue order, so a crash
 //! loses only a suffix of them (see [`crate::state::kv`]): a statement that
 //! commits queues its writes, then resolves at one `sync`. The session itself,
-//! its commits and the process-wide page cache, is [`crate::sql::binding::Session`].
-use crate::sql::binding::Session;
+//! its commits and the process-wide page cache, is [`crate::sql::Database`].
 use crate::sql::{Numeric, Value};
 use crate::state::kv::KvStore;
 use bytes::Bytes;
@@ -106,14 +105,14 @@ fn error(error: impl std::fmt::Display) -> Error {
     Error::from_reason(error.to_string())
 }
 
-/// One session of a namespace's database (see [`Session`]): every SQL commit
-/// is durable when its call resolves.
+/// One session of a namespace's database (see [`crate::sql::Database`]):
+/// every SQL commit is durable when its call resolves.
 #[napi]
-pub struct Database(Arc<Session>);
+pub struct Database(Arc<crate::sql::Database>);
 
 /// Open the database of `namespace` over the store behind `dispatch`; see
-/// `index.js` for the store object it is built from, and [`Session::open`]
-/// for a `reader`.
+/// `src/database.ts` for the store object it is built from, and
+/// [`crate::sql::Database::open`] for a `reader`.
 #[napi(ts_return_type = "Promise<Database>")]
 pub fn open<'env>(
     env: &'env Env,
@@ -128,29 +127,16 @@ pub fn open<'env>(
         .build()?;
     let store = Arc::new(JsQueue { dispatch });
     env.spawn_future(async move {
-        let session = Session::open(store, &namespace, reader.unwrap_or(false)).await;
-        Ok(Database(Arc::new(session.map_err(error)?)))
+        let database = crate::sql::Database::open(store, &namespace, reader.unwrap_or(false)).await;
+        Ok(Database(Arc::new(database.map_err(error)?)))
     })
 }
 
 #[napi]
 impl Database {
     /// Run SQL (one or more statements; parameters bind to a single one) and
-    /// return the result rows. A commit is durable when this resolves.
-    #[napi(
-        ts_args_type = "sql: string, params?: SqlValue[]",
-        ts_return_type = "Promise<SqlValue[][]>"
-    )]
-    pub async fn query(
-        &self,
-        sql: String,
-        params: Option<Vec<SqlValue>>,
-    ) -> Result<Vec<Vec<SqlValue>>> {
-        Ok(self.query_columns(sql, params).await?.rows)
-    }
-
-    /// [`Self::query`], also returning the column names of the statement whose
-    /// rows these are.
+    /// return the rows of its last statement, with its column names. A
+    /// commit is durable when this resolves.
     #[napi(
         ts_args_type = "sql: string, params?: SqlValue[]",
         ts_return_type = "Promise<{ columns: string[]; rows: SqlValue[][] }>"
@@ -161,7 +147,7 @@ impl Database {
         params: Option<Vec<SqlValue>>,
     ) -> Result<QueryResult> {
         let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
-        let (columns, rows) = self.0.query(&sql, params).await.map_err(error)?;
+        let (columns, rows) = self.0.query_columns(&sql, params).await.map_err(error)?;
         Ok(QueryResult {
             columns,
             rows: rows
@@ -171,45 +157,45 @@ impl Database {
         })
     }
 
-    /// See [`Session::begin`].
+    /// See [`crate::sql::Database::begin`].
     #[napi]
     pub async fn begin(&self) -> Result<()> {
         self.0.begin().await.map_err(error)
     }
 
-    /// See [`Session::commit`].
+    /// See [`crate::sql::Database::commit`].
     #[napi]
     pub async fn commit(&self, effects: Option<Buffer>) -> Result<()> {
         let effects = effects.map(|effects| Bytes::copy_from_slice(&effects));
         self.0.commit(effects).await.map_err(error)
     }
 
-    /// See [`Session::rollback`].
+    /// See [`crate::sql::Database::rollback`].
     #[napi]
     pub async fn rollback(&self) -> Result<()> {
         self.0.rollback().await.map_err(error)
     }
 
-    /// See [`Session::is_usable`].
+    /// See [`crate::sql::Database::is_usable`].
     #[napi]
     pub fn is_usable(&self) -> bool {
         self.0.is_usable()
     }
 
-    /// See [`Session::effects`].
+    /// See [`crate::sql::Database::effects`].
     #[napi]
     pub async fn effects(&self) -> Result<Buffer> {
         let effects = self.0.effects().await.map_err(error)?;
         Ok(Buffer::from(effects.to_vec()))
     }
 
-    /// See [`Session::save`].
+    /// See [`crate::sql::Database::save`].
     #[napi]
     pub async fn save(&self) -> Result<()> {
         self.0.save().await.map_err(error)
     }
 
-    /// See [`Session::close`].
+    /// See [`crate::sql::Database::close`].
     #[napi]
     pub async fn close(&self) {
         self.0.close().await

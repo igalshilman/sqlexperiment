@@ -1,7 +1,7 @@
 //! A seeded, deterministic, randomized campaign: random SQL (tables, indexes,
 //! rows past a page, transactions that commit or roll back, statements that
-//! fail partway through a string) through the bindings' session and through
-//! `Sql` with a flush per turn, with random storage faults (an error
+//! fail partway through a string) through a session of the database, as the
+//! addon calls it, with random storage faults (an error
 //! before or after a request, a cancellation, a crash keeping any prefix of
 //! the writes) and reopens, over the protocol monitor, with and without the
 //! page cache, and with random frame sizes and checkpoint intervals.
@@ -18,9 +18,9 @@
 use super::host::StateSetup;
 use super::{
     fault::{Ended, under},
-    reference::{dump, dump_of, integrity, reference_dump, replay, run, text},
+    reference::{dump, integrity, reference_dump, replay, run, text},
 };
-use crate::sql::{Rows, Sql, binding::Session};
+use crate::sql::{Database, Rows};
 use crate::state::{
     HEAD_KEY, Result, State, StateOptions, TAIL_PREFIX,
     blobs::KV_PREFIX,
@@ -210,37 +210,15 @@ impl Model {
 
 /// How a seed runs.
 struct Config {
-    /// Through the bindings' session; otherwise `Sql`, a flush per turn.
-    session: bool,
     cached: bool,
     options: StateSetup,
     /// The above, to print.
     summary: String,
 }
 
-/// The session the workload runs on.
-enum Open {
-    Session(Session),
-    Turns { state: State, sql: Sql },
-}
-
-impl Open {
-    fn is_usable(&self) -> bool {
-        match self {
-            Open::Session(session) => session.is_usable(),
-            Open::Turns { sql, .. } => sql.is_usable(),
-        }
-    }
-
-    async fn dump(&mut self) -> Result<(String, Bytes)> {
-        match self {
-            Open::Session(session) => {
-                let state = dump_of(async |sql| Ok(session.query(sql, None).await?.1)).await?;
-                Ok((state, session.effects().await?))
-            }
-            Open::Turns { state, sql } => Ok((dump(sql).await?, state.record("effects").get())),
-        }
-    }
+/// What a session sees: its database as text, and its effects.
+async fn view(db: &Database) -> Result<(String, Bytes)> {
+    Ok((dump(db).await?, db.effects().await?))
 }
 
 struct Campaign {
@@ -251,7 +229,6 @@ struct Campaign {
     memory: MemoryKv,
     store: Arc<MonitorKv<FaultKv>>,
     model: Model,
-    turn: u64,
     /// Between the session's `begin` and its `commit` or `rollback`.
     in_body: bool,
     totals: Totals,
@@ -273,14 +250,8 @@ impl Campaign {
             cache: cached.then(fresh_namespace),
             packs: None,
         };
-        let session = seed.is_multiple_of(2);
         let summary = format!(
-            "{}, cached: {cached}, frames of {} pages, a checkpoint every {} entries or {} bytes (0: by count only), inline records to {} bytes, prefetch {}",
-            if session {
-                "binding session"
-            } else {
-                "Sql turns"
-            },
+            "cached: {cached}, frames of {} pages, a checkpoint every {} entries or {} bytes (0: by count only), inline records to {} bytes, prefetch {}",
             options.options.frame_pages,
             options.options.checkpoint_entries,
             options.options.checkpoint_bytes,
@@ -288,7 +259,6 @@ impl Campaign {
             options.options.prefetch_pages,
         );
         let config = Config {
-            session,
             cached,
             options,
             summary,
@@ -303,7 +273,6 @@ impl Campaign {
             memory,
             store,
             model: Model::new(),
-            turn: 0,
             in_body: false,
             totals: Totals::default(),
         }
@@ -317,61 +286,45 @@ impl Campaign {
 
     async fn run(mut self) -> Result<Totals> {
         self.log(|| self.config.summary.clone());
-        let mut open = self.open().await?;
+        let mut session = self.open().await?;
         let tables = "CREATE TABLE t0(id INTEGER PRIMARY KEY, n INTEGER, body TEXT); CREATE TABLE t1(id INTEGER PRIMARY KEY, n INTEGER, body TEXT)";
         self.model.run(tables).unwrap();
-        match &mut open {
-            Open::Session(session) => drop(session.query(tables, None).await?),
-            Open::Turns { sql, .. } => sql.execute(tables).await?,
-        }
-        if self.config.session {
-            self.model.acknowledge();
-        }
+        session.execute(tables).await?;
+        self.model.acknowledge();
         while self.totals.calls < STEPS {
-            open = match self.config.session {
-                true => self.session_step(open).await?,
-                false => self.turn(open).await?,
-            };
+            session = self.step(session).await?;
         }
-        drop(open);
+        drop(session);
         self.end(false, "the end").await?;
         Ok(self.totals)
     }
 
     /// Open the next session, through a fault at open now and then (which
     /// writes nothing); it sees exactly the state the model holds.
-    async fn open(&mut self) -> Result<Open> {
+    async fn open(&mut self) -> Result<Database> {
         self.totals.reopens += 1;
         self.in_body = false;
         if let Some(plan) = self.fault(4, &[Operation::Get]) {
             let writes = self.writes();
             let (_, ended) = under(&self.store, plan, self.open_once()).await;
             assert_eq!(self.writes(), writes, "seed {}: open wrote", self.seed);
-            if let Ended::Returned(Ok(mut open)) = ended {
-                self.check_view(&mut open).await?;
-                return Ok(open);
+            if let Ended::Returned(Ok(session)) = ended {
+                self.check_view(&session).await?;
+                return Ok(session);
             }
         }
-        let mut open = self.open_once().await?;
-        self.check_view(&mut open).await?;
-        Ok(open)
+        let session = self.open_once().await?;
+        self.check_view(&session).await?;
+        Ok(session)
     }
 
-    async fn open_once(&self) -> Result<Open> {
+    async fn open_once(&self) -> Result<Database> {
         let store: Arc<dyn KvStore> = self.store.clone();
-        let options = self.config.options.clone();
-        Ok(match self.config.session {
-            true => Open::Session(Session::new(options.open(store).await?).await?),
-            false => {
-                let state = options.open(store).await?;
-                let sql = Sql::open(&state).await?;
-                Open::Turns { state, sql }
-            }
-        })
+        Database::new(self.config.options.clone().open(store).await?).await
     }
 
-    async fn check_view(&mut self, open: &mut Open) -> Result<()> {
-        let seen = open.dump().await?;
+    async fn check_view(&self, session: &Database) -> Result<()> {
+        let seen = view(session).await?;
         assert!(
             seen == self.model.acknowledged_state(),
             "seed {}: a new session sees another state than the flushed one",
@@ -494,11 +447,8 @@ impl Campaign {
         Ok(())
     }
 
-    /// One call of the bindings' session.
-    async fn session_step(&mut self, open: Open) -> Result<Open> {
-        let Open::Session(session) = open else {
-            unreachable!()
-        };
+    /// One call of the session, or its end.
+    async fn step(&mut self, session: Database) -> Result<Database> {
         let writes = self.writes();
         let mut ended_body = false;
         let (hit, ended, expected) = match self.rng.below(10) {
@@ -509,7 +459,7 @@ impl Campaign {
                     false => top_level(&mut self.rng),
                 };
                 let expected = self.model.run(&sql).map(|rows| text(&rows));
-                let (hit, ended) = self.call(4, &sql, session.query(&sql, None)).await;
+                let (hit, ended) = self.call(4, &sql, session.query_columns(&sql, None)).await;
                 (hit, ended.map(|(_, rows)| text(&rows)), Some(expected))
             }
             6 | 7 => {
@@ -539,7 +489,7 @@ impl Campaign {
                     Some(expected.map(|()| Vec::new())),
                 )
             }
-            _ => match self.rng.below(3) {
+            _ => match self.rng.below(4) {
                 0 => {
                     if self.model.in_transaction() {
                         self.model.run("ROLLBACK").unwrap();
@@ -549,6 +499,37 @@ impl Campaign {
                     (hit, ended.map(|()| Vec::new()), Some(Ok(Vec::new())))
                 }
                 1 => {
+                    // A transaction of a body that commits or fails.
+                    let statements: Vec<String> = (0..1 + self.rng.below(3))
+                        .map(|_| statement(&mut self.rng))
+                        .collect();
+                    let commits = !self.rng.chance(3);
+                    let expected = self.model.run("BEGIN").map(|_| {
+                        for statement in &statements {
+                            let _ = self.model.run(statement);
+                        }
+                        let end = if commits { "COMMIT" } else { "ROLLBACK" };
+                        self.model.run(end).unwrap();
+                    });
+                    let expected = match (expected, commits) {
+                        (Ok(()), true) => Ok(Vec::new()),
+                        (Ok(()), false) => Err("rolled back".to_owned()),
+                        (Err(error), _) => Err(error),
+                    };
+                    let body = async |db: &Database| {
+                        for statement in &statements {
+                            let _ = db.execute(statement).await;
+                        }
+                        match commits {
+                            true => Ok(()),
+                            false => Err("rolled back".into()),
+                        }
+                    };
+                    let what = format!("transaction {statements:?}, commits: {commits}");
+                    let (hit, ended) = self.call(4, &what, session.transaction(body)).await;
+                    (hit, ended.map(|()| Vec::new()), Some(expected))
+                }
+                2 => {
                     // The end of the session: clean unless a transaction is open.
                     self.log(|| "save".into());
                     let saved = session.save().await;
@@ -568,7 +549,7 @@ impl Campaign {
                         ended_body = true;
                         let sql = self.rng.pick(&["COMMIT", "ROLLBACK", "END"]);
                         self.model.run(sql).unwrap();
-                        let (hit, ended) = self.call(4, sql, session.query(sql, None)).await;
+                        let (hit, ended) = self.call(4, sql, session.execute(sql)).await;
                         (hit, ended.map(|_| Vec::new()), None)
                     } else {
                         self.log(|| "close".into());
@@ -580,8 +561,7 @@ impl Campaign {
                 }
             },
         };
-        let open = Open::Session(session);
-        self.settle_call(open, writes, hit, ended, expected, ended_body)
+        self.settle_call(session, writes, hit, ended, expected, ended_body)
             .await
     }
 
@@ -590,21 +570,21 @@ impl Campaign {
     /// committed.
     async fn settle_call(
         &mut self,
-        open: Open,
+        session: Database,
         writes: u64,
         hit: bool,
         ended: Ended<Vec<String>>,
         expected: Option<std::result::Result<Vec<String>, String>>,
         deliberate: bool,
-    ) -> Result<Open> {
+    ) -> Result<Database> {
         let case = format!("seed {}, call {}", self.seed, self.totals.calls);
-        if !open.is_usable() {
+        if !session.is_usable() {
             assert!(
                 hit || deliberate,
                 "{case}: the session ended without a fault: {:?}",
                 ended.error()
             );
-            drop(open);
+            drop(session);
             let unknown = self.writes() > writes;
             self.end(unknown, "the session ended").await?;
             return self.open().await;
@@ -627,92 +607,11 @@ impl Campaign {
                 _ => panic!("{case}: {got:?}, the reference engine: {expected:?}"),
             }
         }
+        // The call flushed before it returned.
         if !self.model.in_transaction() {
-            match &open {
-                // The call flushed before it returned.
-                Open::Session(_) => self.model.acknowledge(),
-                Open::Turns { .. } => {}
-            }
+            self.model.acknowledge();
         }
-        Ok(open)
-    }
-
-    /// One call of a turn of `Sql`: a statement, a transaction, or the
-    /// turn's flush; or the end of the session.
-    async fn turn(&mut self, open: Open) -> Result<Open> {
-        let Open::Turns { state, mut sql } = open else {
-            unreachable!()
-        };
-        let writes = self.writes();
-        let (hit, ended, expected) = match self.rng.below(8) {
-            0..=3 => {
-                let sql_text = top_level(&mut self.rng);
-                let expected = self.model.run(&sql_text).map(|rows| text(&rows));
-                let (hit, ended) = self.call(4, &sql_text, sql.query(&sql_text)).await;
-                (hit, ended.map(|rows| text(&rows)), Some(expected))
-            }
-            4 => {
-                let statements: Vec<String> = (0..1 + self.rng.below(3))
-                    .map(|_| statement(&mut self.rng))
-                    .collect();
-                let commits = !self.rng.chance(3);
-                let expected = match self.model.run("BEGIN") {
-                    Ok(_) => {
-                        for statement in &statements {
-                            let _ = self.model.run(statement);
-                        }
-                        let end = if commits { "COMMIT" } else { "ROLLBACK" };
-                        self.model.run(end).unwrap();
-                        match commits {
-                            true => Ok(Vec::new()),
-                            false => Err("rolled back".to_owned()),
-                        }
-                    }
-                    Err(error) => Err(error),
-                };
-                let body = async |sql: &mut Sql| {
-                    for statement in &statements {
-                        let _ = sql.execute(statement).await;
-                    }
-                    match commits {
-                        true => Ok(()),
-                        false => Err("rolled back".into()),
-                    }
-                };
-                let what = format!("transaction {statements:?}, commits: {commits}");
-                let (hit, ended) = self.call(4, &what, sql.transaction(body)).await;
-                (hit, ended.map(|()| Vec::new()), Some(expected))
-            }
-            5 | 6 => {
-                self.turn += 1;
-                if self.model.in_transaction() {
-                    self.model.run("COMMIT").unwrap();
-                }
-                let effects = Bytes::from(format!("turn {}", self.turn));
-                self.model.pending_effects = Some(effects.clone());
-                let flush = async {
-                    let mut mutation = state.mutation();
-                    sql.flush(&mut mutation).await?;
-                    mutation.set(&state.record("effects"), effects)?;
-                    mutation.flush().await.map(drop)
-                };
-                let (hit, ended) = self.call(2, "flush the turn", flush).await;
-                if matches!(ended, Ended::Returned(Ok(()))) {
-                    self.model.acknowledge();
-                }
-                (hit, ended.map(|()| Vec::new()), None)
-            }
-            _ => {
-                self.log(|| "drop the session".into());
-                drop(sql);
-                drop(state);
-                self.end(false, "dropped").await?;
-                return self.open().await;
-            }
-        };
-        let open = Open::Turns { state, sql };
-        self.settle_call(open, writes, hit, ended, expected, false)
-            .await
+        Ok(session)
     }
 }
 
@@ -735,10 +634,9 @@ impl<T> Ended<T> {
 /// The state of the store and its effects, through a session without the
 /// cache; its database checks out.
 async fn observe(memory: MemoryKv) -> Result<(String, Bytes)> {
-    let state = State::open(Arc::new(memory)).await?;
-    let mut sql = Sql::open(&state).await?;
-    assert_eq!(integrity(&mut sql).await?, "ok");
-    Ok((dump(&mut sql).await?, state.record("effects").get()))
+    let db = Database::new(State::open(Arc::new(memory)).await?).await?;
+    assert_eq!(integrity(&db).await?, "ok");
+    view(&db).await
 }
 
 /// A value of `size` characters, past a page or several when large.

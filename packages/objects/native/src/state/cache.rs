@@ -411,7 +411,7 @@ impl NamespaceCache {
     /// Forget the head and what was parked at it, which the caller drops once
     /// it holds no lock.
     #[must_use]
-    fn forget_locked(&self, owner: &mut Owner) -> HashMap<String, ParkedValue> {
+    fn forget_locked(&self, owner: &mut Owner) -> Option<ParkedValue> {
         owner.head = None;
         owner.durable = None;
         owner.committed = None;
@@ -450,25 +450,19 @@ impl NamespaceCache {
         self.owner().committed
     }
 
-    /// Keep a parked value for the next session; it is dropped
-    /// on any reset.
-    pub(crate) fn park(&self, name: &str, value: ParkedValue) {
+    /// Keep a parked value for the next session, in place of one parked
+    /// before; it is dropped on any reset.
+    pub(crate) fn park(&self, value: ParkedValue) {
         if let Some(parked) = self.parked.upgrade() {
             // Dropped once the lock is released.
-            let evicted = parked
-                .lock()
-                .unwrap()
-                .park((self.id, name.to_owned()), value);
+            let evicted = parked.lock().unwrap().park(self.id, value);
             drop(evicted);
         }
     }
 
-    /// Every value parked for this namespace, by key.
-    pub(crate) fn take_parked(&self) -> HashMap<String, ParkedValue> {
-        let Some(parked) = self.parked.upgrade() else {
-            return HashMap::new();
-        };
-        parked.lock().unwrap().take_all(self.id)
+    /// The value parked for this namespace, if any.
+    pub(crate) fn take_parked(&self) -> Option<ParkedValue> {
+        self.parked.upgrade()?.lock().unwrap().take(self.id)
     }
 
     fn key(&self, at: Location) -> RangeKey {
@@ -575,14 +569,14 @@ pub(crate) struct ParkedValue {
     pub weight: usize,
 }
 
-/// Parked values within a byte budget, by owner and key, least recently
+/// Parked values within a byte budget, one per owner, least recently
 /// parked dropped first.
 struct Parked {
     budget: usize,
     used: usize,
     clock: u64,
-    parked: HashMap<(u64, String), (ParkedValue, u64)>,
-    order: BTreeMap<u64, (u64, String)>,
+    parked: HashMap<u64, (ParkedValue, u64)>,
+    order: BTreeMap<u64, u64>,
 }
 
 impl Parked {
@@ -596,19 +590,19 @@ impl Parked {
         }
     }
 
-    /// Park `value` under `key`, evicting the least recently parked to stay
-    /// in the budget; one heavier than the whole budget is refused rather
-    /// than evict everything. What no longer fits is returned.
+    /// Park `value` for the owner `key`, evicting the least recently parked
+    /// to stay in the budget; one heavier than the whole budget is refused
+    /// rather than evict everything. What no longer fits is returned.
     #[must_use]
-    fn park(&mut self, key: (u64, String), value: ParkedValue) -> Vec<ParkedValue> {
-        let mut out: Vec<ParkedValue> = self.take(&key).into_iter().collect();
+    fn park(&mut self, key: u64, value: ParkedValue) -> Vec<ParkedValue> {
+        let mut out: Vec<ParkedValue> = self.take(key).into_iter().collect();
         if value.weight > self.budget {
             out.push(value);
             return out;
         }
         self.clock += 1;
         self.used += value.weight;
-        self.parked.insert(key.clone(), (value, self.clock));
+        self.parked.insert(key, (value, self.clock));
         self.order.insert(self.clock, key);
         while self.used > self.budget {
             let (_, oldest) = self.order.pop_first().expect("nonempty when over budget");
@@ -622,22 +616,11 @@ impl Parked {
         out
     }
 
-    fn take(&mut self, key: &(u64, String)) -> Option<ParkedValue> {
-        let (value, parked) = self.parked.remove(key)?;
+    fn take(&mut self, key: u64) -> Option<ParkedValue> {
+        let (value, parked) = self.parked.remove(&key)?;
         self.order.remove(&parked);
         self.used -= value.weight;
         Some(value)
-    }
-
-    /// Every value parked by the owner `id`.
-    fn take_all(&mut self, id: u64) -> HashMap<String, ParkedValue> {
-        let keys: Vec<_> = (self.parked.keys())
-            .filter(|(owner, _)| *owner == id)
-            .cloned()
-            .collect();
-        keys.into_iter()
-            .filter_map(|key| Some((key.1.clone(), self.take(&key)?)))
-            .collect()
     }
 }
 
