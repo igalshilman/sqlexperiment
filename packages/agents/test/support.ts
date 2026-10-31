@@ -214,7 +214,7 @@ export function conversation(
       return Promise.race([crashed.promise, answer]);
     },
     /**
-     * A shared handler of the object (such as `messages`), with `input`, in an
+     * A view of the object (such as `messages`), with `input`, in an
      * attempt of its own: it reads beside an attempt that runs, if any.
      */
     async read<T, I>(other: (ctx: restate.ViewContext, input: I) => Promise<T>, input?: I, requestId = 'read') {

@@ -160,8 +160,8 @@ curl localhost:8080/assistant/alice/facts
 A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
 packages, each with its README, and its tests in its `test/` directory:
 
-- [`packages/objects`](packages/objects/README.md): `restate-objects`, SQL in
-  virtual objects (`ctx.db`, `ctx.transaction`) on the published SDK, with
+- [`packages/objects`](packages/objects/README.md): `restate-objects`, session
+  objects (a SQL database per key, `ctx.db`) on the published SDK, with
   its storage in a Rust addon, [`native/`](packages/objects/native/README.md):
   [the layers](packages/objects/native/README.md#inside-the-layers), from
   Restate's key/value store up to `ctx.db`.

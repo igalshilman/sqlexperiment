@@ -12,7 +12,7 @@ import { Transcript } from '../src/common.ts';
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
 const carts = restate.object({
   name: 'carts',
-  handlers: { add: async (_ctx: restate.SessionContext, _item: string) => 1 },
+  handlers: { add: async (_ctx: restate.ObjectContext, _item: string) => 1 },
 });
 const refund = restate.workflow({
   name: 'refund',

@@ -1,8 +1,8 @@
-# restate-objects: SQL in Restate virtual objects
+# restate-objects: session objects, SQL in Restate virtual objects
 
-Each key of a Restate virtual object gets a SQL database of its own, `ctx.db`,
-kept in the object's state. The handlers that use it run with the SDK's
-explicit recovery instead of journal replay: the storage protocol of this
+Each key of a session object, a Restate virtual object, gets a SQL database
+of its own, `ctx.db`, kept in the object's state. Its handlers run with the
+SDK's explicit recovery instead of journal replay: the storage protocol of this
 repository provides durability and recovery, and Restate provides the state,
 single-writer execution per key, and retries. Its storage is
 a Rust addon in [`native/`](native/README.md), on the published Restate TypeScript
@@ -13,132 +13,171 @@ It runs on a released Restate server: see [the requirements](../../README.md#req
 ```ts
 import * as restate from 'restate-objects';
 
-const ledger = restate.object({
+const ledger = restate.sessionObject({
   name: 'Ledger',
   schema: ['CREATE TABLE accounts(id INTEGER PRIMARY KEY, balance INTEGER)'], // applied once per key
   handlers: {
-    deposit: (ctx: restate.ObjectContext, { id, amount }: { id: number; amount: number }) =>
-      ctx.transaction(async ({ db }) => {
-        await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
-      }), // one transaction: durable as a whole once ctx.transaction resolves
-    balance: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, id: number) =>
+    deposit: (ctx, { id, amount }: { id: number; amount: number }) =>
+      ctx.db.transaction(async (tx) => {
+        await tx.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
+      }), // one transaction: durable as a whole once it resolves
+  },
+  views: {
+    balance: async (ctx, id: number) =>
       ctx.db.get<{ balance: number }>('SELECT balance FROM accounts WHERE id = ?', [id]),
-    ),
   },
 });
 ```
 
 `restate-objects` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
-with the virtual objects of SQL: in `restate.object`, each function in
-`handlers` is an exclusive handler with `ctx.db`;
-`restate.handlers.object.shared(fn)` makes a shared one, and
-`restate.handlers.object.exclusive(options, fn)` one with handler options
-(such as `input`). With `journalReplay: true` in its options, a handler is
-the SDK's own: it replays its journal and has no `ctx.db` (its context is
-`restate.JournaledObjectContext`), such as one that waits on an awakeable.
-The object's options are `restate.sqlOptions` (lazy state),
-and its metadata hides the database's state commands in Restate's UI.
+with session objects beside its own objects, services and workflows.
+`restate.sessionObject({ name, schema, handlers, views })` is a virtual object
+whose state is a SQL database per key:
 
-`ctx.db`, on the context of an exclusive object handler, is the object's
-database (namespace `service/key`) over the object's state, with the
-process's page cache. A shared handler's `ctx.db` reads it, while an exclusive
-handler runs or not: see [Shared handlers](#shared-handlers). Each statement is its own transaction, and
-`db.transaction(fn)` groups several; calls run one at a time, in call order.
+- **`handlers`** run one at a time per key, each with a `SessionContext`;
+- **`views`** run beside them, at any time, each with a `ViewContext`: they
+  read the database as committed at their first read, and write nothing.
+
+A name is a handler or a view, not both. Each is a function, or
+`{ handler, ...options }` with the SDK's handler options (`input`, `output`,
+`description`, `ingressPrivate`...). `ctx` is inferred: only the input is
+annotated. `description`, `options` and `metadata` are the SDK's object
+fields; a session object adds lazy state, and hides the database's state
+commands in Restate's UI. An SDK handler (`restate.handlers.*`) is refused:
+journaled work goes in a plain `restate.object`, `restate.service` or
+`restate.workflow`, which a session object calls.
+
+**The contexts** are short, explicit lists, built for each attempt, not the
+SDK's context:
+
+```ts
+interface SessionContext {
+  readonly key: string;
+  readonly request: restate.Request; // id (the same on every attempt), headers, target...
+  readonly db: Database;
+  readonly rpc: Rpc;
+  readonly send: Send;
+}
+
+interface ViewContext {
+  readonly key: string;
+  readonly request: restate.Request;
+  readonly db: DatabaseReader;
+  readonly rpc: Rpc;
+}
+```
+
+Neither has key/value state, `run`, `sleep`, awakeables, promises or
+signals: the database is a session object's only state. Their operations can
+be awaited together (`Promise.all`, `Promise.race`).
+
+**Retries.** A handler runs in attempts: Restate starts a new one after a
+crash, a retryable error or a suspension, and each runs the handler from its
+first line (explicit recovery: no journal replay). A commit is durable when
+its promise resolves, and the next attempt finds it; an error, terminal or
+not, keeps what the handler committed. So a handler's writes must be safe to
+run again: key them by an id that is the same on every attempt, such as
+`ctx.request.id`, or an id in the input. Calls and sends are made again by
+every attempt, unless they have an idempotency key.
+
+**The database.** `ctx.db` is the key's database (namespace `service/key`)
+over the object's state, with the process's page cache.
+
+- `query<T>(sql, params)` returns the rows of one statement as objects by
+  column name, and `get<T>` the first, or `undefined`. `T` declares a row's
+  shape without checking it; integers past 2^53 come back as bigints, and
+  booleans as 0 or 1. An expression needs `AS` to be named, and two columns
+  of one name are an error. `values(sql, params)` returns the rows as
+  arrays, in column order: for adapters, and for columns that share a name.
+  `execute` runs one or more statements, without rows.
+- Each statement outside a transaction is its own commit; one that changes
+  nothing writes nothing. `ctx.db.transaction(tx => ...)` commits several
+  as one: when its body resolves, or rolls back when it rejects. Each commit
+  is one round trip, so writes grouped in a transaction cost one.
+- Calls run one at a time, in call order; a transaction's statements too,
+  even awaited together. A transaction holds `ctx.db` until it ends: a call
+  to `ctx.db` from inside its body is refused (use its `tx`).
+
 A crash between two commits keeps the first: statements that must stand or
-fall together go in one transaction.
+fall together go in one transaction. A library that wants a database for
+the handler's work gets `ctx.db`: the [pi integration](../agents/src/pi/README.md)
+runs pi-durable's storage this way.
 
-Rows come back as objects by column name: `query<T>(sql, params)` returns
-them all, and `get<T>` the first, or `undefined`. `T` declares a row's shape
-without checking it; integers past 2^53 come back as bigints, and booleans as
-0 or 1. An expression needs `AS` to be named, and two columns of one name are
-an error. `values(sql, params)` returns the rows as arrays, in column order:
-for adapters, and for columns that share a name. `execute` runs one or more
-statements, without rows.
+An SQL error rejects as a `TerminalError` (its `cause` the SQL error), since
+a retry would repeat it: a statement the engine rejects, a parameter it
+cannot bind, or a call the session refuses, even one that ends the session
+(a `COMMIT` inside a transaction's body, a transaction left open when the
+handler ends). A storage error, which ends the session, is retried. The
+handler's own errors are as in any handler.
 
-`ctx.transaction(body)` is the handler's unit of work: `body` gets
-`{ db, tx }`, one transaction's SQL and its sends, which commit together (see
-below). It commits when `body` resolves and rolls back when it rejects. A
-library that brings its own transactions uses `ctx.db.transaction`.
+**The schema.** `schema` is the steps that make each key's database, in
+order: statements, or async functions of the transaction (to move data).
+They are applied once per key, in one transaction, by the first handler of
+the key to use its database. How far each database got is a record beside
+its tables, committed with the steps, so a step added later (a column, an
+index) runs on each key's database once. A step never changes once it ran:
+a change is a step of its own. A view of a key never written reads empty
+tables. The database holds your tables, and those of the libraries you run
+in it: restate-agents names its agents' tables `restate_…`, so name yours
+otherwise.
 
-An attempt has one session. It opens on the first call to `ctx.db` or
-`ctx.transaction` (a read of the database's head), stays open while the
-handler runs, however many calls it makes, and is saved when the handler
-ends. A transaction commits as one tail entry, then the head that names it,
-and is durable when the statement or `ctx.transaction` that commits
-it resolves: the SDK waits for an empty `ctx.run` after the write. A library
-that wants a database for the handler's work gets `ctx.db`: the
-[pi integration](../agents/src/pi/README.md) runs pi-durable's storage
-this way.
+**Calls and sends.** `ctx.rpc(target, key?, options?)` is a client of a
+service, object or workflow definition, typed by it: its methods take their
+input, if any. An object or a workflow needs its key, a service has none.
+`ctx.rpc({ service, key, handler, input })` calls a target known only at run
+time (JSON by default). `ctx.send` is the same, for sends, with a `delay`.
+The options go with the target, and apply to every call of the client:
 
-An SQL error rejects as a `TerminalError` (its `cause` the SQL error), from
-`ctx.db` and `ctx.transaction` alike, since a retry would repeat it: a
-statement the engine rejects, a parameter it cannot bind, or a call the
-session refuses, even one that ends the session (a `COMMIT` inside a
-transaction's body, a transaction left open when the handler ends). A storage
-error, which ends the session, is retried. The handler's own errors are as in
-any handler: a `TerminalError` is terminal, and any other error, such as a
-failed request to a model or another service, is retried.
+```ts
+const owner = await ctx.rpc(nickname, name, { idempotencyKey: `${ctx.request.id}:claim` }).claim(ctx.key);
+ctx.send(audit).record(entry);
+```
 
-**The schema.** `schema` in `restate.object` is the steps that make each
-key's database, in order: statements, or async functions of the transaction
-(to move data). They are applied once per key, in one transaction, when a
-handler of the key first opens its database. How far each database got is
-a record beside its tables, in none of them, committed with the steps, so a
-step added later (a column, an index) runs on each key's database once, as
-that key is next opened. A step never changes once it ran: a change is a
-step of its own. A shared handler applies the steps its key lacks in its own
-session, which stores nothing: a key never written reads as empty tables.
-The database holds your tables, and those of the libraries you run in it:
-restate-agents names its agents' tables `restate_…`, so name yours otherwise.
+The SDK makes up no keys: a call has an idempotency key only when the code
+gives it one, and then a new attempt (including one that resumes a
+suspension) reaches the call the first one made, and gets its result. Build
+it from the request id and what the call is for. Restate scopes a key to the
+target handler, and keeps it for the target's idempotency retention (a day
+by default).
 
-**Sends that commit with the SQL.** A send made with `tx`, the transaction's
-send clients, is made once the transaction commits, and only then:
+**Sends that commit with the SQL.** A send made with a transaction's
+`tx.send` is made right after it commits, and never if it rolls back:
 
-```js
-ctx.transaction(async ({ db, tx }) => {
-  await db.execute('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, from]);
-  tx.objectSendClient(store, 'a').reserve(item);
-  tx.objectSendClient(store, 'b').deposit(amount);
+```ts
+ctx.db.transaction(async (tx) => {
+  await tx.execute('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, from]);
+  tx.send(store, 'a').reserve(item);
+  tx.send(store, 'b', { delay: { hours: 1 } }).expire();
 });
 ```
 
 The sends commit with the transaction, in the same tail entry: the
 database's record `outbox` holds them (beside its tables, opaque to the
-storage).
-Once the commit is done the SDK makes them, each with an idempotency key of
-the transaction, `transaction/<id>/<index>` (or the send's own key), with a
-random id of the transaction. Restate keeps an attempt's commands in the
-order they were made, so a send is stored whenever a commit made after it
-is: the next transaction's commit leaves this attempt's sends out of the
-outbox, and the handler's end empties it with a commit of its own. The
-session's next open makes again the sends the outbox still holds, with the
-same keys; Restate drops a send whose key it has seen. So each send of a committed transaction is made once, even when a
-retried attempt never runs the transaction's body again (it finds its work
-done, by its id), and a send of a transaction rolled back or lost is not
-made, since the commit that would hold it is not stored. A transaction
-without sends costs nothing more; a handler whose transactions sent costs
-one more commit at its end. Two limits: Restate keeps an
-idempotency key for the target's retention (a day by default), and a send
-made again after that, by an invocation that died between the commit and its
-end and whose object is not used again for that long, is made twice; and a
-send has no invocation id, which only exists once it is made. Only `db` and
-`tx` are part of the transaction: a call, whose result the body would wait
-for, cannot be, and one made through `ctx` inside the body is made whether or
-not the transaction commits, while holding it open. Make calls before the
-transaction, with an idempotency key of their own, and record their outcome
-in it, as the shop's `Orders` does; its `expire` is a send of `tx`.
+storage). Once the commit is done the session makes them, each with an
+idempotency key of the transaction, `transaction/<id>/<index>` (or the
+send's own key), with a random id of the transaction. Restate keeps an
+attempt's commands in the order they were made, so a send is stored
+whenever a commit made after it is: the next transaction's commit leaves
+this attempt's sends out of the outbox, and the handler's end empties it
+with a commit of its own. An exclusive attempt opens its database as it
+starts, and makes again the sends the outbox still holds, with the same
+keys, and with what remains of their delays; Restate drops a send whose key
+it has seen. So each send of a committed transaction is made once, even when
+a new attempt never uses the database, and a send of a transaction rolled
+back or lost is not made. A transaction without sends costs nothing more; a
+handler whose transactions sent costs one more commit at its end. A send has
+no invocation id. Make calls before a transaction, with an idempotency key
+of their own, and record their outcome in it, as the shop's `Orders` does;
+its `expire` is a send of `tx`.
 
 The store is the object's state: `get` is `ctx.get`, `set` and `clear` are
-`ctx.set` and `ctx.clear` (each named after its key), and `sync` is an empty
-`ctx.run`.
+`ctx.set` and `ctx.clear` of the SDK's context (each named after its key),
+and `sync` is an empty `ctx.run`.
 
 **The database is the object's state.** Its keys (`v22/head`, `v22/tail/…`,
 `v22/manifest/…` and `v22/pack/…`) sit next to the object's
-other state keys, so `ctx.clearAll()` in any handler of the object deletes
-the database, a handler's own key starting with `v22/` corrupts it, and
-`ctx.stateKeys()` lists them. Keep other state out of `v22/`, and do not
-clear all of an object that uses `ctx.db`. (Reserving
-these keys in the SDK is future work.)
+other state keys, which no handler or view of a session object reaches: it
+has no key/value state.
 
 ## How it works
 
@@ -168,56 +207,39 @@ or a cluster wiped and made again, without mixing their databases.
 journal: each operation returns its recorded result and must match it. That
 cannot work here: a later attempt makes different reads, since what it
 fetches depends on what the page cache holds. With explicit
-recovery (`restate.internal.explicitRecovery()`, which the handlers here
-have) the SDK skips the recorded journal: the handler runs again from the
-start against the state as it is. Recovery is then the storage
+recovery (`restate.internal.explicitRecovery()`, which every handler and
+view of a session object has) the SDK skips the recorded journal: the
+handler runs again from the start against the state as it is. Recovery is then the storage
 protocol's: open reads the head, so a lost commit from the crashed attempt is
 as if it never started.
 
 **One owner.** The protocol needs one writer per namespace. Restate runs one
 exclusive invocation per object key at a time, and one attempt of it at a
-time, so the namespace is `service/key` and only exclusive handlers may open
-it.
+time, so the namespace is `service/key` and only handlers write it; views
+read it beside them.
 
 ## The context with explicit recovery
 
-A retried attempt runs the handler again from the start, so every context
-operation it reaches happens again. What each one does then:
+A new attempt runs the handler again from the start, so every operation it
+reaches happens again. What each one does then:
 
-| Operation                                                                | On a retried attempt                                                                                                                                                                                                          |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctx.db`, `ctx.transaction`                                              | Run again, against the state as stored. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
-| Calls (`ctx.objectClient(...)`, `ctx.serviceClient(...)`, `genericCall`) | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                   |
-| Sends, delayed sends                                                     | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                      |
-| `ctx.get`, `ctx.set`, `ctx.clear`                                        | Read the state as stored; a write is stored once an empty `ctx.run` after it resolves, and a crash before that may lose it.                                                                                                   |
-| `ctx.run`                                                                | Runs its action again: its result is not kept from one attempt to the next, so record in the database what must not be repeated. (The store uses an empty run, to sync.)                                                      |
-| `ctx.sleep`                                                              | Starts over.                                                                                                                                                                                                                  |
-| `attach`, `cancel`                                                       | Idempotent already.                                                                                                                                                                                                           |
-| Awakeables                                                               | Refused, a terminal error (their signal ids would collide): wait in a handler with `journalReplay: true`.                                                                                                                     |
-
-The SDK does not make up keys: a call is idempotent when the code says so,
-with `rpc.opts({ idempotencyKey })` (`rpc.sendOpts` for a send). The examples
-build theirs from the request id, `ctx.request().id`, which is the same on
-every attempt of an invocation, and what the call is for:
-
-```js
-await ctx
-  .objectClient(warehouse, sku)
-  .reserve({ order: ctx.key, qty }, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:reserve` }));
-```
+| Operation  | On a new attempt                                                                                                                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ctx.db`   | Runs again, against the database as committed. A handler makes itself idempotent with a stable id it is given, such as an order id or a transfer id in the request: it records the id with its writes, and finds it the second time. |
+| `ctx.rpc`  | A new call, unless it has an idempotency key: with one that is the same on every attempt, the call reaches the invocation the earlier attempt started, and gets its result.                                                          |
+| `ctx.send` | The same: with an idempotency key, a repeated send is dropped, and a delayed send keeps its first timer.                                                                                                                             |
+| `tx.send`  | Made once its transaction commits, and once only: see above.                                                                                                                                                                         |
 
 A key names one call: one that an invocation makes several times (a tool
 call) adds what tells them apart. Restate attaches a call with a key it has
 seen to the earlier invocation, whatever its input, so the key fits a call
 whose input is the same on every attempt; one whose input depends on what
-the attempt read needs that in its key, or none. A key holds while Restate
-keeps the invocation: a day by default (the target's idempotency
-retention).
+the attempt read needs that in its key, or none.
 
 ### Concurrent awaits, one await point
 
-The context's operations are the SDK's `RestatePromise`s, and they can be
-awaited concurrently: `Promise.all`, `Promise.race`, your own combinators,
+A context's calls are the SDK's `RestatePromise`s, and they and the
+database's calls can be awaited concurrently: `Promise.all`, `Promise.race`, your own combinators,
 several async functions at once, or a library's (the database's own reads
 are concurrent). The published SDK drives each awaited promise with a loop
 of its own, and lets one of them wait for the server at a time
@@ -234,7 +256,7 @@ selector against a fake VM and the SDK's single-waiter channel.
 - **One await point.** The loop asks the server about every awaited promise
   at once. So a suspension (after the server's inactivity timeout) resumes on
   the first of them to complete, and a promise awaited while the loop waits
-  joins the next check: a call awaited late is not held up by a long sleep
+  joins the next check: a call awaited late is not held up by a long call
   made earlier.
 - **An operation starts when it is made**: a call is made without an `await`,
   and a failure nobody awaits is not an unhandled rejection.
@@ -242,13 +264,15 @@ selector against a fake VM and the SDK's single-waiter channel.
   `CancelledError`).
 
 ```ts
-const counter = restate.object({
-  name: 'counter',
+const quote = restate.sessionObject({
+  name: 'quote',
   handlers: {
-    add: async (ctx: restate.ObjectContext, n: number) => {
-      const [, total] = await Promise.all([ctx.sleep(10), ctx.get<number>('total')]);
-      ctx.set('total', (total ?? 0) + n);
-      return (total ?? 0) + n;
+    price: async (ctx, sku: string) => {
+      const [price, stock] = await Promise.all([
+        ctx.rpc(pricing).quote(sku),
+        ctx.db.get<{ count: number }>('SELECT count FROM stock WHERE sku = ?', [sku]),
+      ]);
+      return { price, inStock: (stock?.count ?? 0) > 0 };
     },
   },
 });
@@ -260,7 +284,7 @@ a real server.
 ## The examples
 
 The smallest is [`examples/basic/notes.ts`](../examples/basic/notes.ts):
-plain SQL with `ctx.db`. The ledger and the shop are in [`test/`](test), where
+a handler and a view with `ctx.db`. The ledger and the shop are in [`test/`](test), where
 the tests use them. Each runs alone (`node test/shop.ts`, from here), or
 together with the others (`pnpm --filter e2e serve`, or
 `node serve.ts ledger shop` in [`packages/e2e/`](../e2e) for some), on port
@@ -299,7 +323,7 @@ transfers take 18.8 ms each on one local node.
   appends its own.
 - **A suspension is a restart.** Resuming means running from the start, so
   long handlers that hit the inactivity timeout start over.
-- **A sync per commit.** Every transaction waits for an empty `ctx.run` after
+- **A sync per commit.** Every commit waits for an empty `ctx.run` after
   its head: a round trip to the runtime, which statements that commit one
   by one pay each time. Group them in a transaction.
 - **10 GiB a database.** A statement that would grow a key's database past it
@@ -312,29 +336,28 @@ transfers take 18.8 ms each on one local node.
   crash tests kill processes, so they check recovery, not storage durability
   across a machine crash.
 
-## Shared handlers
+## Views
 
-A shared handler's `ctx.db` is the object's database as stored, read beside
-the exclusive handler, which may commit meanwhile (a chat UI's read of a
-conversation while the agent works, say). It opens as of its first call, and
-writes nothing: what the handler writes stays in its session, and is never
-stored. It reads the state as of that call, a snapshot, whatever the
-exclusive handler commits meanwhile; only a shared handler that outlives 16
-of the exclusive handler's commits fails, and Restate retries it
-([the reader](native/src/state/docs/DESIGN.md#readers)).
-`ctx.transaction` is the exclusive handlers'.
+A view's `ctx.db` is the object's database as committed, read beside the
+handlers, which may commit meanwhile (a chat UI's read of a conversation
+while the agent works, say). It opens as of its first read, and reads that
+snapshot throughout, whatever the handlers commit meanwhile; only a view
+that outlives 16 of their commits fails, and Restate retries it
+([the reader](native/src/state/docs/DESIGN.md#readers)). Its `db` has no
+`execute` or `transaction`, and its context no `send`.
 
 ```ts
-count: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
-  ctx.db.get<{ accounts: number }>('SELECT count(*) AS accounts FROM accounts'),
-),
+views: {
+  count: async (ctx) => ctx.db.get<{ accounts: number }>('SELECT count(*) AS accounts FROM accounts'),
+},
 ```
 
 ## Not supported
 
-Writes from shared handlers, awakeables in a handler with `ctx.db`,
-and request/response deployments (such as Lambda), which suspend at every await,
-since a suspension is a restart.
+Key/value state, durable steps, timers and awakeables in a session object
+(put them in a plain `restate.object`, `service` or `workflow`, and call it),
+and request/response deployments (such as Lambda), which suspend at every
+await, since a suspension is a restart.
 
 ## Tests
 
@@ -348,6 +371,10 @@ readers, SQL errors, lost writes) without a server
 [`test/support.ts`](test/support.ts) runs a handler's attempts over an
 object's state in memory, through crashes and fencing; `restate-agents`'s
 tests use it too (`restate-objects/test/support`). `restate-objects/internal`
-has what the tests take apart: an attempt's session over a context of their
-own (`SqlAttempt`, `withSql`), a database over a store of their own
-(`open`), and the store's fault injection (`setStoreWrapper`).
+has what the tests take apart: a handler run for one attempt over a context
+of their own (`invoke`), an attempt's session (`Attempt`, `withAttempt`), a
+database over a store of their own (`open`, `asDatabase`), and the store's
+fault injection (`setStoreWrapper`). For this repository's libraries, it has
+`Schema` (tables a library owns, applied where it uses them), `database`
+(another database of the key), `reset` (empty the key's database in a
+transaction) and `cancelled`/`cancelCalls` (explicit cancellation).

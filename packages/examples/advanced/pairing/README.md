@@ -30,7 +30,7 @@ What it shows:
   next tool call (`steer`), as "use pytest" would reach a person you pair
   with.
 - **Tables of your own**: the plan is a table beside the agent's own
-  (`schema: PLAN`), which its tools write and a shared handler reads while
+  (`schema: PLAN`), which its tools write and a view reads while
   it works (`curl localhost:8080/pair/fizzbuzz/tasks`).
 - **A second opinion**: the reviewer is an agent of its own, on another
   framework and model, with a conversation per task (`subagent`), so a

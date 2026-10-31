@@ -2,7 +2,7 @@
 
 The storage of an object's database, over an asynchronous key/value store,
 for namespaces with one owner at a time: the state of a Restate object
-without Restate's journal (`journalReplay: false`). It keeps one paged
+without Restate's journal (with explicit recovery). It keeps one paged
 **file** (4 KiB pages, read and written at random), the database's, and
 **records** committed with it (whole values by name, which the host keeps
 beside the SQL, such as its outbox). The state is read; it changes only

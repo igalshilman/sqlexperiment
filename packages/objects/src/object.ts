@@ -21,7 +21,7 @@ import { type Rpc, rpcOf, type Send, sendOf } from './calls.ts';
 import type { DatabaseReader } from './database.ts';
 import { register, sessions, type Step } from './schema.ts';
 import { hookSelector } from './selector.ts';
-import { type Database, SqlAttempt, type SqlHost, withSql } from './session.ts';
+import { type Database, Attempt, type SqlHost, withAttempt } from './session.ts';
 
 /**
  * The context of a session object's handler. A handler runs in attempts:
@@ -170,10 +170,10 @@ export function contextOf(ctx: AttemptContext, db: Database, view = false): Sess
 
 /** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
 function attempt(fn: Fn<never>, view: boolean, ctx: AttemptContext, input: unknown): Promise<unknown> {
-  const session = new SqlAttempt(host(ctx, view));
+  const session = new Attempt(host(ctx, view));
   session.openNow();
   const context = view ? contextOf(ctx, session.db, true) : contextOf(ctx, session.db);
-  return withSql(() => fn(context as never, input as never), session);
+  return withAttempt(() => fn(context as never, input as never), session);
 }
 
 /** `fn` as the SDK's handler: one loop drives each attempt's awaits (see selector.ts), until it ends. */

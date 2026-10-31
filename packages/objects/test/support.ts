@@ -3,7 +3,15 @@
 // and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
-import { asDatabase, contextOf, lazyDatabase, open, SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
+import {
+  asDatabase,
+  contextOf,
+  lazyDatabase,
+  open,
+  Attempt,
+  type SqlHost,
+  withAttempt,
+} from 'restate-objects/internal';
 import type { AttemptContext, Store } from 'restate-objects/internal';
 
 /**
@@ -110,7 +118,7 @@ export function sqlAttempt({
       send(s);
     },
   } satisfies SqlHost;
-  const attempt = new SqlAttempt(ctx);
+  const attempt = new Attempt(ctx);
   const cancelled = Promise.withResolvers<void>();
   return {
     db: attempt.db,
@@ -132,7 +140,7 @@ export function sqlAttempt({
     /** A view's context, over this attempt's `ctx.db`. */
     view: contextOf(sdkOf(ctx), attempt.db, true),
     /** `handler`'s result, once its session ended. */
-    end: <T>(handler: () => Promise<T>) => withSql(handler, attempt),
+    end: <T>(handler: () => Promise<T>) => withAttempt(handler, attempt),
     /** The attempt ends, as when Restate fences or suspends it. */
     abort: () => end.reject(new Error('the attempt ended')),
   };

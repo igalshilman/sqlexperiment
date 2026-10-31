@@ -1,8 +1,7 @@
 // An attempt's SQL session: the object's database, kept in its state
-// (database.ts), opened on the handler's first use of `ctx.db` or
-// `ctx.transaction` and saved when the handler ends; and
-// `ctx.transaction(body)`, one transaction of it with the sends it commits
-// with.
+// (database.ts), opened as an exclusive attempt starts (a view's on its first
+// read) and saved when the handler ends; and its transactions, with the sends
+// each commits with (`tx.send`).
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import type * as restate from '@restatedev/restate-sdk';
@@ -22,7 +21,6 @@ import {
   type ConnectionTransaction,
 } from './database.ts';
 import { apply, dropAll, ofObject, type Schema, sessions } from './schema.ts';
-import { sendClients } from './sends.ts';
 import { type Send, sendOf } from './calls.ts';
 
 export type { DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue };
@@ -52,23 +50,6 @@ export interface Transaction extends DatabaseWriter {
    * again is dropped.
    */
   readonly send: Send;
-}
-
-/**
- * The sends of a transaction: they are made once it commits, and only then.
- * They have no invocation id.
- */
-export type SqlTransactionSends = Pick<
-  restate.Context,
-  'serviceSendClient' | 'objectSendClient' | 'workflowSendClient' | 'sendClient' | 'genericSend'
->;
-
-/** What the body of `ctx.transaction` gets. */
-export interface SqlTransaction {
-  /** The transaction's SQL. */
-  db: DatabaseWriter;
-  /** The transaction's sends. */
-  tx: SqlTransactionSends;
 }
 
 /** What the session needs of the handler's context. */
@@ -349,7 +330,7 @@ function settle<T>(outcome: Outcome<T>): T {
 }
 
 // The attempts, by their `ctx.db`: for `database`.
-const attempts = new WeakMap<object, SqlAttempt>();
+const attempts = new WeakMap<object, Attempt>();
 
 // A database's name (`database`).
 const DATABASE_NAME = /^[\w.-]{1,64}$/;
@@ -369,18 +350,18 @@ export function database(db: Database, name: string): Database {
 }
 
 /**
- * An attempt's SQL session: opened on its first use (`ctx.db` or
- * `ctx.transaction`), shared by everything the handler does, and saved when
- * the handler ends ({@link end}). With `name`, of the key's database `name`
+ * An attempt's SQL session: opened on its first use, or as an exclusive
+ * attempt starts ({@link openNow}), shared by everything the handler does,
+ * and saved when the handler ends ({@link end}). With `name`, of the key's database `name`
  * ({@link database}), which has neither the object's schema nor an outbox.
  */
-export class SqlAttempt {
+export class Attempt {
   /** `ctx.db`. */
   readonly db: Database;
   private readonly ctx: SqlHost;
   private readonly name: string | undefined;
   /** The key's other databases this attempt opened, by name. */
-  private readonly databases = new Map<string, SqlAttempt>();
+  private readonly databases = new Map<string, Attempt>();
   /** The session, from its first use on. */
   private session: Promise<Connection> | undefined;
   /** The ids of the outbox's transactions this attempt made the sends of. */
@@ -424,19 +405,8 @@ export class SqlAttempt {
   database(name: string): Database {
     if (this.ended) throw new Error('the handler has ended: its SQL session is closed');
     let other = this.databases.get(name);
-    if (other === undefined) this.databases.set(name, (other = new SqlAttempt(this.ctx, name)));
+    if (other === undefined) this.databases.set(name, (other = new Attempt(this.ctx, name)));
     return other.db;
-  }
-
-  /**
-   * `ctx.transaction(body)`: one transaction of the session, whose sends are
-   * made once it commits, and kept in the outbox until they are stored. A
-   * call to the session from inside `body` is refused (see
-   * {@link Connection.transaction}): `body` uses the `db` it gets.
-   */
-  async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
-    if (this.ctx.shared) throw new TerminalError('ctx.transaction is for exclusive handlers');
-    return this.withSends((db, record) => body({ db, tx: sendClients(this.ctx.defaultSerde, record) }));
   }
 
   /**
@@ -639,8 +609,8 @@ export class SqlAttempt {
   }
 }
 
-/** Run `handler`, then end `attempt`'s SQL session, if it opened one (see {@link SqlAttempt.end}). */
-export async function withSql<T>(handler: () => Promise<T>, attempt: SqlAttempt): Promise<T> {
+/** Run `handler`, then end `attempt`'s SQL session, if it opened one (see {@link Attempt.end}). */
+export async function withAttempt<T>(handler: () => Promise<T>, attempt: Attempt): Promise<T> {
   let outcome: Outcome<T>;
   try {
     outcome = { value: await handler() };

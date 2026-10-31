@@ -54,7 +54,8 @@ invocation (best effort, within its eager-state size limit), and the open
 starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be
 listed. The options are `sqlOptions` in `restate-objects`
-(`packages/objects/src/index.ts`); its `TODO:` marks them.
+(`packages/objects/src/object.ts`), which every session object has; its
+`TODO:` marks them.
 
 ## Concurrent awaits in the TypeScript SDK
 

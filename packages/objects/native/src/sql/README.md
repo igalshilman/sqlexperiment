@@ -2,7 +2,7 @@
 
 An object's database: SQLite-compatible SQL on the
 [state](../state/README.md), for a Restate object without Restate's journal
-(`journalReplay: false`), whose state the namespace is. It runs Turso's Rust
+(with explicit recovery), whose state the namespace is. It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified, over the state's one file, and commits
 with the state: the rows and the host's records, durable together in one
 flush.
@@ -35,7 +35,7 @@ db.save().await?;                                   // ends the session, leaving
 `Database::open` returns a builder: `.options(StateOptions)` sets how the
 state flushes and reads, `.checkpoints(blobs)` keeps the bulk of the
 checkpoints in S3, and `.reader()` opens a reader beside the owner, as a
-shared handler does. The host's `transaction(body)` (`src/database.ts`) runs
+session object's view does. The host's `transaction(body)` (`src/database.ts`) runs
 `body` between `begin` and `commit`, or `rollback` when it fails; a statement
 in the body that ends its transaction (`COMMIT`, `END`, `ROLLBACK`) ends the
 session rather than commit the body halfway. `commit(records)` commits

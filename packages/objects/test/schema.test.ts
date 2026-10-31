@@ -9,7 +9,7 @@ import { memoryStore, sqlAttempt } from './support.ts';
 /** A new object's name, its schema `steps`. */
 const objectWith = (...steps: restate.Step[]) => {
   const name = `schema-${randomUUID()}`;
-  restate.object({ name, schema: steps, handlers: {} });
+  restate.sessionObject({ name, schema: steps, handlers: {}, views: {} });
   return name;
 };
 
@@ -47,7 +47,12 @@ describe("an object's schema", () => {
     const map = new Map<string, Uint8Array>();
     const first = sqlAttempt({ map, service });
     await first.end(() => first.db.execute("INSERT INTO notes VALUES ('milk')"));
-    restate.object({ name: service, schema: [NOTES, 'ALTER TABLE notes ADD COLUMN done INT', done], handlers: {} });
+    restate.sessionObject({
+      name: service,
+      schema: [NOTES, 'ALTER TABLE notes ADD COLUMN done INT', done],
+      handlers: {},
+      views: {},
+    });
     const later = sqlAttempt({ map, service, id: 'later' });
     expect(await later.end(() => later.db.values('SELECT text, done FROM notes'))).toEqual([['milk', 1]]);
   });

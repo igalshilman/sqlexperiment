@@ -25,7 +25,7 @@ import {
 } from './signals.ts';
 
 /**
- * The options of every object here, beside SQL's (`restate.sqlOptions`): retries for
+ * The options of every object here, beside a session object's: retries for
  * weeks, since each attempt resumes from the database: soon after a crash,
  * then twice as long each time, up to 10 seconds apart (a provider's rate
  * limit, say, is not asked again twice a second).
