@@ -13,18 +13,19 @@ import * as restate from 'restate-objects';
 import { call, serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
-const inventory = restate.object({
+const inventory = restate.sessionObject({
   name: 'inventory',
   schema: ['CREATE TABLE stock (count INTEGER NOT NULL)', 'INSERT INTO stock VALUES (0)'],
   handlers: {
-    restock: async (ctx: restate.ObjectContext, count: number) => {
+    restock: async (ctx, count: number) => {
       await ctx.db.execute('UPDATE stock SET count = count + ?', [count]);
     },
-
-    count: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
+  },
+  views: {
+    count: async (ctx) => {
       const stock = await ctx.db.get<{ count: number }>('SELECT count FROM stock');
       return stock?.count;
-    }),
+    },
   },
 });
 

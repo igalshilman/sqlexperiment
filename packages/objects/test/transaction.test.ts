@@ -1,6 +1,6 @@
-// `ctx.transaction`'s sends, without a Restate server: each attempt has the
-// SDK's `ctx.db` and `ctx.transaction` over the object's state in memory, and
-// records the sends it makes. A crash is an attempt whose later writes and
+// A transaction's sends (`tx.send`), without a Restate server: each attempt
+// has `ctx.db` over the object's state in memory, and records the sends it
+// makes. A crash is an attempt whose later writes and
 // sends are lost: what it stored before stays.
 import * as restate from 'restate-objects';
 import { open } from 'restate-objects/internal';
@@ -55,12 +55,12 @@ const decode = (s: Send) => JSON.parse(new TextDecoder().decode(s.parameter)) as
 
 /** A transfer with two sends, as one transaction. */
 const transfer = (a: ReturnType<ReturnType<typeof object>['attempt']>) =>
-  a.transaction(async ({ db, tx }) => {
+  a.db.transaction(async (tx) => {
     const before = a.sent.length;
-    await db.execute('CREATE TABLE IF NOT EXISTS balance (v INTEGER)');
-    await db.execute('INSERT INTO balance VALUES (5)');
-    tx.objectSendClient(store, 'a').reserve('book');
-    tx.objectSendClient(store, 'b').deposit(5);
+    await tx.execute('CREATE TABLE IF NOT EXISTS balance (v INTEGER)');
+    await tx.execute('INSERT INTO balance VALUES (5)');
+    tx.send(store, 'a').reserve('book');
+    tx.send(store, 'b').deposit(5);
     // Nothing is sent before the commit.
     expect(a.sent).toHaveLength(before);
   });
@@ -75,7 +75,7 @@ const balance = async (o: ReturnType<typeof object>) => {
   return (await b.end(() => b.db.values('SELECT count(*) FROM balance')))[0]![0];
 };
 
-describe('the sends of ctx.transaction', () => {
+describe('the sends of a transaction', () => {
   it('sends once the transaction commits, each with a key of the transaction', async () => {
     const o = object();
     const a = o.attempt();
@@ -98,9 +98,9 @@ describe('the sends of ctx.transaction', () => {
     const a = o.attempt();
     const failed = await a
       .end(() =>
-        a.transaction(async ({ db, tx }) => {
-          await db.execute('CREATE TABLE t (v INTEGER)');
-          tx.objectSendClient(store, 'a').reserve('book');
+        a.db.transaction(async (tx) => {
+          await tx.execute('CREATE TABLE t (v INTEGER)');
+          tx.send(store, 'a').reserve('book');
           throw new Error('no');
         }),
       )
@@ -118,10 +118,10 @@ describe('the sends of ctx.transaction', () => {
       await a.db.execute('CREATE TABLE p (id INTEGER PRIMARY KEY)');
       await a.db.execute('CREATE TABLE c (pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)');
       // The deferred constraint fails at COMMIT, after the sends wait.
-      const refused = await a
-        .transaction(async ({ db, tx }) => {
-          await db.execute('INSERT INTO c VALUES (7)');
-          tx.objectSendClient(store, 'a').reserve('book');
+      const refused = await a.db
+        .transaction(async (tx) => {
+          await tx.execute('INSERT INTO c VALUES (7)');
+          tx.send(store, 'a').reserve('book');
         })
         .catch((e: unknown) => e);
       expect(refused).toBeInstanceOf(restate.TerminalError);
@@ -153,10 +153,10 @@ describe('the sends of ctx.transaction', () => {
     await setup.end(() => setup.db.execute('CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)'));
     const crashed = o.attempt({ crash: true });
     // It only reads, and its update matches no rows: still, it committed.
-    const decide = crashed.transaction(async ({ db, tx }) => {
-      const [[v]] = (await db.values('SELECT v FROM t')) as [[number]];
-      await db.execute('UPDATE t SET v = 2 WHERE v = 99');
-      if (v === 1) tx.objectSendClient(store, 'a').reserve('book');
+    const decide = crashed.db.transaction(async (tx) => {
+      const [[v]] = (await tx.values('SELECT v FROM t')) as [[number]];
+      await tx.execute('UPDATE t SET v = 2 WHERE v = 99');
+      if (v === 1) tx.send(store, 'a').reserve('book');
     });
     await expect(decide).rejects.toThrow('crashed');
     crashed.abort();
@@ -178,10 +178,10 @@ describe('the sends of ctx.transaction', () => {
       else set(key, value);
       return o.map;
     };
-    await crashed
-      .transaction(async ({ db, tx }) => {
-        await db.execute('CREATE TABLE t (v INTEGER)');
-        tx.objectSendClient(store, 'a').reserve('book');
+    await crashed.db
+      .transaction(async (tx) => {
+        await tx.execute('CREATE TABLE t (v INTEGER)');
+        tx.send(store, 'a').reserve('book');
       })
       .catch(() => {});
     crashed.abort();
@@ -208,7 +208,7 @@ describe('the sends of ctx.transaction', () => {
     const sets: string[] = [];
     const set = o.map.set.bind(o.map);
     o.map.set = (key, value) => (sets.push(key), set(key, value));
-    await a.end(() => a.transaction(({ db }) => db.execute('CREATE TABLE t (v INTEGER)')));
+    await a.end(() => a.db.transaction((tx) => tx.execute('CREATE TABLE t (v INTEGER)')));
     expect(sets.filter((key) => key === HEAD)).toEqual([HEAD]);
     expect(sets.at(-1)).toBe(HEAD);
   });
@@ -234,28 +234,24 @@ describe('the sends of ctx.transaction', () => {
     const o = object();
     const a = o.attempt();
     await a.end(() =>
-      a.transaction(async ({ tx }) => {
-        tx.objectSendClient(store, 'a').reserve(
-          'book',
-          restate.rpc.sendOpts({ delay: { seconds: 2 }, idempotencyKey: 'mine' }),
-        );
+      a.db.transaction(async (tx) => {
+        tx.send(store, 'a', { delay: { seconds: 2 }, idempotencyKey: 'mine' }).reserve('book');
       }),
     );
     expect(a.sent.map((s) => [s.delay, s.idempotencyKey])).toEqual([[2000, 'mine']]);
   });
 
-  it('refuses a send after the body, and has no invocation id', async () => {
+  it('refuses a send after the body', async () => {
     const o = object();
     const a = o.attempt();
-    let late: restate.SqlTransactionSends | undefined;
+    let late: restate.Transaction | undefined;
     await a.end(() =>
-      a.transaction(async ({ tx }) => {
+      a.db.transaction(async (tx) => {
         late = tx;
-        const handle = tx.objectSendClient(store, 'a').reserve('book');
-        expect(() => handle.invocationId).toThrow(restate.TerminalError);
+        tx.send(store, 'a').reserve('book');
       }),
     );
-    expect(() => late!.objectSendClient(store, 'a').reserve('pen')).toThrow(restate.TerminalError);
+    expect(() => late!.send(store, 'a').reserve('pen')).toThrow(restate.TerminalError);
     expect(a.sent.map(decode)).toEqual(['book']);
   });
 });

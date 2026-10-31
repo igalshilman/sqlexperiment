@@ -3,7 +3,7 @@
 // and fencing, without a Restate server.
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
-import { asDatabase, lazyDatabase, open, SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
+import { asDatabase, contextOf, lazyDatabase, open, SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
 import type { AttemptContext, Store } from 'restate-objects/internal';
 
 /**
@@ -127,7 +127,10 @@ export function sqlAttempt({
     },
     set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
     clear: (name: string) => ctx.clear(name),
-    transaction: <T>(body: (t: restate.SqlTransaction) => Promise<T>) => attempt.transaction(body),
+    /** The handler's context, over this attempt's `ctx.db`. */
+    ctx: contextOf(sdkOf(ctx), attempt.db),
+    /** A view's context, over this attempt's `ctx.db`. */
+    view: contextOf(sdkOf(ctx), attempt.db, true),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => withSql(handler, attempt),
     /** The attempt ends, as when Restate fences or suspends it. */
@@ -152,6 +155,17 @@ const decoded = (parameter: unknown, inputSerde?: unknown) =>
       ? undefined
       : (JSON.parse(new TextDecoder().decode(parameter)) as unknown)
     : parameter;
+
+/** The SDK's context behind a test's attempt `ctx`: its key, request and sends. */
+const sdkOf = (ctx: SqlHost & { key: string }): AttemptContext =>
+  ({
+    key: ctx.key,
+    request: () => ctx.request(),
+    genericSend: (send: restate.GenericSend<Uint8Array>) => ctx.genericSend(send),
+    genericCall: () => {
+      throw new Error('this attempt calls nothing');
+    },
+  }) as unknown as AttemptContext;
 
 /** A call or send as a test sees it. */
 const made = (c: restate.GenericCall<unknown, unknown> | restate.GenericSend<unknown>): Made => ({

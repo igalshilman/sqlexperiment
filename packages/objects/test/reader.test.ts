@@ -45,11 +45,10 @@ describe("a shared handler's ctx.db", () => {
     expect(await later.end(() => later.db.values('SELECT n FROM numbers ORDER BY n'))).toEqual([[1], [2]]);
   });
 
-  it('has no transaction of its own', async () => {
+  it("is a view's: it reads, and has no transaction or writes", async () => {
     const { reader } = await object();
     const shared = reader();
-    await expect(shared.end(() => shared.transaction(async () => {}))).rejects.toThrow(
-      'ctx.transaction is for exclusive handlers',
-    );
+    expect(Object.keys(shared.view.db).toSorted()).toEqual(['get', 'query', 'values']);
+    await shared.end(async () => {});
   });
 });

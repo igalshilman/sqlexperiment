@@ -24,15 +24,15 @@ it('an SQL error of ctx.db is terminal, and the session goes on', async () => {
   });
 });
 
-it("an SQL error inside ctx.transaction is terminal there, and the body's rethrowing it rolls back", async () => {
+it("an SQL error inside a transaction is terminal there, and the body's rethrowing it rolls back", async () => {
   const a = sqlAttempt({ map: new Map() });
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
     let inside: unknown;
     const error = await failure(
-      a.transaction(async ({ db }) => {
-        await db.execute('INSERT INTO t VALUES (1)');
-        inside = await failure(db.execute('INSERT INTO missing VALUES (1)'));
+      a.db.transaction(async (tx) => {
+        await tx.execute('INSERT INTO t VALUES (1)');
+        inside = await failure(tx.execute('INSERT INTO missing VALUES (1)'));
         throw inside;
       }),
     );
@@ -47,8 +47,8 @@ it("the body's own error passes as it is, and is retried", async () => {
   const own = new Error('the payment service is down');
   const error = await failure(
     a.end(() =>
-      a.transaction(async ({ db }) => {
-        await db.values('SELECT 1');
+      a.db.transaction(async (tx) => {
+        await tx.values('SELECT 1');
         throw own;
       }),
     ),
@@ -56,14 +56,13 @@ it("the body's own error passes as it is, and is retried", async () => {
   expect(error).toBe(own);
 });
 
-it('a call to ctx.db, or a nested ctx.transaction, from inside a body is terminal', async () => {
+it('a call to ctx.db, or a nested transaction, from inside a body is terminal', async () => {
   const a = sqlAttempt({ map: new Map() });
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
     const errors = await Promise.all([
-      failure(a.transaction(() => a.db.values('SELECT 1'))),
-      failure(a.transaction(() => a.db.transaction(async () => {}))),
-      failure(a.transaction(() => a.transaction(async () => {}))),
+      failure(a.db.transaction(() => a.db.values('SELECT 1'))),
+      failure(a.db.transaction(() => a.db.transaction(async () => {}))),
     ]);
     for (const error of errors) expect(error).toBeInstanceOf(restate.TerminalError);
     expect(await a.db.values('SELECT 1')).toEqual([[1]]);
@@ -83,11 +82,11 @@ it('statements a body awaits together run in order, and none outlives its rollba
   const a = sqlAttempt({ map: new Map() });
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
-    await a.transaction(({ db }) => Promise.all([1, 2, 3].map((n) => db.execute('INSERT INTO t VALUES (?)', [n]))));
+    await a.db.transaction((tx) => Promise.all([1, 2, 3].map((n) => tx.execute('INSERT INTO t VALUES (?)', [n]))));
     expect(await a.db.values('SELECT n FROM t ORDER BY rowid')).toEqual([[1], [2], [3]]);
     const error = await failure(
-      a.transaction(({ db }) =>
-        Promise.all([db.execute('INSERT INTO missing VALUES (1)'), db.execute('INSERT INTO t VALUES (4)')]),
+      a.db.transaction((tx) =>
+        Promise.all([tx.execute('INSERT INTO missing VALUES (1)'), tx.execute('INSERT INTO t VALUES (4)')]),
       ),
     );
     expect(error).toBeInstanceOf(restate.TerminalError);
@@ -99,9 +98,9 @@ it('statements a body makes but does not await run before its commit', async () 
   const a = sqlAttempt({ map: new Map() });
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
-    await a.db.transaction(async (db) => {
-      void db.execute('INSERT INTO t VALUES (1)');
-      void db.execute('INSERT INTO t VALUES (2)');
+    await a.db.transaction(async (tx) => {
+      void tx.execute('INSERT INTO t VALUES (1)');
+      void tx.execute('INSERT INTO t VALUES (2)');
     });
     expect(await a.db.values('SELECT n FROM t ORDER BY n')).toEqual([[1], [2]]);
   });
@@ -109,7 +108,7 @@ it('statements a body makes but does not await run before its commit', async () 
 
 it('a statement that ends the transaction of a body is terminal, though it ends the session', async () => {
   const a = sqlAttempt({ map: new Map() });
-  const error = await failure(a.end(() => a.transaction(({ db }) => db.execute('COMMIT'))));
+  const error = await failure(a.end(() => a.db.transaction((tx) => tx.execute('COMMIT'))));
   expect(error).toBeInstanceOf(restate.TerminalError);
   expect((error as Error).message).toMatch(/ended the transaction/);
 });

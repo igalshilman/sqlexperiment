@@ -76,17 +76,17 @@ function agentMessage(bytes: number): string {
 const payload = (bytes: number) => (process.env.PAYLOAD === 'random' ? randomBytes(bytes) : agentMessage(bytes));
 
 /** The benchmark's object: each key a database. */
-export const bench = restate.object({
+export const bench = restate.sessionObject({
   name: 'SqlBench',
   handlers: {
     /** Insert one row of `bytes` bytes, an autocommit statement. */
-    insert: async (ctx: restate.ObjectContext, bytes: number) => {
+    insert: async (ctx, bytes: number) => {
       await ctx.db.execute(SCHEMA);
       await ctx.db.execute('INSERT INTO rows(v) VALUES(?)', [payload(bytes)]);
     },
     /** Increment a counter and record it, in one transaction; returns it. */
-    count: (ctx: restate.ObjectContext) =>
-      ctx.transaction(async ({ db }) => {
+    count: (ctx) =>
+      ctx.db.transaction(async (db) => {
         await db.execute(SCHEMA);
         await db.execute('INSERT INTO counter VALUES(0, 0) ON CONFLICT(id) DO UPDATE SET n = n + 1');
         const [n] = await row<[number]>(db, 'SELECT n FROM counter WHERE id = 0');
@@ -94,28 +94,24 @@ export const bench = restate.object({
         return n;
       }),
     /** Insert `rows` rows of `bytes` bytes each, in one transaction. */
-    bulk: (ctx: restate.ObjectContext, [rows, bytes]: [number, number]) =>
-      ctx.transaction(async ({ db }) => {
+    bulk: (ctx, [rows, bytes]: [number, number]) =>
+      ctx.db.transaction(async (db) => {
         await db.execute(SCHEMA);
         for (let i = 0; i < rows; i++) await db.execute('INSERT INTO rows(v) VALUES(?)', [payload(bytes)]);
       }),
     /** Rewrite row `id` with a new value of about the same length. */
-    update: async (ctx: restate.ObjectContext, id: number) => {
+    update: async (ctx, id: number) => {
       const [length] = await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]);
       await ctx.db.execute('UPDATE rows SET v = ? WHERE id = ?', [payload(length), id]);
     },
     /** Row `id`'s length, from the exclusive handler: the owner's session. */
-    get: async (ctx: restate.ObjectContext, id: number) =>
-      (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
-    /** Row `id`'s length, from a shared handler: a reader's session. */
-    peek: restate.handlers.object.shared(
-      async (ctx: restate.ObjectSharedContext, id: number) =>
-        (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
-    ),
-    /** The rows' count and total length, from a shared handler. */
-    read: restate.handlers.object.shared((ctx: restate.ObjectSharedContext) =>
-      row<[number, number]>(ctx.db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
-    ),
+    get: async (ctx, id: number) => (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
+  },
+  views: {
+    /** Row `id`'s length, from a view: a reader's session. */
+    peek: async (ctx, id: number) => (await row<[number]>(ctx.db, 'SELECT length(v) FROM rows WHERE id = ?', [id]))[0],
+    /** The rows' count and total length, from a view. */
+    read: async (ctx) => row<[number, number]>(ctx.db, 'SELECT count(*), coalesce(sum(length(v)), 0) FROM rows'),
   },
   options: { retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 } },
 });
@@ -284,7 +280,7 @@ async function drive(out?: string) {
   );
   // Large transactions: many pages each.
   phases.push(await phase('bulk 200 rows, one key, sequential', 'bulk', [200, 200], 50, 1, () => `${run}-bulk`));
-  // Reads from a shared handler, warm, then after a restart of the objects.
+  // Reads from a view, warm, then after a restart of the objects.
   phases.push(await phase('read, 16 keys, warm', 'read', null, 1600, 16, (i) => `${run}-grow-${i % 16}`));
   await start();
   phases.push(await phase('read, 16 keys, cold process', 'read', null, 16, 16, (i) => `${run}-grow-${i % 16}`));
@@ -300,7 +296,7 @@ async function drive(out?: string) {
     phases.push(await phase(`${mb} MB: load, 1 MB per call`, 'bulk', [ROWS_PER_MB, 1024], mb, 1, key, key()));
     phases.push(await phase(`${mb} MB: update a row, warm`, 'update', rowId, 200, 1, key, key()));
     phases.push(await phase(`${mb} MB: read a row, warm`, 'get', rowId, 200, 1, key, key()));
-    phases.push(await phase(`${mb} MB: read a row, shared handler`, 'peek', rowId, 50, 1, key, key()));
+    phases.push(await phase(`${mb} MB: read a row, view`, 'peek', rowId, 50, 1, key, key()));
   }
   // The first calls after a restart of the objects: an empty page cache. A
   // call to another key first opens the server's connection to them.

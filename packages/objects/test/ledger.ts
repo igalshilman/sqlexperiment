@@ -28,8 +28,8 @@ export interface Audit {
 /** The ledger's handlers. */
 export const handlers = {
   /** Create the tables, and open `count` accounts with `balance` each, once. */
-  init: (ctx: restate.ObjectContext, [count, balance]: [number, number]) =>
-    ctx.transaction(async ({ db }) => {
+  init: (ctx: restate.SessionContext, [count, balance]: [number, number]) =>
+    ctx.db.transaction(async (db) => {
       await db.execute(
         `CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, opening INTEGER, balance INTEGER);
            CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, src INTEGER, dst INTEGER, amount INTEGER);`,
@@ -46,8 +46,8 @@ export const handlers = {
    * A transfer that would create or destroy money is refused: an account that
    * does not exist, or an amount that is not a positive integer.
    */
-  transfer: (ctx: restate.ObjectContext, t: Transfer) =>
-    ctx.transaction(async ({ db }): Promise<Transfer> => {
+  transfer: (ctx: restate.SessionContext, t: Transfer) =>
+    ctx.db.transaction(async (db): Promise<Transfer> => {
       const [seen] = await db.values('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
       if (seen) {
         const [from, to, amount] = seen as [number, number, number];
@@ -66,8 +66,8 @@ export const handlers = {
     }),
 
   /** Totals, and accounts that disagree with the recorded transfers. */
-  audit: (ctx: restate.ObjectContext) =>
-    ctx.transaction(async ({ db }): Promise<Audit> => {
+  audit: (ctx: restate.SessionContext) =>
+    ctx.db.transaction(async (db): Promise<Audit> => {
       const [integrity] = await row<[string]>(db, 'PRAGMA integrity_check');
       if (integrity !== 'ok') throw new restate.TerminalError('integrity check failed');
       const [accounts, total, transfers, inconsistent] = await row<[number, number, number, number]>(
@@ -82,7 +82,7 @@ export const handlers = {
     }),
 };
 
-export const ledger = restate.object({
+export const ledger = restate.sessionObject({
   name: 'Ledger',
   handlers,
   options: {
