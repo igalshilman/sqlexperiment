@@ -63,10 +63,14 @@ export const REFUSED = 424;
 /** What to check when a model's provider refuses a request. */
 export const CHECK_MODEL = "check the agent's model (its `model` option, or MODEL) and its provider's API key";
 
-/** An agent's model that it cannot take: not `provider/model-id`, or another provider's. */
-export class ModelError extends Error {
+/**
+ * An agent's model that it cannot take: not `provider/model-id`, another
+ * provider's, or one its framework does not know. Terminal ({@link REFUSED}),
+ * wherever it is thrown: a retry takes the same model.
+ */
+export class ModelError extends restate.TerminalError {
   constructor(message: string) {
-    super(message);
+    super(message, { errorCode: REFUSED });
     this.name = 'ModelError';
   }
 }
@@ -180,8 +184,20 @@ const stepped = async (ctx: restate.ObjectContext) => {
   if (!unfollowed(ctx)) await publish(ctx);
 };
 
-/** A tool call of the turn of `ctx` starts: {@link publish} it (its call is stored). */
-export const toolCallStarted = (ctx: restate.ObjectContext) => stepped(ctx);
+/**
+ * A tool call of the turn of `ctx` starts: {@link publish} it, which forgets
+ * the calls whose results are stored (calls.ts) before the tool makes its
+ * own. In the background, which publishes the turn's end only, it forgets
+ * them alone.
+ */
+export async function toolCallStarted(ctx: restate.ObjectContext) {
+  if (!unfollowed(ctx)) return publish(ctx);
+  const read = reading.get(ctx);
+  if (read) {
+    const transcript = await read();
+    await settle(ctx, (id) => transcript.answered(id));
+  }
+}
 
 /**
  * A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish}
@@ -306,7 +322,6 @@ const FOR_GOOD = new Set(['AuthenticationError', 'PermissionDeniedError', 'NotFo
  * (a tool's, an overloaded provider's) fail the attempt, and Restate retries.
  */
 function refused(error: unknown) {
-  if (error instanceof ModelError) return true;
   if (error instanceof ToolError) return false;
   if (error instanceof Error && FOR_GOOD.has(error.constructor.name)) return true;
   return /API key not found|no API key|Could not resolve authentication method|Provider is not configured|"code":"(AUTH|MISSING_CREDENTIAL)"/i.test(
@@ -319,12 +334,21 @@ function refused(error: unknown) {
  * it: a model the agent cannot take, or its provider's refusal.
  */
 export function refusal(error: unknown): restate.TerminalError | undefined {
+  if (error instanceof ModelError) return error;
   if (error instanceof restate.TerminalError || !refused(error)) return undefined;
-  const message =
-    error instanceof ModelError
-      ? error.message
-      : `the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`;
-  return new restate.TerminalError(message, { errorCode: REFUSED });
+  return new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}. ${String(error)}`, {
+    errorCode: REFUSED,
+  });
+}
+
+/**
+ * A prompt's stored answer, as the prompt returns it: {@link UNANSWERED},
+ * stored as its provider refused it, fails as the prompt did then
+ * ({@link REFUSED}), also in a retry after a crash right after it was stored.
+ */
+export function storedAnswer(answer: string): string {
+  if (answer !== UNANSWERED) return answer;
+  throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}`, { errorCode: REFUSED });
 }
 
 /** A message of a conversation, as an agent's `messages` handler returns it. */
@@ -414,12 +438,12 @@ export class Transcript {
     );
   }
 
-  /** Whether tool call `id` has its output. */
-  hasResult(id: string) {
+  /** Whether tool call `id` has its output, and not an error's. */
+  answered(id: string) {
     const at = this.#calls.get(id);
     return (
       at !== undefined &&
-      this.#messages[at]!.parts.some((p) => p.type === 'tool' && p.id === id && p.output !== undefined)
+      this.#messages[at]!.parts.some((p) => p.type === 'tool' && p.id === id && p.output !== undefined && !p.error)
     );
   }
 
@@ -453,7 +477,7 @@ function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
     const transcript = await read();
     await log.sync(ctx.db, transcript.messages(), () => ctx.get<log.Start>(log.START));
     // The calls whose results the framework stored are made: see calls.ts.
-    await settle(ctx, (id) => transcript.hasResult(id));
+    await settle(ctx, (id) => transcript.answered(id));
   };
   const done = (writing.get(ctx) ?? Promise.resolve()).then(write, write);
   writing.set(ctx, done);

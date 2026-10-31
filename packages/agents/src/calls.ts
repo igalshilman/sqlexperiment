@@ -10,11 +10,13 @@
 // idempotency key: the same Restate call (a wait for a signal, a sub-agent's
 // task), which it waits for again, or whose answer it gets.
 //
-// A call is kept until the framework's transcript has its result
-// ({@link settle}, at each publish): one that answered just before a crash,
-// whose result the framework had not stored, is made again as the same call.
-// Once stored, the model has its result, and an identical call it makes later
-// is a call of its own.
+// A call is kept until the framework's transcript has its result under the
+// last id it was made with ({@link settle}, at each publish, and before each
+// tool call): one that answered just before a crash, whose result the
+// framework had not stored, is made again as the same call. An error there
+// is not its result: OpenCode gives the call it interrupted one, and the
+// model makes it again. Once stored, the model has its result, and an
+// identical call it makes later is a call of its own.
 import type * as restate from 'restate-objects';
 import { randomUUID } from 'node:crypto';
 
@@ -85,14 +87,15 @@ export async function callOf(ctx: restate.ObjectContext, tool: string, input: un
 
 /**
  * Forget the calls that answered whose result the framework stored: those
- * of which `stored(id)` is true for any of their ids. Called at each publish,
- * with the transcript as the framework stored it.
+ * of which `stored(id)` is true for the last id they were made with. Called
+ * at each publish, and before each tool call, with the transcript as the
+ * framework stored it: also in an attempt that made no call yet, which would
+ * otherwise take one an earlier attempt made, and the model has the result
+ * of.
  */
 export async function settle(ctx: restate.ObjectContext, stored: (id: string) => boolean) {
-  const attempt = attempts.get(ctx);
-  if (!attempt) return;
-  const state = await attempt.calls;
-  const kept = state.calls.filter((c) => !c.done || !c.ids.some(stored));
+  const state = await attemptOf(ctx).calls;
+  const kept = state.calls.filter((c) => !c.done || !stored(c.ids.at(-1)!));
   if (kept.length === state.calls.length) return;
   state.calls = kept;
   ctx.set(CALLS, state);

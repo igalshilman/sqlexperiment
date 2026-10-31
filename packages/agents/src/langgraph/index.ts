@@ -51,6 +51,7 @@ import {
   Transcript,
   transcribing,
   refusal,
+  storedAnswer,
   UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
@@ -220,7 +221,7 @@ const answerOnce = async (
   for (;;) {
     const state = await app.getState(config);
     const answer = state.values.answers?.[id];
-    if (answer !== undefined) return answer;
+    if (answer !== undefined) return storedAnswer(answer);
     // Finish an interrupted run first (this prompt's, after a crash), then
     // start this prompt's. A run is unfinished while its prompt has no
     // answer: `next` does not say, as it leaves out the steps whose writes
@@ -239,9 +240,11 @@ const answerOnce = async (
         await close(app, config, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
-      // Refused for good (a wrong API key): the run ends unanswered.
-      if (refusal(error)) await close(app, config, UNANSWERED);
-      throw error;
+      // Refused for good (a wrong API key): the run ends unanswered. An
+      // earlier prompt's, this one goes on.
+      if (!refusal(error)) throw error;
+      await close(app, config, UNANSWERED);
+      if (!interrupted || last === id) throw error;
     }
   }
 };

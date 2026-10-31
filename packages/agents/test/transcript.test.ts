@@ -25,7 +25,7 @@ describe('a transcript', () => {
       input: { amount: 5 },
       output: 'moved',
     });
-    expect(transcript.hasResult('call_1')).toBe(true);
+    expect(transcript.answered('call_1')).toBe(true);
   });
 
   it("marks a tool's error", () => {
@@ -35,5 +35,6 @@ describe('a transcript', () => {
     transcript.result('call_1', 'Error: no such account');
     transcript.result('call_2', 'refused', true);
     expect(transcript.messages()[0]!.parts).toMatchObject([{ error: true }, { error: true }]);
+    expect(transcript.answered('call_1') || transcript.answered('call_2')).toBe(false);
   });
 });

@@ -5,6 +5,7 @@ import { call, object, send, signal, subagent, tool, workflow, type Tool } from 
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { settle } from '../src/calls.ts';
+import { Transcript } from '../src/common.ts';
 
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
 const carts = restate.object({
@@ -191,6 +192,33 @@ describe("Restate's tools", () => {
       'inv1:call_1',
       'inv1:call_3',
     ]);
+  });
+
+  it('make a call that answered again, after the framework gave it an interruption error', async () => {
+    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
+    const state = new Map<string, unknown>();
+    const first = context(state);
+    await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
+    // Resumed, OpenCode gives the call an error, which is not its result: the model makes it again.
+    const next = context(state);
+    const transcript = new Transcript();
+    transcript.call('call_1', 'status', { order: '103' });
+    transcript.result('call_1', 'Tool execution was interrupted', true);
+    await settle(next.ctx, (id) => transcript.answered(id));
+    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
+    expect(next.made.map((m) => m.idempotencyKey)).toEqual(['inv1:call_1']);
+  });
+
+  it('make a call whose result is stored as a call of its own, in an attempt that made none yet', async () => {
+    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
+    const state = new Map<string, unknown>();
+    const first = context(state);
+    await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
+    // The framework stored its result, and the attempt ended before a publish settled it.
+    const next = context(state);
+    await settle(next.ctx, (id) => id === 'call_1');
+    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
+    expect(next.made.map((m) => m.idempotencyKey)).toEqual(['inv1:call_2']);
   });
 
   it('make two calls of the same input in one attempt', async () => {

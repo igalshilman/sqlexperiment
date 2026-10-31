@@ -69,6 +69,7 @@ import {
   Transcript,
   transcribing,
   refusal,
+  storedAnswer,
   UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
@@ -341,7 +342,7 @@ async function answered(harness: Context, agent: Agent, id: string, text: string
     // First: a prompt refused in this attempt fails it, rather than answer.
     throwIfTurnFailed(events.slice(found));
     const answer = answerOf(events, promptId(id));
-    if (answer !== undefined) return answer;
+    if (answer !== undefined) return storedAnswer(answer);
     const last = lastPrompt(events);
     const unfinished = last !== undefined && answerOf(events, last) === undefined;
     agent.followup(unfinished ? message(`continue:${events.length}`, CONTINUE) : message(promptId(id), text));

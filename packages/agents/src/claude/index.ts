@@ -44,6 +44,7 @@ import {
   Transcript,
   transcribing,
   refusal,
+  storedAnswer,
   UNANSWERED,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
@@ -239,7 +240,7 @@ const answerOnce = async (
   const conversation = await Conversation.open(ctx.db);
   for (;;) {
     const answer = await conversation.answer(id);
-    if (answer !== undefined) return answer;
+    if (answer !== undefined) return storedAnswer(answer);
     // Finish an interrupted prompt first (this one's, after a crash), then
     // start this one.
     let pending = await conversation.pending();
@@ -258,9 +259,11 @@ const answerOnce = async (
         await conversation.cancel(pending, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
-      // Refused for good (a wrong API key): the prompt ends unanswered.
-      if (refusal(error)) await conversation.close(pending, UNANSWERED);
-      throw error;
+      // Refused for good (a wrong API key): the prompt ends unanswered. An
+      // earlier one's, this one goes on.
+      if (!refusal(error)) throw error;
+      await conversation.close(pending, UNANSWERED);
+      if (pending === id) throw error;
     }
   }
 };
