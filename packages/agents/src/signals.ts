@@ -6,6 +6,7 @@
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
+import type { SessionContext } from 'restate-session-objects';
 import { sdk as restate } from 'restate-session-objects/internal';
 import type { Turn } from './common.ts';
 import type { Status, Stopped } from './object.ts';
@@ -72,14 +73,17 @@ export const hasCompanion = (agent: object) => COMPANION in agent;
  *   deliver(ctx, triage, 'ENG-1', 'The issue was closed', { idempotencyKey: delivery });
  */
 export function deliver(
-  ctx: Pick<restate.Context, 'objectSendClient'>,
+  ctx: Pick<restate.Context, 'objectSendClient'> | Pick<SessionContext, 'send'>,
   agent: { name: string },
   key: string,
   text: string,
   opts: { idempotencyKey?: string } = {},
 ) {
   const { object, key: companion, agent: target } = companionOf(agent, key);
-  ctx.objectSendClient(object, companion).deliver({ agent: target, text }, restate.rpc.sendOpts(opts));
+  const delivery = { agent: target, text };
+  // A session object's handler, or one of the SDK's.
+  if ('send' in ctx) ctx.send(object, companion, opts).deliver(delivery);
+  else ctx.objectSendClient(object, companion).deliver(delivery, restate.rpc.sendOpts(opts));
 }
 
 /** A wait for a signal, as `pending` lists it. */

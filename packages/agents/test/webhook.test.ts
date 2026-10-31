@@ -4,7 +4,7 @@
 // records its sends; restate-tools.ts delivers to a running turn, on Restate.
 import { createHmac } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { companionOf, object, webhook, webhookMessage } from 'restate-agents';
+import { companionOf, deliver as deliverTo, object, webhook, webhookMessage } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 
 const triage = object({ name: 'triage', handlers: { chat: async (_ctx, text: string) => text } });
@@ -136,5 +136,23 @@ describe("an agent's companion", () => {
     expect(companion.key).toBe('triage:ENG-1');
     expect(companion.agent).toEqual({ service: 'triage', key: 'ENG-1' });
     expect(() => companionOf({ name: 'plain' }, 'k')).toThrow(/plain is not an agent of restate-agents/);
+  });
+
+  it("takes a delivery from a session object's handler, as from one of the SDK's", () => {
+    const sent: unknown[] = [];
+    const ctx = {
+      send: (target: { name: string }, key: string, opts: unknown) => ({
+        deliver: (input: unknown) => sent.push({ object: target.name, key, opts, input }),
+      }),
+    };
+    deliverTo(ctx as never, triage, 'ENG-1', 'closed', { idempotencyKey: 'd-1' });
+    expect(sent).toEqual([
+      {
+        object: 'signals',
+        key: 'triage:ENG-1',
+        opts: { idempotencyKey: 'd-1' },
+        input: { agent: { service: 'triage', key: 'ENG-1' }, text: 'closed' },
+      },
+    ]);
   });
 });
