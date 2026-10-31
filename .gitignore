@@ -1,6 +1,7 @@
 target/
-# The addon, built (pnpm build).
+# The addon, built (pnpm build), and the packages' JavaScript (pnpm pack).
 packages/objects/native/objects.node
+dist/
 node_modules/
 .env
 .env.*

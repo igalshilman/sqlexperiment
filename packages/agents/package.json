@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness",
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
     "./claude": "./src/claude/index.ts",
@@ -16,8 +21,50 @@
     "./pi/storage": "./src/pi/storage.ts",
     "./test/*": "./test/*.ts"
   },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./claude": {
+        "types": "./dist/claude/index.d.ts",
+        "default": "./dist/claude/index.js"
+      },
+      "./client": {
+        "types": "./dist/client.d.ts",
+        "default": "./dist/client.js"
+      },
+      "./deepseek": {
+        "types": "./dist/deepseek/index.d.ts",
+        "default": "./dist/deepseek/index.js"
+      },
+      "./langgraph": {
+        "types": "./dist/langgraph/index.d.ts",
+        "default": "./dist/langgraph/index.js"
+      },
+      "./opencode": {
+        "types": "./dist/opencode/index.d.ts",
+        "default": "./dist/opencode/index.js"
+      },
+      "./opencode/db": {
+        "types": "./dist/opencode/db.d.ts",
+        "default": "./dist/opencode/db.js"
+      },
+      "./pi": {
+        "types": "./dist/pi/index.d.ts",
+        "default": "./dist/pi/index.js"
+      },
+      "./pi/storage": {
+        "types": "./dist/pi/storage.d.ts",
+        "default": "./dist/pi/storage.js"
+      }
+    }
+  },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:ts": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "prepack": "pnpm build:ts"
   },
   "dependencies": {
     "@restatedev/restate-sdk-clients": "1.17.4",
