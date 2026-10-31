@@ -241,7 +241,7 @@ function parameterSpec(node: Record<string, unknown>): ParameterSchemaSpec {
 }
 
 /** `t` as a harness tool. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): ToolDefinition =>
+const native = (t: AnyTool, ctx: restate.SessionContext): ToolDefinition =>
   textTool({
     name: t.name,
     description: t.description,
@@ -276,7 +276,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 }
 
 /** {@link prompt}, answering with the agent's text. */
-const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+const promptText = (ctx: restate.SessionContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
     () => transcribe(ctx.db, ctx.key),
@@ -287,7 +287,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
 type Agent = Awaited<ReturnType<Context['agents']['create']>>['agent'];
 
 const answerOnce = async (
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   { model: named, system, tools = [] }: Options,
 ): Promise<string> => {
@@ -385,7 +385,7 @@ const steeringOf = (agent: Agent): Steerable => ({
  */
 const tracked = (
   definition: ToolDefinition,
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   steerable: () => Steerable,
   fail: (error: unknown) => void,
 ): ToolDefinition => ({
@@ -410,7 +410,7 @@ const tracked = (
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
@@ -468,4 +468,4 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options) }, views: { messages: messages() } });

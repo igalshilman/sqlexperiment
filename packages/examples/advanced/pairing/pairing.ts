@@ -23,7 +23,6 @@
  * (a container, a VM). REVIEWER sets the reviewer's model (GPT-6 Astra by
  * default).
  */
-import { handlers } from 'restate-objects';
 import { object, serve, signal, subagent, workflow } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -76,10 +75,12 @@ const pair = object({
         }),
       ],
     })),
+  },
+  views: {
     messages: pi.messages(),
 
-    /** The plan: shared, so it answers while the pair works. */
-    tasks: handlers.object.shared(async (ctx) => tasksOf(ctx.db)),
+    /** The plan: a view, so it answers while the pair works. */
+    tasks: async (ctx) => tasksOf(ctx.db),
   },
 });
 

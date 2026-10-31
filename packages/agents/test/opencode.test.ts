@@ -3,7 +3,7 @@
 // anything on the way out. Its model is the teller (../fakes/opencode.ts).
 // `pnpm --filter restate-agents test opencode`.
 import { describe, expect, it, vi } from 'vitest';
-import * as restate from '@restatedev/restate-sdk';
+import * as restate from 'restate-objects';
 import {
   afterCancel,
   cancelledTransfer,
@@ -14,6 +14,7 @@ import {
   withoutIds,
   conversation,
   crashedAnywhere,
+  handlerOf,
   SAID,
 } from './support.ts';
 import { teller, withTeller } from './fakes/opencode.ts';
@@ -28,9 +29,9 @@ vi.mock('restate-agents/opencode/db', async (original) => {
 vi.stubEnv('MODEL', 'teller/teller');
 
 /** The bank agent, after making a table of yours named as one of OpenCode's, before its first boot. */
-const besideYours = async (ctx: Parameters<typeof prompt>[0], message: string) => {
+const besideYours = async (ctx: restate.SessionContext, message: string) => {
   await ctx.db.execute('CREATE TABLE IF NOT EXISTS session (id TEXT)');
-  return prompt(ctx, message);
+  return handlerOf(prompt)(ctx, message);
 };
 
 describe('the OpenCode agent', () => {

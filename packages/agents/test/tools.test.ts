@@ -2,6 +2,7 @@
 // with a fake context that records the calls they make.
 import * as restate from 'restate-objects';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
+import { type AttemptContext, contextOf } from 'restate-objects/internal';
 import { memoryDatabase } from 'restate-objects/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -11,7 +12,7 @@ import { Transcript } from '../src/common.ts';
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
 const carts = restate.object({
   name: 'carts',
-  handlers: { add: async (_ctx: restate.ObjectContext, _item: string) => 1 },
+  handlers: { add: async (_ctx: restate.SessionContext, _item: string) => 1 },
 });
 const refund = restate.workflow({
   name: 'refund',
@@ -21,20 +22,18 @@ const refund = restate.workflow({
 /** A context, keyed `alice`, of invocation `inv1`, recording what is called and sent, with the object's database in `state`. */
 function context(state = new Map<string, Uint8Array>()) {
   const made: Record<string, unknown>[] = [];
-  const ctx = {
+  // The SDK's context behind the handler's: what the agent calls and sends.
+  const sdk = {
     key: 'alice',
-    db: memoryDatabase(state),
     request: () => ({ id: 'inv1', target: { service: 'assistant', handler: 'chat', key: 'alice' } }),
-    genericCall: async (c: Record<string, unknown>) => (made.push({ kind: 'call', ...c }), `${String(c.method)} done`),
+    genericCall: async (c: Record<string, unknown>) => {
+      made.push({ kind: 'call', ...c });
+      return c.method === 'wait' ? 'approved' : `${String(c.method)} done`;
+    },
     genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
-    objectClient: (definition: { name: string }, key: string) => ({
-      wait: async (parameter: unknown, opts: restate.Opts<unknown, unknown>) => {
-        made.push({ kind: 'call', service: definition.name, key, method: 'wait', parameter, ...opts.getOpts() });
-        return 'approved';
-      },
-    }),
   };
-  return { made, ctx: ctx as unknown as restate.ObjectContext };
+  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
+  return { made, ctx, sdk };
 }
 
 /** The tool `t` run as the model's tool call `call_1`, with `input` as the model gave it. */
@@ -161,7 +160,7 @@ describe("Restate's tools", () => {
     // An attempt makes the call, and ends (a crash, a suspension) before it answers.
     const first = context(state);
     const made = Promise.withResolvers<void>();
-    first.ctx.genericCall = (() => (made.resolve(), new Promise(() => {}))) as never;
+    first.sdk.genericCall = (() => (made.resolve(), new Promise(() => {}))) as never;
     void t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
     // Stored before it is made.
     await made.promise;
@@ -278,9 +277,13 @@ describe('object', () => {
     expect(() => object({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
   });
 
-  it('has `clear` and `sync` only as an agent: one with `messages`', () => {
+  it('has `clear` and `sync` only as an agent: one with a `messages` view', () => {
     const desk = object({ name: 'desk', handlers: { chat: async () => '' } });
-    const agent = object({ name: 'agent', handlers: { chat: async () => '', messages: async () => ({}) } });
+    const agent = object({
+      name: 'agent',
+      handlers: { chat: async () => '' },
+      views: { messages: async () => ({ messages: [], more: false, cursor: 0 }) },
+    });
     expect(handlersOf(desk)).not.toContain('clear');
     expect(handlersOf(desk)).not.toContain('sync');
     expect(handlersOf(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));

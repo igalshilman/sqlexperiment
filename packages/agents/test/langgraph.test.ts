@@ -3,7 +3,7 @@
 // way out of a crashed attempt. `pnpm --filter restate-agents test langgraph`. Its model is the teller (../fakes/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
-import type { ObjectContext } from 'restate-objects';
+import type { ViewContext } from 'restate-objects';
 import { CANCELLED, REFUSED, UNANSWERED } from 'restate-agents';
 import {
   afterCancel,
@@ -25,7 +25,7 @@ import { bank } from './bank.ts';
 vi.mock('@langchain/openai', () => import('./fakes/langgraph.ts'));
 
 /** The rows of `table` in an object's database. */
-const count = (table: string) => async (ctx: ObjectContext) =>
+const count = (table: string) => async (ctx: ViewContext) =>
   Number((await ctx.db.values(`SELECT COUNT(*) FROM ${table}`))[0]![0]);
 
 describe('the LangGraph agent', () => {

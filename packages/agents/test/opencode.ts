@@ -12,6 +12,10 @@ import { bank } from './bank.ts';
 /** Answer a message, once per invocation. */
 export const prompt = opencode.chat({ tools: bank('OpenCodeAgent') });
 
-export const agent = object({ name: 'OpenCodeAgent', handlers: { chat: prompt, messages: opencode.messages() } });
+export const agent = object({
+  name: 'OpenCodeAgent',
+  handlers: { chat: prompt },
+  views: { messages: opencode.messages() },
+});
 
 serveIfMain(import.meta, [agent, ledger, signals]);

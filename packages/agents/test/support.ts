@@ -4,6 +4,7 @@
 import { expect } from 'vitest';
 import * as restate from 'restate-objects';
 import { type Steer, tool, type Tool } from 'restate-agents';
+import { type AttemptContext, contextOf } from 'restate-objects/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from 'restate-objects/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from 'restate-objects/test/ledger';
@@ -46,40 +47,81 @@ export const steeringOf = (map: ReadonlyMap<string, Uint8Array>) => {
   return steerings.get(object)!;
 };
 
-/** An attempt of a handler, restate-objects's own, with the `signals` object of steering over `map`. */
-export function sqlAttempt(options: AttemptOptions) {
-  const steering = steeringOf(options.map);
-  return {
-    ...baseAttempt(options),
-    /** The `signals` object, as steering calls it. */
-    objectClient: (definition: { name: string }) => {
-      if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
-      return {
-        steering: async (turn: string) => steering.turns.get(turn) ?? [],
-        start: async (turn: { invocationId: string; since: string }) => {
-          if (steering.answering?.invocationId !== turn.invocationId) steering.answering = turn;
-        },
-        publish: async () => ({ revision: ++steering.revision }),
-        progress: async (turn: string) => {
-          steering.revision++;
-          return steering.turns.get(turn) ?? [];
-        },
-      };
-    },
-    objectSendClient: (definition: { name: string }) => {
-      if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
-      return {
-        close: (close: Steering['closed'][number]) => {
-          if (steering.answering?.invocationId === close.turn) steering.answering = null;
-          steering.closed.push(close);
-        },
-      };
-    },
-  };
+/** A call or send an attempt makes, as the SDK gets it (`ctx.rpc`, `ctx.send`). */
+export interface Made {
+  service: string;
+  method: string;
+  key?: string;
+  parameter: unknown;
+  idempotencyKey?: string;
 }
 
-/** A chat handler, such as a framework's `chat()`: a message in, the answer out. */
-export type PromptHandler = (ctx: restate.ObjectContext, message: string) => Promise<string>;
+/** A call as the SDK gets it, but its serdes. */
+const made = (c: Made): Made => ({
+  service: c.service,
+  method: c.method,
+  key: c.key,
+  parameter: c.parameter,
+  idempotencyKey: c.idempotencyKey,
+});
+
+/**
+ * An attempt of a handler, restate-objects's own, with the `signals` object
+ * of steering over `map`: `ctx`, a handler's context, and `view`, a view's.
+ * `route` answers the calls to anything but `signals`.
+ */
+export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => Promise<unknown> }) {
+  const steering = steeringOf(options.map);
+  const base = baseAttempt(options);
+  // The `signals` object, as the agents call it.
+  const signals: Record<string, (input: never) => unknown> = {
+    steering: (turn: string) => steering.turns.get(turn) ?? [],
+    publish: () => ({ revision: ++steering.revision }),
+    progress: (turn: string) => {
+      steering.revision++;
+      return steering.turns.get(turn) ?? [];
+    },
+    start: (turn: { invocationId: string; since: string }) => {
+      if (steering.answering?.invocationId !== turn.invocationId) steering.answering = turn;
+    },
+    close: (close: Steering['closed'][number]) => {
+      if (steering.answering?.invocationId === close.turn) steering.answering = null;
+      steering.closed.push(close);
+    },
+  };
+  const route = (c: Made) => {
+    if (c.service !== 'signals') {
+      if (options.route) return options.route(made(c));
+      throw new Error(`no ${c.service} in this test`);
+    }
+    const method = signals[c.method];
+    if (!method) throw new Error(`no signals.${c.method} in this test`);
+    return method(c.parameter as never);
+  };
+  const sdk = {
+    key: options.key ?? 'k',
+    request: () => ({
+      ...base.request(),
+      target: { service: options.service ?? 'agent', key: options.key ?? 'k', handler: 'chat' },
+    }),
+    genericCall: async (c: Made) => route(c),
+    genericSend: (c: Made) => void route(c),
+    cancellation: base.cancellation,
+    cancelPreviousCalls: base.cancelPreviousCalls,
+  } as unknown as AttemptContext;
+  return { ...base, ctx: contextOf(sdk, base.db), view: contextOf(sdk, base.db, true) };
+}
+
+/** A handler: a function, or one with options (as `chat()` gives). */
+export type Entry<F> = F | { handler: F };
+
+/** A chat handler, or a handler with options (`chat()`'s): its function. */
+export const handlerOf = <F>(entry: F | { handler: F }): F =>
+  typeof entry === 'function' ? entry : (entry as { handler: F }).handler;
+
+export type PromptHandler =
+  | ((ctx: restate.SessionContext, message: string) => Promise<string>)
+  | { handler: (ctx: restate.SessionContext, message: string) => Promise<string> };
 
 /** The fake ledger of a conversation. */
 export interface FakeLedger {
@@ -118,9 +160,9 @@ export function conversation(
   // The books as an attempt calls them: a fenced (crashed) attempt's calls
   // never reach them, as a dead process's do not.
   const booksOf = (attempt: { closed: boolean }) => ({
-    async transfer(transfer: Transfer, opts: restate.Opts<Transfer, Transfer>) {
+    async transfer(transfer: Transfer, idempotencyKey: string | undefined) {
       if (attempt.closed) return new Promise<Transfer>(() => {});
-      ledger.calls.push({ name: 'transfer', id: transfer.id, key: opts.getOpts().idempotencyKey });
+      ledger.calls.push({ name: 'transfer', id: transfer.id, key: idempotencyKey });
       if (!ledger.transfers.has(transfer.id)) ledger.transfers.set(transfer.id, transfer);
       const applied = ledger.transfers.get(transfer.id)!;
       if (ledger.crashNext > 0) {
@@ -161,15 +203,12 @@ export function conversation(
         crashed.resolve('crashed');
         throw new Error('crash at a state request');
       };
-      const sql = sqlAttempt({ map, fence, key, id: requestId, onRequest });
+      const books = booksOf(current);
+      const route = async ({ method, parameter, idempotencyKey }: Made) =>
+        method === 'transfer' ? books.transfer(parameter as Transfer, idempotencyKey) : books.audit();
+      const sql = sqlAttempt({ map, fence, key, id: requestId, onRequest, route });
       abort = sql.abort;
-      const ctx = {
-        key,
-        ...sql,
-        objectClient: (definition: { name: string }) =>
-          definition.name === 'signals' ? sql.objectClient(definition) : booksOf(current),
-      };
-      const answer = sql.end(() => handler(ctx as unknown as restate.ObjectContext, prompt));
+      const answer = sql.end(() => handlerOf(handler)(sql.ctx, prompt));
       if (crashAt === undefined) return answer;
       answer.catch(() => {});
       return Promise.race([crashed.promise, answer]);
@@ -178,10 +217,9 @@ export function conversation(
      * A shared handler of the object (such as `messages`), with `input`, in an
      * attempt of its own: it reads beside an attempt that runs, if any.
      */
-    async read<T, I>(other: (ctx: restate.ObjectContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
+    async read<T, I>(other: (ctx: restate.ViewContext, input: I) => Promise<T>, input?: I, requestId = 'read') {
       const sql = sqlAttempt({ map, key, id: requestId, shared: true });
-      const ctx = { key, ...sql };
-      return sql.end(() => other(ctx as unknown as restate.ObjectContext, input as I));
+      return sql.end(() => other(sql.view, input as I));
     },
     /** An attempt that crashes in its next transfer. */
     async crash(requestId: string, prompt: string) {
@@ -237,7 +275,7 @@ export const SAID = [
 export async function crashedAnywhere(
   prompt: PromptHandler,
   messages: (
-    ctx: restate.ObjectContext,
+    ctx: restate.ViewContext,
     request: object,
   ) => Promise<{ messages: { role: string; parts: { type: string; text?: string }[] }[] }>,
   {
@@ -302,25 +340,20 @@ export const cancelledTransfer = tool({
  */
 export async function afterCancel(
   chat: PromptHandler,
-  messages: (ctx: restate.ObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: restate.ViewContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
 ) {
   const map = new Map<string, Uint8Array>();
-  const invoke = <I, O>(
-    handler: (ctx: restate.ObjectContext, input: I) => Promise<O>,
-    id: string,
-    input: I,
-    shared = false,
-  ) => {
-    const sql = sqlAttempt({ map, key: 'cancel', id, shared });
-    const ctx = { key: 'cancel', ...sql };
-    return sql.end(() => handler(ctx as unknown as restate.ObjectContext, input));
+  const invoke = (id: string, input: string) => {
+    const sql = sqlAttempt({ map, key: 'cancel', id });
+    return sql.end(() => handlerOf(chat)(sql.ctx, input));
   };
-  const failed = await invoke(chat, 'inv1', 'Please move 5 from 1 to 2').then(
+  const failed = await invoke('inv1', 'Please move 5 from 1 to 2').then(
     () => undefined,
     (error: unknown) => error,
   );
-  const answer = await invoke(chat, 'inv2', 'Hello');
-  const page = await invoke(messages, 'read', {}, true);
+  const answer = await invoke('inv2', 'Hello');
+  const read = sqlAttempt({ map, key: 'cancel', id: 'read', shared: true });
+  const page = await read.end(() => messages(read.view, {}));
   return { failed, answer, parts: page.messages.map((m) => m.parts) };
 }
 
@@ -331,7 +364,7 @@ export async function afterCancel(
  */
 export async function cancelledWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
-  messages: (ctx: restate.ObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: restate.ViewContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
 ) {
   const map = new Map<string, Uint8Array>();
   const started = Promise.withResolvers<void>();
@@ -344,10 +377,10 @@ export async function cancelledWhileWorking(
       return new Promise<never>(() => {}); // as long as it takes
     },
   });
-  const handler = chat([transfer]);
+  const handler = handlerOf(chat([transfer]));
   const attempt = (id: string, shared = false) => {
     const sql = sqlAttempt({ map, key: 'cancel', id, shared });
-    return { sql, ctx: { key: 'cancel', ...sql } as unknown as restate.ObjectContext };
+    return { sql, ctx: sql.ctx, view: sql.view };
   };
   const first = attempt('inv1');
   const answering = first.sql.end(() => handler(first.ctx, 'Please move 5 from 1 to 2'));
@@ -360,7 +393,7 @@ export async function cancelledWhileWorking(
   const second = attempt('inv2');
   const answer = await second.sql.end(() => handler(second.ctx, 'Hello'));
   const read = attempt('read', true);
-  const page = await read.sql.end(() => messages(read.ctx, {}));
+  const page = await read.sql.end(() => messages(read.view, {}));
   return { failed, answer, parts: page.messages.map((m) => m.parts) };
 }
 
@@ -376,7 +409,7 @@ export const STEERED = 'Only from account 1, please';
  */
 export async function steeredWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
-  messages: (ctx: restate.ObjectContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
+  messages: (ctx: restate.ViewContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
   { service }: { service?: string } = {},
 ) {
   const map = new Map<string, Uint8Array>();
@@ -386,18 +419,18 @@ export async function steeredWhileWorking(
     description: 'Move money.',
     input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
     run: (_transfer, { ctx }) => {
-      steering.steer(ctx.request().id, STEERED);
+      steering.steer(ctx.request.id, STEERED);
       return 'moved 5 from account 1 to account 2';
     },
   });
   const attempt = (id: string, shared = false) => {
     const sql = sqlAttempt({ map, key: 'steer', id, shared, service });
-    return { sql, ctx: { key: 'steer', ...sql } as unknown as restate.ObjectContext };
+    return { sql, ctx: sql.ctx, view: sql.view };
   };
   const turn = attempt('inv1');
-  const answer = await turn.sql.end(() => chat([transfer])(turn.ctx, 'Please move 5 from 1 to 2'));
+  const answer = await turn.sql.end(() => handlerOf(chat([transfer]))(turn.ctx, 'Please move 5 from 1 to 2'));
   const read = attempt('read', true);
-  const page = await read.sql.end(() => messages(read.ctx, {}));
+  const page = await read.sql.end(() => messages(read.view, {}));
   return {
     answer,
     parts: withoutIds(page.messages.map((m) => m.parts)),
@@ -434,7 +467,6 @@ export async function invalidArguments(chat: (tools: Tool[]) => PromptHandler) {
   });
   const map = new Map<string, Uint8Array>();
   const sql = sqlAttempt({ map, key: 'invalid', id: 'inv1' });
-  const ctx = { key: 'invalid', ...sql } as unknown as restate.ObjectContext;
-  const answer = await sql.end(() => chat([small])(ctx, 'Please move 5 from 1 to 2'));
+  const answer = await sql.end(() => handlerOf(chat([small]))(sql.ctx, 'Please move 5 from 1 to 2'));
   return { answer, ran };
 }

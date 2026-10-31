@@ -75,21 +75,18 @@ const CaseReport = z.object({
  * an idempotency key made from the request id (the same on every attempt)
  * and the tool call id.
  */
-async function gatewayTools(ctx: restate.ObjectContext, tenant: string, user: string) {
-  const gw = ctx.objectClient(gateway, tenant);
-  return (await gw.tools()).map((tool): ToolRegistration =>
+async function gatewayTools(ctx: restate.SessionContext, tenant: string, user: string) {
+  const tools = await ctx.rpc(gateway, tenant).tools();
+  return tools.map((tool): ToolRegistration =>
     defineTool({
       name: tool.name,
       description: tool.description,
       parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
       replay: 'safe', // runs again after a crash, with the same call id
       execute: async (args, api) => {
-        const { content, isError = false } = await gw.call(
-          { user, name: tool.name, arguments: args },
-          restate.rpc.opts({
-            idempotencyKey: `${ctx.request().id}:${api.callId}`,
-          }),
-        );
+        const { content, isError = false } = await ctx
+          .rpc(gateway, tenant, { idempotencyKey: `${ctx.request.id}:${api.callId}` })
+          .call({ user, name: tool.name, arguments: args });
         return { content, isError };
       },
     }),
@@ -102,16 +99,14 @@ const options = { journalRetention: { hours: 1 } };
 export const caseAgent = object({
   name: 'Case',
   handlers: {
-    report: restate.handlers.object.exclusive(
-      {
-        description: [
-          "Look into a report on the order of the key `<tenant>.<order>` (such as `acme.103`), with the tenant's tools.",
-          'The case remembers every report on it, from any user.',
-        ].join('\n'),
-        input: restate.serde.schema(CaseReport),
-        output: restate.serde.schema(Answer),
-      },
-      async (ctx: restate.ObjectContext, { user, question }: z.infer<typeof CaseReport>) => {
+    report: {
+      description: [
+        "Look into a report on the order of the key `<tenant>.<order>` (such as `acme.103`), with the tenant's tools.",
+        'The case remembers every report on it, from any user.',
+      ].join('\n'),
+      input: restate.serde.schema(CaseReport),
+      output: restate.serde.schema(Answer),
+      handler: async (ctx, { user, question }: z.infer<typeof CaseReport>) => {
         const [tenant = '', order = ''] = ctx.key.split('.', 2);
         const tools = await gatewayTools(ctx, tenant, user);
         const workspace = workspaceOf('Case', ctx.key);
@@ -119,13 +114,13 @@ export const caseAgent = object({
           answer: await session.prompt(`Order ${order}, from ${user}: ${question}`),
         }));
       },
-    ),
+    },
   },
   options,
 });
 
 /** Answer prompt `text`, with the tenant's tools and case agents. */
-export const prompt = async (ctx: restate.ObjectContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
+export const prompt = async (ctx: restate.SessionContext, text: z.infer<typeof PROMPT_SCHEMA>) => {
   const { tenant, user } = identity(ctx.key);
   const tools = await gatewayTools(ctx, tenant, user);
   tools.push(
@@ -143,12 +138,9 @@ export const prompt = async (ctx: restate.ObjectContext, text: z.infer<typeof PR
       }),
       replay: 'safe',
       execute: async ({ order, question }, api) => {
-        const { answer } = await ctx.objectClient(caseAgent, `${tenant}.${order}`).report(
-          { user, question },
-          restate.rpc.opts({
-            idempotencyKey: `${ctx.request().id}:${api.callId}`,
-          }),
-        );
+        const { answer } = await ctx
+          .rpc(caseAgent, `${tenant}.${order}`, { idempotencyKey: `${ctx.request.id}:${api.callId}` })
+          .report({ user, question });
         return { output: [{ type: 'text', text: answer }] };
       },
     }),
@@ -163,21 +155,19 @@ export const prompt = async (ctx: restate.ObjectContext, text: z.infer<typeof PR
 export const assistant = object({
   name: 'Assistant',
   handlers: {
-    prompt: restate.handlers.object.exclusive(
-      {
-        description: [
-          'Answer a prompt, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
-          'Prompts to try:',
-          ...EXAMPLES.map((e) => `- ${e}`),
-          'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
-          'Investigating an order hands it to its case agent, `Case/<tenant>.<order>`.',
-        ].join('\n'),
-        metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
-        input: restate.serde.schema(PROMPT_SCHEMA),
-        output: restate.serde.schema(Answer),
-      },
-      prompt,
-    ),
+    prompt: {
+      description: [
+        'Answer a prompt, with the tools of the tenant of the key `<tenant>.<user>` (such as `acme.alice`).',
+        'Prompts to try:',
+        ...EXAMPLES.map((e) => `- ${e}`),
+        'A refund waits for a manager: `Gateway/<tenant>/pending`, then `Gateway/<tenant>/decide`.',
+        'Investigating an order hands it to its case agent, `Case/<tenant>.<order>`.',
+      ].join('\n'),
+      metadata: Object.fromEntries(EXAMPLES.map((e, i) => [`example.${i + 1}`, e])),
+      input: restate.serde.schema(PROMPT_SCHEMA),
+      output: restate.serde.schema(Answer),
+      handler: prompt,
+    },
   },
   options,
 });

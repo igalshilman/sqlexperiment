@@ -13,7 +13,6 @@
  *   curl localhost:8080/desk/alice/chat -d 'The app crashes when I open my orders'
  *   curl localhost:8080/billing/alice/messages   # what billing was asked, and answered
  */
-import * as restate from '@restatedev/restate-sdk';
 import { chatHandler, object, serve } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import * as pi from 'restate-agents/pi';
@@ -40,9 +39,7 @@ const desk = object({
       const agent = /billing/i.test(team) ? billing : tech;
       // This handler is not replayed: the idempotency key makes a retried
       // attempt reach the call the first one made, not send the message again.
-      return ctx
-        .objectClient(agent, ctx.key)
-        .chat(message, restate.rpc.opts({ idempotencyKey: `${ctx.request().id}:${agent.name}` }));
+      return ctx.rpc(agent, ctx.key, { idempotencyKey: `${ctx.request.id}:${agent.name}` }).chat(message);
     }),
   },
 });

@@ -48,7 +48,7 @@ const poet = object({
       try {
         const root = await harness.root(context, { agent: { model: { provider: 'openai', modelId: 'gpt-6-sol' } } });
         // Once per invocation: a retry finds this submission again, by its id.
-        const submission = await root.submit({ type: 'input', content: request, requestId: ctx.request().id }, context);
+        const submission = await root.submit({ type: 'input', content: request, requestId: ctx.request.id }, context);
         const { status, answer, reason } = await submission.wait(context);
         if (status !== 'done' || answer === undefined) throw new TerminalError(`unanswered: ${reason ?? status}`);
         // The answer is an entry of the conversation: the model's last message.

@@ -11,10 +11,10 @@
 // gets each message that is new or changed since, once.
 //
 // `clear` forgets the log with the rest of the conversation, but not where it
-// got to: the next conversation's ids and cursors go on from there
-// (`START`), so a client following it reads on, and drops the messages
-// before `first`.
-import type { Database } from 'restate-objects';
+// got to: the next conversation's ids and cursors go on from there (its
+// start, a row of `restate_agent_log_start`), so a client following it reads
+// on, and drops the messages before `first`.
+import type { Database, DatabaseReader, DatabaseWriter } from 'restate-objects';
 import { Schema } from 'restate-objects/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
@@ -28,9 +28,6 @@ export interface Start {
   id: number;
 }
 
-/** The agent's state key of its log's {@link Start}, which `clear` sets: none before. */
-export const START = 'restate-agents.log.start';
-
 /** A message as the transcript gives it: its role and parts, without an id. */
 export type Said = Omit<ChatMessage, 'id'>;
 
@@ -41,7 +38,25 @@ const SCHEMA = new Schema('restate-agents.log', [
     position INTEGER UNIQUE,
     message TEXT NOT NULL
   )`,
+  // Where the log starts, which `clear` sets: no row before.
+  `CREATE TABLE ${TABLE}_start (
+    row INTEGER PRIMARY KEY CHECK (row = 0),
+    seq INTEGER NOT NULL,
+    id INTEGER NOT NULL
+  )`,
 ]);
+
+/** Where the log of `db` starts, if `clear` set it. */
+const startOf = async (db: DatabaseReader): Promise<Start | undefined> =>
+  db.get<Start>(`SELECT seq, id FROM ${TABLE}_start`);
+
+/**
+ * Start the log at `start`, in the transaction `tx` of `clear` that emptied
+ * the database: the next conversation's ids and cursors go on from there.
+ */
+export async function restart(tx: DatabaseWriter, start: Start) {
+  await tx.execute(`INSERT OR REPLACE INTO ${TABLE}_start (row, seq, id) VALUES (0, ?, ?)`, [start.seq, start.id]);
+}
 
 /** A message of the log's head, the transcript as last stored: its id, and the message, also as JSON. */
 interface Row {
@@ -65,7 +80,7 @@ interface Head {
 const heads = new WeakMap<Database, Head>();
 
 /** The log's head in `db`: as this session stored it last, or else as the log has it. */
-async function headOf(db: Database, start: () => Promise<Start | null>): Promise<Head> {
+async function headOf(db: Database): Promise<Head> {
   const cached = heads.get(db);
   if (cached) return cached;
   const rows = (await db.values(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
@@ -75,7 +90,7 @@ async function headOf(db: Database, start: () => Promise<Start | null>): Promise
     `SELECT MAX(seq) AS last, MAX(id) + 1 AS next FROM ${TABLE}`,
   ))!;
   if (last !== null) return { rows, seq: last, next: next! };
-  const from = (await start()) ?? { seq: 0, id: 0 };
+  const from = (await startOf(db)) ?? { seq: 0, id: 0 };
   return { rows, seq: from.seq, next: from.id };
 }
 
@@ -83,9 +98,9 @@ async function headOf(db: Database, start: () => Promise<Start | null>): Promise
  * Store the transcript's `messages`, in order, in the log: those that
  * changed since the last time, in one transaction.
  */
-export async function sync(db: Database, messages: Said[], start: () => Promise<Start | null>) {
+export async function sync(db: Database, messages: Said[]) {
   await SCHEMA.ensure(db);
-  const head = await headOf(db, start);
+  const head = await headOf(db);
   // A message the transcript did not change is the one stored (see Transcript in common.ts):
   // only the others are compared, as JSON.
   const jsons: string[] = [];
@@ -131,12 +146,9 @@ export async function sync(db: Database, messages: Said[], start: () => Promise<
  * `limit` messages (or those before `before`, an id), oldest first, and the
  * cursor to follow the conversation from.
  */
-export async function page(
-  db: Database,
-  { limit = 50, before, cursor }: MessagesRequest,
-  start: Start | null,
-): Promise<Messages> {
+export async function page(db: DatabaseReader, { limit = 50, before, cursor }: MessagesRequest): Promise<Messages> {
   await SCHEMA.ensure(db);
+  const start = await startOf(db);
   const first = start ? { first: start.id } : {};
   if (cursor !== undefined) {
     const rows = await db.values(`SELECT id, message, seq FROM ${TABLE} WHERE seq > ? ORDER BY seq LIMIT ?`, [

@@ -400,13 +400,21 @@ export class SqlAttempt {
       ...sqlOver((sql, params) => this.call((db) => db.queryColumns(sql, params))),
       // A shared handler's writes stay in its session: it has no outbox.
       transaction: <T>(body: (tx: Transaction) => Promise<T>) =>
-        this.ctx.shared || this.name !== undefined
+        this.ctx.shared
           ? this.call((db) => db.transaction((tx) => body({ ...forBody(tx), send: refusedSend })))
-          : this.withSends((tx, record, handle) => {
-              const transaction: Transaction = { ...tx, send: sendOf(record) };
-              resets.set(transaction, () => this.reset(handle));
-              return body(transaction);
-            }),
+          : this.name !== undefined
+            ? this.call((db) =>
+                db.transaction((handle) => {
+                  const transaction: Transaction = { ...forBody(handle), send: refusedSend };
+                  resets.set(transaction, () => this.reset(handle));
+                  return body(transaction);
+                }),
+              )
+            : this.withSends((tx, record, handle) => {
+                const transaction: Transaction = { ...tx, send: sendOf(record) };
+                resets.set(transaction, () => this.reset(handle));
+                return body(transaction);
+              }),
     };
     sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));
     attempts.set(this.db, this);
@@ -500,7 +508,8 @@ export class SqlAttempt {
 
   /** Empty the database in the transaction `handle` ({@link reset}), and apply the schemas this attempt applied again. */
   private async reset(handle: ConnectionTransaction) {
-    const own = ofObject(this.ctx.request().target.service);
+    // Another database of the key has none of the object's schema.
+    const own = this.name === undefined ? ofObject(this.ctx.request().target.service) : undefined;
     const schemas = [...(own ? [own] : []), ...[...this.ensured.values()].filter((s) => s !== own)];
     await dropAll(handle, schemas);
   }

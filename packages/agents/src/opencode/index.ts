@@ -36,7 +36,7 @@
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
 import * as restate from 'restate-objects';
-import { database } from 'restate-objects/internal';
+import { database, reset } from 'restate-objects/internal';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -51,6 +51,7 @@ import {
   modelOf,
   providerOf,
   nextPromptId,
+  onClear,
   settleSteering,
   type Steerable,
   toolCallEnded,
@@ -90,7 +91,7 @@ export interface OpenCodeTool<Input = unknown> {
  * and answers the model with what is wrong; those that fit reach `t.run` as
  * the model gave them, which parses them itself.
  */
-const native = (t: AnyTool, ctx: restate.ObjectContext): OpenCodeTool => {
+const native = (t: AnyTool, ctx: restate.SessionContext): OpenCodeTool => {
   const standard = t.input['~standard'];
   const input: StandardSchemaV1 = {
     '~standard': {
@@ -132,7 +133,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
    * gives one: `(ctx) => \`/work/${ctx.key}\``, a directory per key; or makes
    * one, such as a git worktree (it runs at each attempt: make it idempotent).
    */
-  workspace?: string | ((ctx: restate.ObjectContext) => string | Promise<string>);
+  workspace?: string | ((ctx: restate.SessionContext) => string | Promise<string>);
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
   /**
@@ -191,7 +192,7 @@ function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<ne
  * steering, which its next step takes.
  */
 const steeringPlugin = (
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   steerable: Steerable,
   fail: (error: unknown) => Promise<never>,
 ): Plugin.Plugin => ({
@@ -435,7 +436,7 @@ async function interruptOn(host: Host, failure: Promise<never>): Promise<never> 
  * OpenCode `host` for anything else.
  */
 export const withOpenCode = async <T>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   { plugins = [], model: named, system, tools = [], workspace: where }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
@@ -510,7 +511,7 @@ export const withOpenCode = async <T>(
 };
 
 /** {@link prompt}, answering with the agent's text. */
-const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+const promptText = (ctx: restate.SessionContext, text: string, options: Options): Promise<string> =>
   withOpenCode(ctx, options, (session) => session.prompt(text));
 
 /**
@@ -520,7 +521,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
@@ -568,5 +569,15 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   schema,
   background,
   ...options
-}: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });
+}: Options<O> & Definition<P>) => {
+  // OpenCode's tables are in a database of their own, which `clear` empties too.
+  onClear(name, (ctx) => database(ctx.db, DATABASE).transaction((tx) => reset(tx)));
+  return object({
+    name,
+    description,
+    schema,
+    background,
+    handlers: { chat: chat(options) },
+    views: { messages: messages() },
+  });
+};

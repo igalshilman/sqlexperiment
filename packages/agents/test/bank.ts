@@ -8,15 +8,15 @@
 // A framework that gives a tool call cut off by a crash a new id (OpenCode,
 // the DeepSeek Harness) has the model retry it with `retryOf`, the id of the
 // call it retries.
-import * as restate from 'restate-objects';
+import type * as restate from 'restate-objects';
 import { tool } from 'restate-agents';
 import { z } from 'zod';
 import { ledger } from 'restate-objects/test/ledger';
 
 /** The ledger. */
-const books = (ctx: restate.ObjectContext) => ctx.objectClient(ledger, 'bank');
+const books = (ctx: restate.SessionContext, idempotencyKey: string) => ctx.rpc(ledger, 'bank', { idempotencyKey });
 /** One idempotency key per tool call: a prompt makes several. */
-const key = (ctx: restate.ObjectContext, id: string) => `${ctx.request().id}:${id}`;
+const key = (ctx: restate.SessionContext, id: string) => `${ctx.request.id}:${id}`;
 
 /** The bank tools of the agent `agent`. */
 export const bank = (agent: string) => [
@@ -34,10 +34,7 @@ export const bank = (agent: string) => [
     run: async ({ from, to, amount, retryOf }, { ctx, callId }) => {
       const id = retryOf ?? callId;
       // What moved: a retry of an earlier call gets that call's transfer.
-      const applied = await books(ctx).transfer(
-        { id: `${agent}/${ctx.key}/${id}`, from, to, amount },
-        restate.rpc.opts({ idempotencyKey: key(ctx, id) }),
-      );
+      const applied = await books(ctx, key(ctx, id)).transfer({ id: `${agent}/${ctx.key}/${id}`, from, to, amount });
       return `moved ${applied.amount} from account ${applied.from} to account ${applied.to}`;
     },
   }),
@@ -45,6 +42,6 @@ export const bank = (agent: string) => [
     name: 'audit',
     description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',
     input: z.object({}),
-    run: async (_input, { ctx, callId }) => books(ctx).audit(restate.rpc.opts({ idempotencyKey: key(ctx, callId) })),
+    run: async (_input, { ctx, callId }) => books(ctx, key(ctx, callId)).audit(),
   }),
 ];

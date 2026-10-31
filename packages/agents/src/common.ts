@@ -3,6 +3,7 @@
 // cancellation, steering, publishing for the clients that follow it), and
 // the `messages` handler with its `Transcript`.
 import * as restate from 'restate-objects';
+import { cancelCalls, cancelled } from 'restate-objects/internal';
 import { settle } from './calls.ts';
 import * as log from './log.ts';
 import type { Said } from './log.ts';
@@ -15,11 +16,11 @@ import { agentOf, type Steer, signals, signalsOf } from './signals.ts';
  *   pi.chat({ model: 'openai/gpt-6-sol' })
  *   pi.chat(async (ctx) => ({ model: await userModel(ctx) }))
  */
-export type Configure<T> = T | ((ctx: restate.ObjectContext) => T | Promise<T>);
+export type Configure<T> = T | ((ctx: restate.SessionContext) => T | Promise<T>);
 
 /** `value` for the invocation of `ctx`. */
-export const configured = async <T>(value: Configure<T>, ctx: restate.ObjectContext): Promise<T> =>
-  typeof value === 'function' ? (value as (ctx: restate.ObjectContext) => T | Promise<T>)(ctx) : value;
+export const configured = async <T>(value: Configure<T>, ctx: restate.SessionContext): Promise<T> =>
+  typeof value === 'function' ? (value as (ctx: restate.SessionContext) => T | Promise<T>)(ctx) : value;
 
 /** The prompts each invocation made so far, by its context. */
 const prompts = new WeakMap<object, number>();
@@ -29,10 +30,10 @@ const prompts = new WeakMap<object, number>();
  * then `<id>:2`, `<id>:3`... A retried attempt makes its prompts in the same
  * order, so each gets the same id again, and its answer.
  */
-export const nextPromptId = (ctx: restate.ObjectContext) => {
+export const nextPromptId = (ctx: restate.SessionContext) => {
   const n = (prompts.get(ctx) ?? 0) + 1;
   prompts.set(ctx, n);
-  return n === 1 ? ctx.request().id : `${ctx.request().id}:${n}`;
+  return n === 1 ? ctx.request.id : `${ctx.request.id}:${n}`;
 };
 
 /** The default model of pi, OpenCode and LangGraph, with OPENAI_API_KEY. */
@@ -158,11 +159,21 @@ const background = new Set<string>();
 /** Agent `name` runs in the background: see `background` in object.ts. */
 export const inBackground = (name: string) => void background.add(name);
 
+/** What each agent clears beside its database, by its object's name: see {@link onClear}. */
+const clearing = new Map<string, (ctx: restate.SessionContext) => Promise<void>>();
+
+/** When an agent of object `name` is cleared (`clear`), run `clear` too: for what it keeps apart, such as OpenCode's database. */
+export const onClear = (name: string, clear: (ctx: restate.SessionContext) => Promise<void>) =>
+  void clearing.set(name, clear);
+
+/** Clear what the agent of `ctx` keeps beside its database ({@link onClear}). */
+export const cleared = async (ctx: restate.SessionContext) => clearing.get(ctx.request.target.service)?.(ctx);
+
 /** Whether the agent of `ctx` runs in the background. */
-const unfollowed = (ctx: restate.ObjectContext) => background.has(ctx.request().target.service);
+const unfollowed = (ctx: restate.SessionContext) => background.has(ctx.request.target.service);
 
 /** The `signals` object of the agent of `ctx`. */
-const signalsOfAgent = (ctx: restate.ObjectContext) => ctx.objectClient(signals, signalsOf(ctx));
+const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signalsOf(ctx));
 
 /**
  * The conversation of `ctx` changed (see `watch` in object.ts): its log takes
@@ -170,14 +181,14 @@ const signalsOfAgent = (ctx: restate.ObjectContext) => ctx.objectClient(signals,
  * increases, and the clients that follow it read it again. It is a call to
  * Restate, so it also sends what the handler wrote before, for them to read.
  */
-const publish = async (ctx: restate.ObjectContext) => {
+const publish = async (ctx: restate.SessionContext) => {
   const read = reading.get(ctx);
   if (read) await logged(ctx, read);
   await signalsOfAgent(ctx).publish();
 };
 
 /** A step of a turn of `ctx`: {@link publish} it, unless the agent runs in the background, which publishes the turn's end only. */
-const stepped = async (ctx: restate.ObjectContext) => {
+const stepped = async (ctx: restate.SessionContext) => {
   if (!unfollowed(ctx)) await publish(ctx);
 };
 
@@ -187,7 +198,7 @@ const stepped = async (ctx: restate.ObjectContext) => {
  * own. In the background, which publishes the turn's end only, it forgets
  * them alone.
  */
-export async function toolCallStarted(ctx: restate.ObjectContext) {
+export async function toolCallStarted(ctx: restate.SessionContext) {
   if (!unfollowed(ctx)) return publish(ctx);
   const read = reading.get(ctx);
   if (read) {
@@ -202,10 +213,10 @@ export async function toolCallStarted(ctx: restate.ObjectContext) {
  * does not have yet: its next step takes them. Without a conversation (a
  * framework that takes no steering), they wait for the turn's end.
  */
-export async function toolCallEnded(ctx: restate.ObjectContext, conversation?: Steerable) {
+export async function toolCallEnded(ctx: restate.SessionContext, conversation?: Steerable) {
   // In the background, no one steers: a message steered anyway is answered after the turn.
   if (unfollowed(ctx)) return;
-  const messages = await signalsOfAgent(ctx).progress(ctx.request().id);
+  const messages = await signalsOfAgent(ctx).progress(ctx.request.id);
   const taken = steerings.get(ctx);
   if (!taken || !conversation) return;
   for (const message of messages.filter((m) => !taken.has(m.id))) {
@@ -220,10 +231,10 @@ export async function toolCallEnded(ctx: restate.ObjectContext, conversation?: S
  * prompt is answered; the turn's other messages are answered as messages of
  * their own, when it ends.
  */
-export async function settleSteering(ctx: restate.ObjectContext, conversation: Pick<Steerable, 'has'>) {
+export async function settleSteering(ctx: restate.SessionContext, conversation: Pick<Steerable, 'has'>) {
   const taken = steerings.get(ctx);
   if (!taken) return;
-  for (const message of await signalsOfAgent(ctx).steering(ctx.request().id)) {
+  for (const message of await signalsOfAgent(ctx).steering(ctx.request.id)) {
     if (!taken.has(message.id) && (await conversation.has(message.id))) taken.add(message.id);
   }
 }
@@ -254,49 +265,49 @@ export const aborted = (signal: AbortSignal) =>
  * when it starts and ends ({@link publish}), for the clients that follow the
  * conversation.
  */
-export const chatHandler = <A = string>(answer: (ctx: restate.ObjectContext, message: string) => Promise<A>) =>
-  restate.handlers.object.exclusive(
-    { input: messageSerde, accept: '*/*', explicitCancellation: true },
-    async (ctx: restate.ObjectContext, text: string) => {
-      const invocationId = ctx.request().id;
-      // The companion knows the turn from here to its close: `status`, `stop` and `steer` ask it.
-      await ctx.objectClient(signals, signalsOf(ctx)).start({ invocationId, since: new Date().toISOString() });
-      const taken = new Set<string>();
-      steerings.set(ctx, taken);
-      await stepped(ctx);
-      const end = async (cancelled = false) => {
-        ctx
-          .objectSendClient(signals, signalsOf(ctx))
-          .close({ agent: agentOf(ctx), turn: invocationId, taken: [...taken], cancelled });
-        await publish(ctx);
-      };
-      const turn = new AbortController();
-      turns.set(ctx, turn.signal);
-      const internal = restate.internal.asInternal(ctx as unknown as restate.Context);
-      void (async () => {
-        await (internal.cancellation() as unknown as Promise<void>);
-        turn.abort(new restate.CancelledError());
-        await (internal.cancelPreviousCalls() as unknown as Promise<unknown>);
-      })().catch(() => {});
-      let answered: A;
-      try {
-        answered = await answer(ctx, text);
-        // Cancelled once answered: the answer stands.
-      } catch (error) {
-        if (error instanceof restate.TerminalError) {
-          await end(error instanceof restate.CancelledError);
-          throw error;
-        }
-        // Any other error fails the attempt, and Restate retries the turn.
-        const terminal = refusal(error);
-        if (!terminal) throw error;
-        await end();
-        throw terminal;
+export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, message: string) => Promise<A>) => ({
+  input: messageSerde,
+  accept: '*/*',
+  explicitCancellation: true,
+  handler: async (ctx: restate.SessionContext, text: string): Promise<A> => {
+    const invocationId = ctx.request.id;
+    // The companion knows the turn from here to its close: `status`, `stop` and `steer` ask it.
+    await ctx.rpc(signals, signalsOf(ctx)).start({ invocationId, since: new Date().toISOString() });
+    const taken = new Set<string>();
+    steerings.set(ctx, taken);
+    await stepped(ctx);
+    const end = async (dropped = false) => {
+      ctx
+        .send(signals, signalsOf(ctx))
+        .close({ agent: agentOf(ctx), turn: invocationId, taken: [...taken], cancelled: dropped });
+      await publish(ctx);
+    };
+    const turn = new AbortController();
+    turns.set(ctx, turn.signal);
+    void (async () => {
+      await cancelled(ctx);
+      turn.abort(new restate.CancelledError());
+      await cancelCalls(ctx);
+    })().catch(() => {});
+    let answered: A;
+    try {
+      answered = await answer(ctx, text);
+      // Cancelled once answered: the answer stands.
+    } catch (error) {
+      if (error instanceof restate.TerminalError) {
+        await end(error instanceof restate.CancelledError);
+        throw error;
       }
+      // Any other error fails the attempt, and Restate retries the turn.
+      const terminal = refusal(error);
+      if (!terminal) throw error;
       await end();
-      return answered;
-    },
-  );
+      throw terminal;
+    }
+    await end();
+    return answered;
+  },
+});
 
 /** A tool's error, which fails the attempt (Restate retries it): the error `cause` of tool `tool`. */
 export class ToolError extends Error {
@@ -467,10 +478,10 @@ const reading = new WeakMap<object, Read>();
 const writing = new WeakMap<object, Promise<void>>();
 
 /** The log of the conversation of `ctx` takes its transcript as `read` gives it. */
-function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
+function logged(ctx: restate.SessionContext, read: Read): Promise<void> {
   const write = async () => {
     const transcript = await read();
-    await log.sync(ctx.db, transcript.messages(), () => ctx.get<log.Start>(log.START));
+    await log.sync(ctx.db, transcript.messages());
     // The calls whose results the framework stored are made: see calls.ts.
     await settle(ctx, (id) => transcript.answered(id));
   };
@@ -486,7 +497,7 @@ function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
  * takes it into the conversation's log, and so does `work`'s end, before the
  * framework closes. `messages` and `sync` read the log.
  */
-export async function transcribing<T>(ctx: restate.ObjectContext, read: Read, work: () => Promise<T>): Promise<T> {
+export async function transcribing<T>(ctx: restate.SessionContext, read: Read, work: () => Promise<T>): Promise<T> {
   const outer = reading.get(ctx);
   reading.set(ctx, read);
   let failed = false;
@@ -509,11 +520,10 @@ export async function transcribing<T>(ctx: restate.ObjectContext, read: Read, wo
 /**
  * The handler of an agent's conversation as clients read it, from its log:
  * a page of it (`{limit, before}`), or what is new or changed since a cursor
- * (`{cursor}`). It is shared: it answers while a message is answered, with
+ * (`{cursor}`). It is a view: it answers while a message is answered, with
  * what was stored so far, and stores nothing.
  */
-export const messagesHandler = () =>
-  restate.handlers.object.shared(
-    async (ctx: restate.ObjectSharedContext, request?: MessagesRequest): Promise<Messages> =>
-      log.page(ctx.db, request ?? {}, await ctx.get<log.Start>(log.START)),
-  );
+export const messagesHandler =
+  () =>
+  async (ctx: restate.ViewContext, request?: MessagesRequest): Promise<Messages> =>
+    log.page(ctx.db, request ?? {});

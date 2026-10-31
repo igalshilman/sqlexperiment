@@ -40,7 +40,7 @@ const onlySrc: Plugin.Plugin = {
 };
 
 /** The options of a project's invocations: its directory, and the plugin. */
-const options = (ctx: restate.ObjectContext): opencode.Options => ({
+const options = (ctx: restate.SessionContext): opencode.Options => ({
   workspace: `${workspace}/${ctx.key}`,
   plugins: [onlySrc],
 });
@@ -49,7 +49,6 @@ const coder = object({
   name: 'coder',
   handlers: {
     chat: opencode.chat(options),
-    messages: opencode.messages(),
     /**
      * Write `task`, then review it: two prompts of one session, each
      * answered once, however often the handler runs. The answer is the
@@ -61,6 +60,9 @@ const coder = object({
         return prompt('Review what you wrote: run the tests, fix what fails, and say what you changed.');
       }),
     ),
+  },
+  views: {
+    messages: opencode.messages(),
   },
 });
 

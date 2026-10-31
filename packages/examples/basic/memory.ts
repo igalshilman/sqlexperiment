@@ -11,7 +11,6 @@
  *   curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
  *   curl localhost:8080/assistant/alice/facts
  */
-import { handlers } from 'restate-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -46,17 +45,18 @@ const assistant = object({
       system: 'You are a helpful assistant. Remember what you learn about the user, and recall it when it helps.',
       tools: [remember, recall],
     }),
-    messages: pi.messages(),
-
-    /** What the assistant knows about the user: shared, so it answers while a message is answered. */
-    facts: handlers.object.shared(async (ctx) => {
-      const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
-      return rows.map(({ fact }) => fact);
-    }),
-
     /** Forget a fact. */
     forget: async (ctx, fact: string) => {
       await ctx.db.execute('DELETE FROM facts WHERE fact = ?', [fact]);
+    },
+  },
+  views: {
+    messages: pi.messages(),
+
+    /** What the assistant knows about the user: a view, so it answers while a message is answered. */
+    facts: async (ctx) => {
+      const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+      return rows.map(({ fact }) => fact);
     },
   },
 });

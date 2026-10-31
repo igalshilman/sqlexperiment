@@ -7,7 +7,7 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { callTools, fakeProvider, requests, say, textOf, type Respond } from './fakes/pi.ts';
-import { sqlAttempt } from './support.ts';
+import { type Entry, handlerOf, sqlAttempt } from './support.ts';
 
 // Each model says who it is and what it was told so far; asked the time, it
 // calls the clock first.
@@ -37,31 +37,31 @@ interface Settings {
   persona?: string;
 }
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)';
-async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
+async function settingsOf(ctx: restate.SessionContext): Promise<Settings> {
   await ctx.db.execute(SCHEMA);
   const [row] = await ctx.db.values('SELECT json FROM settings');
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
 }
 const clock = tool({ name: 'clock', description: 'The time.', input: z.object({}), run: async () => '12:00' });
-const options = async (ctx: restate.ObjectContext): Promise<pi.Options> => {
+const options = async (ctx: restate.SessionContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
 
 // The handlers of examples/harness.ts.
 const chat = pi.chat(options);
-const configure = async (ctx: restate.ObjectContext, settings: Settings) => {
+const configure = async (ctx: restate.SessionContext, settings: Settings) => {
   const next = { ...(await settingsOf(ctx)), ...settings };
   await ctx.db.execute('INSERT OR REPLACE INTO settings (id, json) VALUES (0, ?)', [JSON.stringify(next)]);
   return next;
 };
-const compact = async (ctx: restate.ObjectContext, instructions?: string) =>
+const compact = async (ctx: restate.SessionContext, instructions?: string) =>
   pi.withPi(ctx, await options(ctx), async ({ conversation, context }) => {
     const root = await conversation();
     await root.compact(instructions || undefined, context);
     await root.waitForIdle(context);
   });
-const reset = async (ctx: restate.ObjectContext, handoff?: string) =>
+const reset = async (ctx: restate.SessionContext, handoff?: string) =>
   pi.withPi(ctx, await options(ctx), async ({ conversation, context }) =>
     (await conversation()).reset(handoff || undefined, context),
   );
@@ -69,10 +69,9 @@ const reset = async (ctx: restate.ObjectContext, handoff?: string) =>
 /** The object with key `key`: its database lives across invocations. */
 function store(key: string) {
   const map = new Map<string, Uint8Array>();
-  return <I, O>(handler: (ctx: restate.ObjectContext, input: I) => Promise<O>, id: string, input: I) => {
+  return <I, O>(handler: Entry<(ctx: restate.SessionContext, input: I) => Promise<O>>, id: string, input: I) => {
     const sql = sqlAttempt({ map, key, id });
-    const ctx = { key, ...sql };
-    return sql.end(() => handler(ctx as unknown as restate.ObjectContext, input));
+    return sql.end(() => handlerOf(handler)(sql.ctx, input));
   };
 }
 

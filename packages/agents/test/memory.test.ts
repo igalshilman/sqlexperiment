@@ -8,7 +8,7 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
-import { sqlAttempt } from './support.ts';
+import { type Entry, handlerOf, sqlAttempt } from './support.ts';
 
 // Told "remember X", it calls remember; asked what it knows, it calls recall;
 // given a tool's result, it says it.
@@ -47,15 +47,14 @@ const recall = tool({
   },
 });
 
-type Handler = (ctx: restate.ObjectContext, input: string) => Promise<unknown>;
+type Handler = Entry<(ctx: restate.SessionContext, input: string) => Promise<unknown>>;
 
 /** The object with key `key`: its database lives across invocations. */
 function store(key: string) {
   const map = new Map<string, Uint8Array>();
   return (handler: Handler, id: string, input = '') => {
     const sql = sqlAttempt({ map, key, id });
-    const ctx = { key, ...sql };
-    return sql.end(() => handler(ctx as unknown as restate.ObjectContext, input));
+    return sql.end(() => handlerOf(handler)(sql.ctx, input));
   };
 }
 

@@ -18,26 +18,27 @@ file, from a virtual object to agents that delegate.
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
 kept in the object's state: no database to run. `restate-objects` is the
-Restate SDK with that in its objects
+Restate SDK with those objects, `restate.sessionObject`
 ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
 import * as restate from 'restate-objects';
 
-const notes = restate.object({
+const notes = restate.sessionObject({
   name: 'notes',
   // The schema of each key's database: its steps, applied once per key (a step added later runs then).
   schema: ['CREATE TABLE notes (text TEXT NOT NULL)'],
   handlers: {
-    add: async (ctx: restate.ObjectContext, note: string) => {
+    add: async (ctx, note: string) => {
       await ctx.db.execute('INSERT INTO notes (text) VALUES (?)', [note]);
     },
-
-    /** Shared: it reads while `add` writes; a key with no notes yet has none. */
-    list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
+  },
+  views: {
+    /** A view: it reads while `add` writes; a key with no notes yet has none. */
+    list: async (ctx) => {
       const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
       return rows.map(({ text }) => text);
-    }),
+    },
   },
 });
 
@@ -49,8 +50,8 @@ curl localhost:8080/notes/alice/add --json '"Buy milk"'
 curl localhost:8080/notes/alice/list
 ```
 
-A statement is durable when it returns. `ctx.transaction` groups
-statements, and the sends made in it, into one commit. See
+A statement is durable when it returns. `ctx.db.transaction` groups
+statements, and the sends made in it (`tx.send`), into one commit. See
 [`restate-objects`](packages/objects/README.md).
 
 ## AI agents
@@ -133,13 +134,15 @@ const assistant = object({
       system: 'You are a helpful assistant. Remember what you learn about the user, and recall it when it helps.',
       tools: [remember, recall],
     }),
+  },
+  views: {
     messages: pi.messages(),
 
-    /** What the assistant knows about the user: shared, so it answers while a message is answered. */
-    facts: handlers.object.shared(async (ctx) => {
+    /** What the assistant knows about the user: a view, so it answers while a message is answered. */
+    facts: async (ctx) => {
       const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
       return rows.map(({ fact }) => fact);
-    }),
+    },
   },
 });
 

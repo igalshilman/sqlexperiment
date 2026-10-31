@@ -11,7 +11,9 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Teller } from './fakes/langgraph.ts';
-import { conversation, type PromptHandler } from './support.ts';
+import { invoke } from 'restate-objects/internal';
+import { fakeContext } from 'restate-objects/test/support';
+import { conversation } from './support.ts';
 
 /** The Anthropic SDK's error of a wrong API key. */
 class AuthenticationError extends Error {
@@ -86,9 +88,8 @@ describe('a wrong model', () => {
           }),
       },
     });
-    // The handler as the object serves it.
-    const { summarize } = (agent as unknown as { object: Record<string, PromptHandler> }).object;
-    const refused = conversation(summarize!, 'k').attempt('inv1', 'Hi');
+    // The handler as the object runs it.
+    const refused = invoke(agent, 'summarize', fakeContext({ map: new Map(), service: 'assistant' }), 'Hi');
     await expect(refused).rejects.toBeInstanceOf(restate.TerminalError);
     await expect(refused).rejects.toMatchObject({ code: REFUSED });
   });

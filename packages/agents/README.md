@@ -300,7 +300,7 @@ token streaming.
 **From code.** From a Restate handler, through the agent's definition:
 
 ```ts
-const answer = await ctx.objectClient(assistant, 'alice').chat('Hi, I am Alice');
+const answer = await ctx.rpc(assistant, 'alice').chat('Hi, I am Alice');
 ```
 
 From any other code, a web app included, with Restate's own client
@@ -459,7 +459,7 @@ handler. Every framework takes it.
 const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
 const planner = claude.agent({ name: 'planner', output: Plan });
 
-const plan = await ctx.objectClient(planner, 'ENG-1').chat('Plan the work on ENG-1'); // a Plan
+const plan = await ctx.rpc(planner, 'ENG-1').chat('Plan the work on ENG-1'); // a Plan
 ```
 
 A reply that is not such JSON (a code fence around it is fine) is answered
@@ -573,8 +573,10 @@ const assistant = object({
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'], // tables of your own, beside the agent's (optional)
   handlers: {
     chat: pi.chat({ tools: [remember] }),
+  },
+  views: {
     messages: pi.messages(),
-    facts: handlers.object.shared((ctx) => ctx.db.query('SELECT fact FROM facts')),
+    facts: (ctx) => ctx.db.query('SELECT fact FROM facts'),
   },
 });
 
@@ -612,12 +614,13 @@ API, such as compacting the conversation (see their READMEs).
 (50 ms after a crash, then twice as long each time, up to 10 s apart), since
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
-`metadata` add to these. Its own handlers cannot be named `signal`,
-`pending`, `status`, `stop`, `steer`, `notifications` or `watch`, which
-every object has, nor `sync`, `clear` or `erase`, which an agent has (one
-with `messages`). A shared handler of yours
-reads the database too: `ctx.db` is the database as stored, beside a
-message being answered.
+`metadata` add to these. It is a `restate.sessionObject` of
+[`restate-objects`](../objects/README.md): `handlers` run one at a time per
+key, and `views` beside them. Its own cannot be named `signal`, `pending`,
+`status`, `stop`, `steer`, `notifications` or `watch`, views every object
+has, nor `sync`, `clear` or `erase`, which an agent has (one with a
+`messages` view). A view of yours reads the database too: `ctx.db` is the
+database as committed, beside a message being answered.
 
 ## Build your own
 

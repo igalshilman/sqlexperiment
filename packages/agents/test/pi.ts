@@ -9,7 +9,7 @@
 //
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
-import * as restate from 'restate-objects';
+import type * as restate from 'restate-objects';
 import { object, signals } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
@@ -18,7 +18,7 @@ import { ledger } from 'restate-objects/test/ledger';
 import * as pi from 'restate-agents/pi';
 
 /** The bank tools of an invocation: they reach the ledger through `ctx`. */
-const transfer = (ctx: restate.ObjectContext) =>
+const transfer = (ctx: restate.SessionContext) =>
   defineTool({
     name: 'transfer',
     description: 'Move an amount of money from one account to another.',
@@ -30,11 +30,10 @@ const transfer = (ctx: restate.ObjectContext) =>
     replay: 'safe', // runs again after a crash, with the same call id
     execute: async ({ from, to, amount }, api) => {
       // One key per tool call: an invocation makes many.
-      const idempotencyKey = `${ctx.request().id}:${api.callId}`;
-      const applied = await ctx.objectClient(ledger, 'bank').transfer(
-        { id: `Agent/${ctx.key}/${api.callId}`, from, to, amount }, // unique in the ledger
-        restate.rpc.opts({ idempotencyKey }),
-      );
+      const idempotencyKey = `${ctx.request.id}:${api.callId}`;
+      const applied = await ctx
+        .rpc(ledger, 'bank', { idempotencyKey })
+        .transfer({ id: `Agent/${ctx.key}/${api.callId}`, from, to, amount }); // unique in the ledger
       return {
         output: [
           { type: 'text', text: `moved ${applied.amount} from account ${applied.from} to account ${applied.to}` },
@@ -43,15 +42,15 @@ const transfer = (ctx: restate.ObjectContext) =>
     },
   });
 
-const audit = (ctx: restate.ObjectContext) =>
+const audit = (ctx: restate.SessionContext) =>
   defineTool({
     name: 'audit',
     description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',
     parameters: Type.Object({}),
     replay: 'safe',
     execute: async (_params, api) => {
-      const idempotencyKey = `${ctx.request().id}:${api.callId}`;
-      const books = await ctx.objectClient(ledger, 'bank').audit(restate.rpc.opts({ idempotencyKey }));
+      const idempotencyKey = `${ctx.request.id}:${api.callId}`;
+      const books = await ctx.rpc(ledger, 'bank', { idempotencyKey }).audit();
       return { output: [{ type: 'text', text: JSON.stringify(books) }] };
     },
   });
@@ -59,6 +58,6 @@ const audit = (ctx: restate.ObjectContext) =>
 /** Answer a message, once per invocation. */
 export const prompt = pi.chat((ctx) => ({ tools: [transfer(ctx), audit(ctx)] }));
 
-export const agent = object({ name: 'Agent', handlers: { chat: prompt, messages: pi.messages() } });
+export const agent = object({ name: 'Agent', handlers: { chat: prompt }, views: { messages: pi.messages() } });
 
 serveIfMain(import.meta, [agent, ledger, signals]);

@@ -15,6 +15,7 @@ import {
   conversation,
   crashedAnywhere,
   SAID,
+  handlerOf,
   sqlAttempt,
   withoutIds,
 } from './support.ts';
@@ -26,7 +27,7 @@ import { prompt } from './claude.ts';
 vi.mock('@anthropic-ai/sdk', () => import('./fakes/claude.ts'));
 
 /** A handler that prompts twice, with the bank's tools. */
-const twice = async (ctx: restate.ObjectContext) =>
+const twice = async (ctx: restate.SessionContext) =>
   JSON.stringify([
     await claude.prompt(ctx, 'Please move 5 from 1 to 2', { tools: bank('ClaudeAgent') }),
     await claude.prompt(ctx, 'Hello', { tools: bank('ClaudeAgent') }),
@@ -94,14 +95,12 @@ describe('the Claude agent', () => {
       },
     });
     const owner = sqlAttempt({ map, key: 'mid', id: 'inv1' });
-    const ctx = { key: 'mid', ...owner };
     const answer = owner.end(() =>
-      claude.chat({ tools: [transfer] })(ctx as unknown as restate.ObjectContext, 'Please move 5 from 1 to 2'),
+      handlerOf(claude.chat({ tools: [transfer] }))(owner.ctx, 'Please move 5 from 1 to 2'),
     );
     await started.promise;
     const reader = sqlAttempt({ map, key: 'mid', id: 'read', shared: true });
-    const read = { key: 'mid', ...reader };
-    const page = await reader.end(() => claude.messages()(read as unknown as restate.ObjectContext, {}));
+    const page = await reader.end(() => claude.messages()(reader.view, {}));
     expect(page.messages.map((m) => m.parts)).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
       [

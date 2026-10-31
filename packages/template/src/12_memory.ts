@@ -1,8 +1,8 @@
 /**
  * 12 · An agent in your own object
  *
- * `object` holds the agent's handlers (`pi.chat`, `pi.messages`) beside
- * handlers of your own, and a schema of your own: one database for the
+ * `object` holds the agent's handler and view (`pi.chat`, `pi.messages`)
+ * beside handlers and views of your own, and a schema of your own: one database for the
  * conversation and your tables. A tool's `run` gets the handler's `ctx`, so
  * it reaches that database too. Here, the agent remembers facts about the
  * user, and `facts` serves them, for a profile page say.
@@ -11,7 +11,6 @@
  *   curl localhost:8080/companion/alice/chat -d 'I am vegetarian, and I live in Lisbon.'
  *   curl localhost:8080/companion/alice/facts   # what it remembered
  */
-import { handlers } from 'restate-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -31,12 +30,14 @@ const companion = object({
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],
   handlers: {
     chat: pi.chat({ system: 'Remember what you learn about the user.', tools: [remember] }),
+  },
+  views: {
     messages: pi.messages(),
 
-    facts: handlers.object.shared(async (ctx) => {
+    facts: async (ctx) => {
       const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
       return rows.map(({ fact }) => fact);
-    }),
+    },
   },
 });
 

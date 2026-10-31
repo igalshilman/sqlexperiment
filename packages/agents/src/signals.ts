@@ -10,17 +10,17 @@ import { sdk as restate } from 'restate-objects/internal';
 import type { Turn } from './common.ts';
 import type { Status, Stopped } from './object.ts';
 
-/** An agent's context, as far as its signals need it: any handler's of its object. */
-type AgentContext = Pick<restate.ObjectSharedContext, 'key' | 'request'>;
+/** An agent's context, as far as its signals need it: any handler's or view's of its object. */
+type AgentContext = { readonly key: string; readonly request: { readonly target: { readonly service: string } } };
 
 /** The agent of `ctx`: its object's name, and key. */
-export const agentOf = (ctx: AgentContext): Agent => ({ service: ctx.request().target.service, key: ctx.key });
+export const agentOf = (ctx: AgentContext): Agent => ({ service: ctx.request.target.service, key: ctx.key });
 
 /** The key of the signals of agent `service`'s key `key`: `<agent>:<key>`. */
 const keyOf = (service: string, key: string) => `${service}:${key}`;
 
 /** The key of the signals of the agent of `ctx`. */
-export const signalsOf = (ctx: AgentContext) => keyOf(ctx.request().target.service, ctx.key);
+export const signalsOf = (ctx: AgentContext) => keyOf(ctx.request.target.service, ctx.key);
 
 /** Where an object of restate-agents (`object()`, every `agent()`) points to its companion. */
 const COMPANION = Symbol('restate-agents.companion');

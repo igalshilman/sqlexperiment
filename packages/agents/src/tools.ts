@@ -17,7 +17,7 @@ const TOOL = Symbol.for('restate-agents.tool');
 /** A tool call: the agent's context, and the id of the model's call. */
 export interface ToolCall {
   /** The agent's context: Restate calls, `ctx.key`, `ctx.db`... */
-  ctx: restate.ObjectContext;
+  ctx: restate.SessionContext;
   /** The id of the model's tool call: the same when a crash runs the call again. */
   callId: string;
 }
@@ -91,7 +91,7 @@ export const tool = <S extends z.ZodObject>(options: {
     if (!parsed.success) return `Error: the arguments do not fit the tool's input: ${z.prettifyError(parsed.error)}`;
     const input = parsed.data;
     try {
-      return text(await options.run(input, { ctx, callId, idempotencyKey: `${ctx.request().id}:${callId}` }));
+      return text(await options.run(input, { ctx, callId, idempotencyKey: `${ctx.request.id}:${callId}` }));
     } catch (error) {
       // The invocation was cancelled: the turn ends, rather than the model
       // going on with the tool's error as its answer (such as the failure of
@@ -116,7 +116,7 @@ async function once<T>(name: string, input: unknown, context: ToolCall, body: (c
   const { ctx } = context;
   const call = await callOf(ctx, name, input, context.callId);
   try {
-    const result = await body({ ctx, callId: call.id, idempotencyKey: `${ctx.request().id}:${call.id}` });
+    const result = await body({ ctx, callId: call.id, idempotencyKey: `${ctx.request.id}:${call.id}` });
     await call.answered();
     return result;
   } catch (error) {
@@ -140,10 +140,11 @@ const invoke = (
   { ctx, idempotencyKey }: ToolContext,
   target: { service: string; method: string; key?: string; parameter: unknown },
 ) =>
-  ctx.genericCall<unknown, unknown>({
-    ...target,
-    inputSerde: restate.serde.json,
-    outputSerde: restate.serde.json,
+  ctx.rpc({
+    service: target.service,
+    handler: target.method,
+    key: target.key,
+    input: target.parameter,
     idempotencyKey,
   });
 
@@ -173,7 +174,7 @@ async function split(
   target: Target,
   options: TargetOptions<z.ZodObject | undefined>,
   all: Record<string, unknown>,
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
 ) {
   if (!keyed(target)) return { key: undefined, parameter: options.input ? all : undefined };
   if (options.key !== undefined) {
@@ -224,15 +225,7 @@ export const send = <M, S extends z.ZodObject | undefined = undefined>(
     run: async (input, context) =>
       once(`${target.name}/${handler}`, input, context, async ({ ctx, idempotencyKey }) => {
         const { key, parameter } = await split(target, options, input, ctx);
-        ctx.genericSend<unknown>({
-          service: target.name,
-          method: handler,
-          key,
-          parameter,
-          inputSerde: restate.serde.json,
-          delay: options.delay,
-          idempotencyKey,
-        });
+        ctx.send({ service: target.name, handler, key, input: parameter, delay: options.delay, idempotencyKey });
         return `sent to ${target.name}${key === undefined ? '' : `/${key}`}/${handler}`;
       }),
   });
@@ -343,7 +336,7 @@ export const signal = (name: string, options: { description: string; input?: z.Z
     run: async (input, context) =>
       once(`signal/${name}`, input, context, async ({ ctx, idempotencyKey: id }) =>
         ctx
-          .objectClient(signals, signalsOf(ctx))
-          .wait({ id, name, ...(options.input ? { input } : {}) }, restate.rpc.opts({ idempotencyKey: id })),
+          .rpc(signals, signalsOf(ctx), { idempotencyKey: id })
+          .wait({ id, name, ...(options.input ? { input } : {}) }),
       ),
   });

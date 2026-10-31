@@ -2,7 +2,7 @@
 // the handler (see ../testing.ts). Its model is the teller (../fakes/pi.ts).
 // `pnpm --filter restate-agents test pi`.
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, crashedAnywhere, SAID } from './support.ts';
+import { conversation, crashedAnywhere, handlerOf, SAID } from './support.ts';
 import type * as restate from 'restate-objects';
 import * as pi from 'restate-agents/pi';
 import { prompt } from './pi.ts';
@@ -14,9 +14,9 @@ vi.mock('@earendil-works/pi-ai/providers/all', async () => {
 });
 
 /** The bank agent, after making a table of yours named as one of pi-durable's. */
-const besideYours = async (ctx: restate.ObjectContext, message: string) => {
+const besideYours = async (ctx: restate.SessionContext, message: string) => {
   await ctx.db.execute('CREATE TABLE IF NOT EXISTS tasks (task TEXT)');
-  return prompt(ctx, message);
+  return handlerOf(prompt)(ctx, message);
 };
 
 describe('the bank agent on pi', () => {

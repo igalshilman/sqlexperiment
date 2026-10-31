@@ -127,7 +127,7 @@ function modelsOf(provider: string): MutableModels {
 }
 
 /** `t` as a pi-durable tool. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): ToolRegistration =>
+const native = (t: AnyTool, ctx: restate.SessionContext): ToolRegistration =>
   defineTool({
     name: t.name,
     description: t.description,
@@ -185,7 +185,7 @@ function unanswered(id: string, why: string | null | undefined, model: string) {
  * else.
  */
 export const withPi = async <T>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   { model: named, models, system, tools = [], workspace, serviceTier }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
@@ -295,7 +295,7 @@ export const withPi = async <T>(
 };
 
 /** {@link prompt}, answering with the agent's text. */
-const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+const promptText = (ctx: restate.SessionContext, text: string, options: Options): Promise<string> =>
   withPi(ctx, options, (session) => session.prompt(text));
 
 /**
@@ -305,7 +305,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
@@ -370,4 +370,4 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options) }, views: { messages: messages() } });

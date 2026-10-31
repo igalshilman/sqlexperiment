@@ -146,21 +146,33 @@ function readerOf(db: Database): DatabaseReader {
   return Object.freeze(reader);
 }
 
-/** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
-function attempt(fn: Fn<never>, view: boolean, ctx: AttemptContext, input: unknown): Promise<unknown> {
-  const session = new SqlAttempt(host(ctx, view));
-  session.openNow();
+/**
+ * The context of a handler (or, with `view`, of a view) over the SDK's
+ * context `ctx`, with the database `db`: what an attempt gets, and a test's
+ * over a context of its own.
+ */
+export function contextOf(ctx: AttemptContext, db: Database, view: true): ViewContext;
+export function contextOf(ctx: AttemptContext, db: Database, view?: false): SessionContext;
+export function contextOf(ctx: AttemptContext, db: Database, view = false): SessionContext | ViewContext {
   const rpc = rpcOf(ctx);
   const context: SessionContext | ViewContext = view
-    ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(session.db), rpc })
+    ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(db), rpc })
     : Object.freeze({
         key: ctx.key,
         request: ctx.request(),
-        db: session.db,
+        db,
         rpc,
         send: sendOf((send) => void ctx.genericSend(send)),
       });
   sdkContexts.set(context, ctx as unknown as restate.ObjectContext);
+  return context;
+}
+
+/** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
+function attempt(fn: Fn<never>, view: boolean, ctx: AttemptContext, input: unknown): Promise<unknown> {
+  const session = new SqlAttempt(host(ctx, view));
+  session.openNow();
+  const context = view ? contextOf(ctx, session.db, true) : contextOf(ctx, session.db);
   return withSql(() => fn(context as never, input as never), session);
 }
 

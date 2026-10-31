@@ -105,7 +105,7 @@ interface Agent {
  * the clients that follow the conversation).
  */
 async function run(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   { client, model, maxTokens, effort, system, tools: all }: Agent,
   conversation: Conversation,
   id: string,
@@ -176,7 +176,7 @@ function stoppedShort(message: Anthropic.Beta.Messages.BetaMessage, maxTokens: n
 }
 
 /** `t` as a tool of the Anthropic SDK's tool runner: `t.run` checks the model's arguments itself. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): BetaRunnableTool => ({
+const native = (t: AnyTool, ctx: restate.SessionContext): BetaRunnableTool => ({
   type: 'custom',
   name: t.name,
   description: t.description,
@@ -216,7 +216,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 let shared: Anthropic | undefined;
 
 /** {@link prompt}, answering with the agent's text. */
-const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+const promptText = (ctx: restate.SessionContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
     () => transcribe(ctx.db),
@@ -224,7 +224,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
   );
 
 const answerOnce = async (
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   { model: named, system, tools = [], client, maxTokens = 16_000, effort }: Options,
 ): Promise<string> => {
@@ -276,7 +276,7 @@ const answerOnce = async (
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
@@ -337,4 +337,4 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options) }, views: { messages: messages() } });

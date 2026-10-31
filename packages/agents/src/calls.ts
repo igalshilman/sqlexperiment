@@ -47,7 +47,7 @@ const SCHEMA = new Schema('restate-agents.calls', [
 ]);
 
 /** What the calls need of a handler's context. */
-type CallsContext = Pick<restate.ObjectContext, 'db' | 'request'>;
+type CallsContext = Pick<restate.SessionContext, 'db' | 'request'>;
 
 /** Store `calls`, committed before the call they record is made. */
 async function store(ctx: CallsContext, { invocation, calls }: Calls) {
@@ -75,7 +75,7 @@ const attempts = new WeakMap<object, { id: string; calls: Promise<Calls> }>();
 function attemptOf(ctx: CallsContext) {
   let attempt = attempts.get(ctx);
   if (!attempt) {
-    const calls = load(ctx, ctx.request().id);
+    const calls = load(ctx, ctx.request.id);
     attempt = { id: randomUUID(), calls };
     attempts.set(ctx, attempt);
   }

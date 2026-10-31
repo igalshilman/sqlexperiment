@@ -29,7 +29,7 @@ interface Settings {
   persona?: string;
 }
 
-async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
+async function settingsOf(ctx: { db: restate.DatabaseReader }): Promise<Settings> {
   const row = await ctx.db.get<{ json: string }>('SELECT json FROM settings');
   return row ? (JSON.parse(row.json) as Settings) : {};
 }
@@ -42,7 +42,7 @@ const clock = tool({
 });
 
 /** pi's options for the user of `ctx`: its model and persona, and the tools. */
-const options = async (ctx: restate.ObjectContext): Promise<pi.Options> => {
+const options = async (ctx: restate.SessionContext): Promise<pi.Options> => {
   const { model, persona } = await settingsOf(ctx);
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
@@ -52,7 +52,6 @@ const assistant = object({
   schema: ['CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)'],
   handlers: {
     chat: pi.chat(options),
-    messages: pi.messages(),
 
     /** Set the model or the persona (or both) for the next messages. */
     configure: async (ctx, settings: Settings) => {
@@ -74,6 +73,9 @@ const assistant = object({
       pi.withPi(ctx, await options(ctx), async ({ conversation, context }) =>
         (await conversation()).reset(handoff || undefined, context),
       ),
+  },
+  views: {
+    messages: pi.messages(),
   },
 });
 

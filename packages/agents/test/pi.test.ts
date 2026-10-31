@@ -14,6 +14,9 @@ import {
   STEERED,
   steeredWhileWorking,
   withoutIds,
+  type Made,
+  type Entry,
+  handlerOf,
   sqlAttempt,
 } from './support.ts';
 
@@ -69,20 +72,16 @@ interface Call {
 function object(key: string) {
   const map = new Map<string, Uint8Array>();
   const calls: Call[] = [];
+  const route = async (call: Made) => {
+    calls.push(call);
+    return `${call.key}: done`;
+  };
   return {
     calls,
     /** Invocation `id` of `handler`. */
-    invoke<I, O>(handler: (ctx: restate.ObjectContext, input: I) => Promise<O>, id: string, input: I) {
-      const sql = sqlAttempt({ map, key, id });
-      const ctx = {
-        key,
-        ...sql,
-        genericCall: async (call: Call) => {
-          calls.push(call);
-          return `${call.key}: done`;
-        },
-      };
-      return sql.end(() => handler(ctx as unknown as restate.ObjectContext, input));
+    invoke<I, O>(handler: Entry<(ctx: restate.SessionContext, input: I) => Promise<O>>, id: string, input: I) {
+      const sql = sqlAttempt({ map, key, id, route });
+      return sql.end(() => handlerOf(handler)(sql.ctx, input));
     },
   };
 }
@@ -162,11 +161,11 @@ describe('pi.messages', () => {
 });
 
 /** A handler that starts the conversation over. */
-const reset = (ctx: restate.ObjectContext) =>
+const reset = (ctx: restate.SessionContext) =>
   pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(undefined, context));
 
 /** A handler that prompts twice. */
-const twice = async (ctx: restate.ObjectContext) => [
+const twice = async (ctx: restate.SessionContext) => [
   await pi.prompt(ctx, 'One'),
   await pi.withPi(ctx, {}, (session) => session.prompt('Two')),
 ];
@@ -285,7 +284,7 @@ describe('pi.chat', () => {
 /** A sub-agent with a `code` handler. */
 const coder = { name: 'coder' } as restate.VirtualObjectDefinition<
   'coder',
-  { code: (ctx: restate.ObjectContext, task: string) => Promise<string> }
+  { code: (ctx: restate.SessionContext, task: string) => Promise<string> }
 >;
 
 describe('subagent', () => {

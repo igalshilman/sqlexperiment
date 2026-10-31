@@ -80,7 +80,7 @@ const State = Annotation.Root({
  * it to the model too). The round is published as it starts and ends, for
  * the clients that follow the conversation.
  */
-function toolsNode(ctx: restate.ObjectContext, tools: StructuredToolInterface[]) {
+function toolsNode(ctx: restate.SessionContext, tools: StructuredToolInterface[]) {
   return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
     await toolCallStarted(ctx);
     // The first error fails the attempt at once, not once the other calls end.
@@ -152,7 +152,7 @@ async function integration<T>(name: string, load: () => Promise<T>): Promise<T> 
 }
 
 /** The agent's graph: `model`, calling `tools`. */
-function graph(ctx: restate.ObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
+function graph(ctx: restate.SessionContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
   if (!model.bindTools) throw new Error(`${model.getName()} does not call tools`);
   const withTools = model.bindTools(tools);
   return new StateGraph(State)
@@ -168,7 +168,7 @@ function graph(ctx: restate.ObjectContext, model: BaseChatModel, tools: Structur
 }
 
 /** `t` as a LangChain tool: `t.run` checks the model's arguments itself. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): StructuredToolInterface =>
+const native = (t: AnyTool, ctx: restate.SessionContext): StructuredToolInterface =>
   tool(
     async (args: unknown, { toolCall }) => {
       if (!toolCall?.id) throw new Error('a tool call without an id');
@@ -194,7 +194,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 }
 
 /** {@link prompt}, answering with the agent's text. */
-const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
+const promptText = (ctx: restate.SessionContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
     () => transcribe(ctx.db, ctx.key),
@@ -202,7 +202,7 @@ const promptText = (ctx: restate.ObjectContext, text: string, options: Options):
   );
 
 const answerOnce = async (
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   { model, system, tools = [] }: Options,
 ): Promise<string> => {
@@ -283,7 +283,7 @@ async function close(app: ReturnType<ReturnType<typeof graph>['compile']>, confi
  * output.ts), not its text.
  */
 export const prompt = <O extends z.ZodObject | undefined = undefined>(
-  ctx: restate.ObjectContext,
+  ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> => withOutput(text, options, (t, o) => promptText(ctx, t, o)) as Promise<Answer<O>>;
@@ -329,4 +329,4 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options), messages: messages() } });
+  object({ name, description, schema, background, handlers: { chat: chat(options) }, views: { messages: messages() } });

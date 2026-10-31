@@ -9,5 +9,5 @@ export { asDatabase, lazyDatabase, database, reset, setStoreWrapper, SqlAttempt,
 export type { SqlHost } from './session.ts';
 export { open, type Connection, type Store, type ConnectionTransaction } from './database.ts';
 export { PromiseSelector } from './selector.ts';
-export { cancelCalls, cancelled, invoke, type AttemptContext } from './object.ts';
+export { cancelCalls, cancelled, contextOf, invoke, type AttemptContext } from './object.ts';
 export type { DoProgressResult, Selectable, UnresolvedFuture } from './selector.ts';
