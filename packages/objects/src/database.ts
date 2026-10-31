@@ -262,8 +262,8 @@ export interface Transaction extends SqlDatabase {
 /**
  * A {@link Transaction} of {@link Database.transaction}, open until its body
  * settles. Its calls run one at a time, in call order, also when the body
- * awaits several together: none runs after the body settled, so none
- * outlives a rollback.
+ * awaits several together, or none: each call made while it is open runs
+ * before its commit or rollback, so none outlives it.
  */
 class OpenTransaction extends Sql implements Transaction {
   private readonly database: Database;
@@ -287,8 +287,8 @@ class OpenTransaction extends Sql implements Transaction {
   }
 
   /**
-   * End it once the call running settles, refusing those queued behind it;
-   * then the records it set, as the addon's commit takes them.
+   * End it, refusing calls from now on, once the calls made before have
+   * settled; then the records it set, as the addon's commit takes them.
    */
   async end(): Promise<Record<string, Buffer>> {
     this.ended = true;
@@ -312,12 +312,10 @@ class OpenTransaction extends Sql implements Transaction {
     });
   }
 
-  /** Run `call` once the calls before it have, while the transaction is open. */
+  /** Run `call`, made while the transaction is open, once the calls before it have. */
   private serial<T>(call: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(() => {
-      this.refuseEnded();
-      return call();
-    });
+    if (this.ended) return Promise.reject(new SqlError('the transaction has ended'));
+    const result = this.queue.then(call);
     this.queue = result.catch(() => {});
     return result;
   }

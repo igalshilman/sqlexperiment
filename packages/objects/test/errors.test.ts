@@ -95,6 +95,18 @@ it('statements a body awaits together run in order, and none outlives its rollba
   });
 });
 
+it('statements a body makes but does not await run before its commit', async () => {
+  const a = sqlAttempt({ map: new Map() });
+  await a.end(async () => {
+    await a.db.execute('CREATE TABLE t (n INTEGER)');
+    await a.db.transaction(async (db) => {
+      void db.execute('INSERT INTO t VALUES (1)');
+      void db.execute('INSERT INTO t VALUES (2)');
+    });
+    expect(await a.db.query('SELECT n FROM t ORDER BY n')).toEqual([[1], [2]]);
+  });
+});
+
 it('a statement that ends the transaction of a body is terminal, though it ends the session', async () => {
   const a = sqlAttempt({ map: new Map() });
   const error = await failure(a.end(() => a.transaction(({ db }) => db.execute('COMMIT'))));
