@@ -43,46 +43,79 @@ const SCHEMA = new Schema('restate-agents.log', [
   )`,
 ]);
 
+/** A message of the log's head, the transcript as last stored: its id, and the message, also as JSON. */
+interface Row {
+  id: number;
+  message: Said;
+  json: string;
+}
+
+/** The log's head as a session stored it last, with the last cursor and the next id. */
+interface Head {
+  rows: Row[];
+  seq: number;
+  next: number;
+}
+
+/**
+ * The head of each session (`ctx.db`, one per attempt), as its last `sync`
+ * stored it: the next compares the transcript with it, rather than read the
+ * whole log again at each step.
+ */
+const heads = new WeakMap<SqlSession, Head>();
+
+/** The log's head in `db`: as this session stored it last, or else as the log has it. */
+async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promise<Head> {
+  const cached = heads.get(db);
+  if (cached) return cached;
+  const rows = (await db.query(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
+    ([id, json]) => ({ id: Number(id), message: JSON.parse(String(json)) as Said, json: String(json) }),
+  );
+  const [[last, next]] = (await db.query(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
+    [number | null, number | null],
+  ];
+  if (last !== null) return { rows, seq: last, next: next! };
+  const from = (await start()) ?? { seq: 0, id: 0 };
+  return { rows, seq: from.seq, next: from.id };
+}
+
 /**
  * Store the transcript's `messages`, in order, in the log: those that
  * changed since the last time, in one transaction.
  */
 export async function sync(db: SqlSession, messages: Said[], start: () => Promise<Start | null>) {
   await SCHEMA.ensure(db);
-  const head = (await db.query(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
-    ([id, message]) => ({ id: Number(id), message: JSON.parse(String(message)) as Said }),
-  );
-  const both = Math.min(head.length, messages.length);
+  const head = await headOf(db, start);
+  const jsons = messages.map((m) => JSON.stringify(m));
+  const both = Math.min(head.rows.length, messages.length);
   let same = 0;
-  while (same < both && JSON.stringify(head[same]!.message) === JSON.stringify(messages[same])) same += 1;
+  while (same < both && head.rows[same]!.json === jsons[same]) same += 1;
   let grown = same;
-  while (grown < both && grownFrom(messages[grown]!, head[grown]!.message)) grown += 1;
-  if (same === head.length && same === messages.length) return;
-  const [[last, next]] = (await db.query(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
-    [number | null, number | null],
-  ];
-  const from = last === null ? ((await start()) ?? { seq: 0, id: 0 }) : { seq: last, id: next! };
-  let seq = from.seq;
-  let id = from.id;
-  await db.transaction(async (tx) => {
-    for (let position = same; position < grown; position += 1) {
-      await tx.execute(`UPDATE ${TABLE} SET seq = ?, message = ? WHERE id = ?`, [
-        (seq += 1),
-        JSON.stringify(messages[position]),
-        head[position]!.id,
-      ]);
-    }
-    // The rest of the transcript as it was is replaced: its messages stay in the log, out of it.
-    await tx.execute(`UPDATE ${TABLE} SET position = NULL WHERE position >= ?`, [grown]);
-    for (let position = grown; position < messages.length; position += 1) {
-      await tx.execute(`INSERT INTO ${TABLE} VALUES (?, ?, ?, ?)`, [
-        id++,
-        (seq += 1),
-        position,
-        JSON.stringify(messages[position]),
-      ]);
-    }
-  });
+  while (grown < both && grownFrom(messages[grown]!, head.rows[grown]!.message)) grown += 1;
+  if (same === head.rows.length && same === messages.length) return;
+  let { seq, next: id } = head;
+  const rows = head.rows.slice(0, same);
+  try {
+    await db.transaction(async (tx) => {
+      for (let position = same; position < grown; position += 1) {
+        const row = { id: head.rows[position]!.id, message: messages[position]!, json: jsons[position]! };
+        await tx.execute(`UPDATE ${TABLE} SET seq = ?, message = ? WHERE id = ?`, [(seq += 1), row.json, row.id]);
+        rows.push(row);
+      }
+      // The rest of the transcript as it was is replaced: its messages stay in the log, out of it.
+      await tx.execute(`UPDATE ${TABLE} SET position = NULL WHERE position >= ?`, [grown]);
+      for (let position = grown; position < messages.length; position += 1) {
+        const row = { id: id++, message: messages[position]!, json: jsons[position]! };
+        await tx.execute(`INSERT INTO ${TABLE} VALUES (?, ?, ?, ?)`, [row.id, (seq += 1), position, row.json]);
+        rows.push(row);
+      }
+    });
+  } catch (error) {
+    // Rolled back: the log is as it was, which the next sync reads again.
+    heads.delete(db);
+    throw error;
+  }
+  heads.set(db, { rows, seq, next: id });
 }
 
 /**
