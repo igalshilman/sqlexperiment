@@ -288,7 +288,9 @@ export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, me
   handler: async (ctx: restate.SessionContext, text: string): Promise<A> => {
     const invocationId = ctx.request.id;
     // The companion knows the turn from here to its close: `status`, `stop` and `steer` ask it.
-    await ctx.rpc(signals, signalsOf(ctx)).start({ invocationId, since: new Date().toISOString() });
+    await ctx
+      .rpc(signals, signalsOf(ctx))
+      .start({ agent: agentOf(ctx), turn: { invocationId, since: new Date().toISOString() } });
     const taken = new Set<string>();
     steerings.set(ctx, taken);
     await stepped(ctx);

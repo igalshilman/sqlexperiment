@@ -196,6 +196,28 @@ async function steered(ctx: restate.ObjectContext<State>, agent: Agent, text: st
   return { invocationId: turn, steered: true };
 }
 
+/** A turn's close: see `close`. */
+interface Close {
+  agent: Agent;
+  turn: string;
+  taken: string[];
+  cancelled: boolean;
+}
+
+/** Close `turn`, once: see `close`. */
+async function closed(ctx: restate.ObjectContext<State>, { agent, turn, taken, cancelled }: Close) {
+  if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
+  const done = (await ctx.get('closed')) ?? [];
+  if (done.includes(turn)) return;
+  ctx.set('closed', [...done, turn].slice(-CLOSED));
+  const steering = await ctx.get('steering');
+  if (steering?.turn !== turn) return;
+  ctx.clear('steering');
+  for (const { id, text, keep } of steering.messages) {
+    if (!taken.includes(id) && (keep || !cancelled)) await send(ctx, agent, text);
+  }
+}
+
 /** A handler that the agents' own handlers call, which clients cannot (through Restate's ingress). */
 const internal = <I, O>(fn: (ctx: restate.ObjectContext<State>, input: I) => Promise<O>) =>
   restate.handlers.object.exclusive({ ingressPrivate: true }, fn);
@@ -270,9 +292,17 @@ export const signals = restate.object({
       steered(ctx, agent, text),
     ),
 
-    /** @internal The agent's `chat` started answering `turn`: the same invocation again (a retry) keeps when it started. */
-    start: internal(async (ctx: restate.ObjectContext<State>, turn: Turn) => {
-      if ((await ctx.get('turn'))?.invocationId !== turn.invocationId) ctx.set('turn', turn);
+    /**
+     * @internal The agent's `chat` started answering `turn`: the same
+     * invocation again (a retry) keeps when it started. A turn before it that
+     * never closed (its invocation was killed) closes now, as a cancelled one:
+     * the deliveries steered to it are answered.
+     */
+    start: internal(async (ctx: restate.ObjectContext<State>, { agent, turn }: { agent: Agent; turn: Turn }) => {
+      const before = (await ctx.get('turn'))?.invocationId;
+      if (before === turn.invocationId) return;
+      if (before !== undefined) await closed(ctx, { agent, turn: before, taken: [], cancelled: true });
+      ctx.set('turn', turn);
     }),
 
     /** What the agent does: the message it answers, if any, and the waits of its tools. */
@@ -336,23 +366,7 @@ export const signals = restate.object({
      * take (not in `taken`) is sent as a message of its own, unless the turn
      * was cancelled (but for a delivery); later ones are, too.
      */
-    close: internal(
-      async (
-        ctx: restate.ObjectContext<State>,
-        { agent, turn, taken, cancelled }: { agent: Agent; turn: string; taken: string[]; cancelled: boolean },
-      ) => {
-        if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
-        const closed = (await ctx.get('closed')) ?? [];
-        if (closed.includes(turn)) return;
-        ctx.set('closed', [...closed, turn].slice(-CLOSED));
-        const steering = await ctx.get('steering');
-        if (steering?.turn !== turn) return;
-        ctx.clear('steering');
-        for (const { id, text, keep } of steering.messages) {
-          if (!taken.includes(id) && (keep || !cancelled)) await send(ctx, agent, text);
-        }
-      },
-    ),
+    close: internal(closed),
 
     /**
      * @internal The agent forgot its conversation (`clear`): forget its

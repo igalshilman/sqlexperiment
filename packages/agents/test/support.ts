@@ -81,7 +81,7 @@ export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => P
       steering.revision++;
       return steering.turns.get(turn) ?? [];
     },
-    start: (turn: { invocationId: string; since: string }) => {
+    start: ({ turn }: { turn: { invocationId: string; since: string } }) => {
       if (steering.answering?.invocationId !== turn.invocationId) steering.answering = turn;
     },
     close: (close: Steering['closed'][number]) => {
