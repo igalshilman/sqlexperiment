@@ -1,4 +1,4 @@
-// Session objects: a Restate virtual object whose state is a SQL database per
+// Session objects: Restate virtual objects whose state is a SQL database per
 // key. Its handlers run one at a time per key, its views beside them; each
 // gets a context of its own, made of the key, the request, the database and
 // calls, and nothing else of the SDK's context:
@@ -31,7 +31,7 @@ import { type Database, Attempt, type SqlHost, withAttempt } from './session.ts'
  * (`Promise.all`, `Promise.race`).
  */
 export interface SessionContext {
-  /** The object's key. */
+  /** The session's key. */
   readonly key: string;
   /** The request: its id (the same on every attempt), headers, target, and the attempt's signal. */
   readonly request: restate.Request;

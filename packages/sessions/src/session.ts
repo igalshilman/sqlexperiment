@@ -1,4 +1,4 @@
-// An attempt's SQL session: the object's database, kept in its state
+// An attempt's database: the session's database, kept in the object's state
 // (database.ts), opened as an exclusive attempt starts (a view's on its first
 // read) and saved when the handler ends; and its transactions, with the sends
 // each commits with (`tx.send`).
@@ -26,7 +26,7 @@ import { type Send, sendOf } from './calls.ts';
 export type { DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue };
 
 /**
- * The object's database, `ctx.db`, for the whole handler: each statement
+ * The session's database, `ctx.db`, for the whole handler: each statement
  * outside {@link transaction} is its own transaction. Calls run one at a
  * time, in call order.
  */

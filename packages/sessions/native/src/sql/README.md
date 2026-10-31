@@ -1,6 +1,6 @@
 # SQL
 
-An object's database: SQLite-compatible SQL on the
+A session's database: SQLite-compatible SQL on the
 [state](../state/README.md), for a Restate object without Restate's journal
 (with explicit recovery), whose state the namespace is. It runs Turso's Rust
 engine (`turso_core` 0.8.2) unmodified, over the state's one file, and commits

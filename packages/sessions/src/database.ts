@@ -1,5 +1,5 @@
-// A key's database, through the addon (`native/`): SQLite-compatible SQL,
-// kept in the object's state. The addon reads and writes the state through a
+// A session's database, through the addon (`native/`): SQLite-compatible
+// SQL, kept in the object's state. The addon reads and writes the state through a
 // store (`objectStore` in session.ts), in the order it makes its requests
 // (`native/src/node.rs`); this module orders the calls and runs transactions.
 import { AsyncLocalStorage } from 'node:async_hooks';

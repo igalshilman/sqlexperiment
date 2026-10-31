@@ -1,6 +1,6 @@
 # State
 
-The storage of an object's database, over an asynchronous key/value store,
+The storage of a session's database, over an asynchronous key/value store,
 for namespaces with one owner at a time: the state of a Restate object
 without Restate's journal (with explicit recovery). It keeps one paged
 **file** (4 KiB pages, read and written at random), the database's, and

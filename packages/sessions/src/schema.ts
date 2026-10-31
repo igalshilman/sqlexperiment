@@ -1,4 +1,4 @@
-// The schema of an object's databases: each key's database is made by the
+// The schema of a session object's databases: each key's database is made by the
 // same steps, in order, applied once per key, as its first exclusive attempt
 // opens it. A database keeps how far each schema got in its record `schema` (beside
 // its tables, in none of them), committed with the steps, so a step
@@ -64,13 +64,13 @@ export class Schema {
 /** The handlers' sessions (`ctx.db`), each with how it applies schemas. */
 export const sessions = new WeakMap<object, (schemas: readonly Schema[]) => Promise<void>>();
 
-// The schema of each object, by its name.
+// The schema of each session object, by its name.
 const objects = new Map<string, Schema>();
 
-/** The object `name`'s own schema: its steps, which each of its databases is made by. */
+/** The session object `name`'s own schema: its steps, which each of its databases is made by. */
 export const register = (name: string, steps: readonly Step[]) => void objects.set(name, new Schema(name, steps));
 
-/** The object `name`'s own schema, if it has one. */
+/** The session object `name`'s own schema, if it has one. */
 export const ofObject = (name: string) => objects.get(name);
 
 /** Apply the steps of `schemas` that `db` lacks, in one transaction, with how far each got. */

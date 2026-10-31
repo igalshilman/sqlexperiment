@@ -2,7 +2,7 @@
   "name": "restate-sessions",
   "version": "0.1.0",
   "private": true,
-  "description": "SQL in Restate virtual objects: a database per key, kept in the object's state (ctx.db)",
+  "description": "Session objects on Restate: virtual objects with a SQL database per key, kept in the object's state (ctx.db)",
   "files": [
     "dist",
     "src"

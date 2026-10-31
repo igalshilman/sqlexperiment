@@ -1,4 +1,4 @@
-# The addon: an object's database in its state
+# The addon: a session's database in its state
 
 The storage of [`restate-sessions`](../README.md): SQLite-compatible SQL over
 a key/value store implemented in JavaScript, the object's state. A native
@@ -93,7 +93,7 @@ store      one Restate object's key/value state: get · put · delete · sync
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | **Store**    | `get`, `put`, `delete` and `sync` on one object's keys, writes in issue order; a crash keeps a prefix of the unsynced ones       | Restate's own durability and fencing: one owner per object at a time                                              | What the keys mean                  |
 | **Database** | `query`, `execute`, `begin`, `commit(records)`, `rollback`, `record`, `save`, `close`: each commit durable when its call returns | The engine, its private view of the file and its WAL; the state's format (a tail, the head, packs); a warm engine | Restate, and what the records say   |
-| **Host**     | The SDK API: `ctx.db` in an object handler                                                                                       | What goes in a transaction, and the records to commit with it                                                     | How the database lays out its pages |
+| **Host**     | The SDK API: `ctx.db` in a session's handler                                                                                     | What goes in a transaction, and the records to commit with it                                                     | How the database lays out its pages |
 
 **When a change is durable.** When the call that commits it returns. A
 statement outside a transaction commits on its own; one in a transaction,

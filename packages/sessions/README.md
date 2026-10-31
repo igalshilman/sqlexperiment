@@ -1,12 +1,12 @@
-# restate-sessions: SQL in Restate virtual objects
+# restate-sessions: session objects on Restate
 
-Each key of a session object, a Restate virtual object, gets a SQL database
-of its own, `ctx.db`, kept in the object's state. Its handlers run with the
-SDK's explicit recovery instead of journal replay: the storage protocol of this
-repository provides durability and recovery, and Restate provides the state,
-single-writer execution per key, and retries. Its storage is
-a Rust addon in [`native/`](native/README.md), on the published Restate TypeScript
-SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
+Each key of a session object (a session, in short), a Restate virtual
+object, gets a SQL database of its own, `ctx.db`, kept in the object's state.
+Its handlers run with the SDK's explicit recovery instead of journal replay:
+the storage protocol of this repository provides durability and recovery,
+and Restate provides the state, single-writer execution per key, and
+retries. Its storage is a Rust addon in [`native/`](native/README.md), on
+the published Restate TypeScript SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)).
 
 It runs on a released Restate server: see [the requirements](../../README.md#requirements).
 
@@ -30,7 +30,7 @@ const ledger = restate.sessionObject({
 ```
 
 `restate-sessions` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
-with session objects beside its own objects, services and workflows.
+with session objects beside its own virtual objects, services and workflows.
 `restate.sessionObject({ name, schema, handlers, views })` is a virtual object
 whose state is a SQL database per key:
 
@@ -107,9 +107,9 @@ runs pi-durable's storage this way.
 
 An SQL error rejects as a `TerminalError` (its `cause` the SQL error), since
 a retry would repeat it: a statement the engine rejects, a parameter it
-cannot bind, or a call the session refuses, even one that ends the session
-(a `COMMIT` inside a transaction's body, a transaction left open when the
-handler ends). A storage error, which ends the session, is retried. The
+cannot bind, or a call `ctx.db` refuses, even one that closes it (a
+`COMMIT` inside a transaction's body, a transaction left open when the
+handler ends). A storage error, which closes `ctx.db` too, is retried. The
 handler's own errors are as in any handler.
 
 **The schema.** `schema` is the steps that make each key's database, in
@@ -156,7 +156,7 @@ ctx.db.transaction(async (tx) => {
 
 The sends commit with the transaction, in the same tail entry: the
 database's record `outbox` holds them (beside its tables, opaque to the
-storage). Once the commit is done the session makes them, each with an
+storage). Once the commit is done the attempt makes them, each with an
 idempotency key of the transaction, `transaction/<id>/<index>` (or the
 send's own key), with a random id of the transaction. Restate keeps an
 attempt's commands in the order they were made, so a send is stored
@@ -203,9 +203,9 @@ tail and checkpoints that are stored. Now and then a commit first folds the
 tail into a checkpoint (see the [state's architecture](native/src/state/docs/ARCHITECTURE.md)).
 
 **The page cache.** The process's page cache keeps the pages it read and
-wrote, and the database's state as of its last head, for the object's next
+wrote, and the database's state as of its last head, for the key's next
 invocation. Checkpoints' packs never change, so the cache keeps their ranges
-by location and never invalidates them: a session reads the stored head and,
+by location and never invalidates them: an attempt reads the stored head and,
 if another process wrote since, the ranges it names that the cache lacks.
 The head carries the database's random id, which
 the cache's keys include, so one process may serve several Restate clusters,
@@ -305,11 +305,11 @@ together with the others (`pnpm --filter e2e serve`, or
   stock, and an unpaid order releases it when it expires.
 
 [`restate-agents/pi`](../agents/src/pi/README.md) has a durable agent on pi-durable, with its
-storage in the object's database.
+storage in the session's database.
 
 ```sh
 pnpm install && pnpm build   # from the repository root: the workspace and the addon
-pnpm --filter e2e serve                                            # the objects, on port 9080
+pnpm --filter e2e serve                                            # the sessions, on port 9080
 npx @restatedev/restate-server                                       # Restate, in another terminal
 npx @restatedev/restate deployments register http://localhost:9080
 curl localhost:8080/Ledger/bank/init --json '[8, 1000]'
@@ -336,7 +336,7 @@ transfers take 18.8 ms each on one local node.
   by one pay each time. Group them in a transaction.
 - **10 GiB a database.** A statement that would grow a key's database past it
   fails with SQLite's "database or disk is full", as an SQL error (a
-  `TerminalError`), and the session goes on.
+  `TerminalError`), and `ctx.db` goes on.
 - **Assumptions to confirm with the runtime:** an empty `ctx.run` is
   acknowledged only after the commands before it are stored (writes and
   sends: the sync); an abandoned attempt's commands are never applied after a
@@ -346,14 +346,14 @@ transfers take 18.8 ms each on one local node.
 
 ## Views
 
-A view's `ctx.db` is the object's database as committed, read beside the
+A view's `ctx.db` is the session's database as committed, read beside the
 handlers, which may commit meanwhile (a chat UI's read of a conversation
 while the agent works, say). It opens as of its first read, and reads that
 snapshot throughout, whatever the handlers commit meanwhile; only a view
 that outlives 16 of their commits fails, and Restate retries it
 ([the reader](native/src/state/docs/DESIGN.md#readers)). Its `db` has no
 `execute` or `transaction`, and its context no `send`; a write through
-`query` fails, as its session is query-only.
+`query` fails, as the view's database is query-only.
 
 ```ts
 views: {
@@ -370,7 +370,7 @@ await, since a suspension is a restart.
 
 ## Tests
 
-The library's own: [`test/`](test) (sessions, transactions and their sends,
+The library's own: [`test/`](test) (session objects, transactions and their sends,
 readers, SQL errors, lost writes) without a server
 (`pnpm --filter restate-sessions test`), the addon's in
 [`native/`](native/README.md#build-and-test)
@@ -382,7 +382,7 @@ object's state in memory, through crashes and fencing; `restate-agents`'s
 tests use it too (`restate-sessions/test/support`). `restate-sessions/internal`
 has what the tests take apart: a handler run for one attempt over a context
 of their own (`invoke`), a handler's or view's context over one
-(`contextOf`), an attempt's session (`Attempt`, `withAttempt`), a
+(`contextOf`), an attempt's database (`Attempt`, `withAttempt`), a
 database over a store of their own (`open`, `asDatabase`), and the store's
 fault injection (`setStoreWrapper`). For this repository's libraries, it has
 `Schema` (tables a library owns, applied where it uses them), `database`
