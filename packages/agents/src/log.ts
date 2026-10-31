@@ -86,10 +86,17 @@ async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promi
 export async function sync(db: SqlSession, messages: Said[], start: () => Promise<Start | null>) {
   await SCHEMA.ensure(db);
   const head = await headOf(db, start);
-  const jsons = messages.map((m) => JSON.stringify(m));
+  // A message the transcript did not change is the one stored (see Transcript in common.ts):
+  // only the others are compared, as JSON.
+  const jsons: string[] = [];
+  const jsonOf = (position: number) => (jsons[position] ??= JSON.stringify(messages[position]));
+  const unchanged = (position: number) => {
+    const row = head.rows[position]!;
+    return row.message === messages[position] || row.json === jsonOf(position);
+  };
   const both = Math.min(head.rows.length, messages.length);
   let same = 0;
-  while (same < both && head.rows[same]!.json === jsons[same]) same += 1;
+  while (same < both && unchanged(same)) same += 1;
   let grown = same;
   while (grown < both && grownFrom(messages[grown]!, head.rows[grown]!.message)) grown += 1;
   if (same === head.rows.length && same === messages.length) return;
@@ -98,14 +105,14 @@ export async function sync(db: SqlSession, messages: Said[], start: () => Promis
   try {
     await db.transaction(async (tx) => {
       for (let position = same; position < grown; position += 1) {
-        const row = { id: head.rows[position]!.id, message: messages[position]!, json: jsons[position]! };
+        const row = { id: head.rows[position]!.id, message: messages[position]!, json: jsonOf(position) };
         await tx.execute(`UPDATE ${TABLE} SET seq = ?, message = ? WHERE id = ?`, [(seq += 1), row.json, row.id]);
         rows.push(row);
       }
       // The rest of the transcript as it was is replaced: its messages stay in the log, out of it.
       await tx.execute(`UPDATE ${TABLE} SET position = NULL WHERE position >= ?`, [grown]);
       for (let position = grown; position < messages.length; position += 1) {
-        const row = { id: id++, message: messages[position]!, json: jsons[position]! };
+        const row = { id: id++, message: messages[position]!, json: jsonOf(position) };
         await tx.execute(`INSERT INTO ${TABLE} VALUES (?, ?, ?, ?)`, [row.id, (seq += 1), position, row.json]);
         rows.push(row);
       }

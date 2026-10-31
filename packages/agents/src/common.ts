@@ -380,10 +380,16 @@ export interface Messages {
  * A conversation as `messages` gives it, built from a framework's transcript:
  * each message is started by `say`, a tool call goes to the assistant's
  * message, and its result to its call. Messages without parts are left out.
+ *
+ * A message, once given out by `messages()`, is never changed: a change
+ * makes a new one in its place. So a framework can keep its transcript and
+ * add to it as its conversation grows, and the log stores only the messages
+ * that are not the ones it stored last (see log.ts).
  */
 export class Transcript {
   #messages: Said[] = [];
-  #calls = new Map<string, Extract<Part, { type: 'tool' }>>();
+  /** The message of each tool call, by the call's id: its index. */
+  #calls = new Map<string, number>();
 
   /** A new message of `role`, with `text` if there is any. */
   say(role: ChatMessage['role'], text = '') {
@@ -393,32 +399,47 @@ export class Transcript {
   /** Tool call `id` of the assistant's message. */
   call(id: string, name: string, input: unknown) {
     if (this.#messages.at(-1)?.role !== 'assistant') this.say('assistant');
-    const part = { type: 'tool' as const, id, name, input };
-    this.#messages.at(-1)!.parts.push(part);
-    this.#calls.set(id, part);
+    const at = this.#messages.length - 1;
+    this.#change(at, (parts) => [...parts, { type: 'tool', id, name, input }]);
+    this.#calls.set(id, at);
   }
 
   /** The output of tool call `id`; an error's if the framework says so, or it is a tool's `Error: <message>`. */
   result(id: string, output: string, error = false) {
-    const call = this.#calls.get(id);
-    if (!call) return;
-    call.output = output;
-    if (error || output.startsWith('Error: ')) call.error = true;
+    const at = this.#calls.get(id);
+    if (at === undefined) return;
+    const failed = error || output.startsWith('Error: ');
+    this.#change(at, (parts) =>
+      parts.map((p) => (p.type === 'tool' && p.id === id ? { ...p, output, ...(failed ? { error: true } : {}) } : p)),
+    );
   }
 
   /** Whether tool call `id` has its output. */
   hasResult(id: string) {
-    return this.#calls.get(id)?.output !== undefined;
+    const at = this.#calls.get(id);
+    return (
+      at !== undefined &&
+      this.#messages[at]!.parts.some((p) => p.type === 'tool' && p.id === id && p.output !== undefined)
+    );
   }
 
   /** Its messages, in order: those with parts. */
   messages(): Said[] {
     return this.#messages.filter((m) => m.parts.length > 0);
   }
+
+  /** Message `at` with its parts as `change` makes them: a new message, in its place. */
+  #change(at: number, change: (parts: Part[]) => Part[]) {
+    const message = this.#messages[at]!;
+    this.#messages[at] = { ...message, parts: change(message.parts) };
+  }
 }
 
-/** What a framework's transcript is read into, while it answers (see {@link transcribing}). */
-export type Read = (transcript: Transcript) => Promise<void>;
+/**
+ * A framework's transcript as it stands, while it answers (see
+ * {@link transcribing}): a new one, or the one it keeps and adds to.
+ */
+export type Read = () => Promise<Transcript>;
 
 /** The transcript of the turn of each context, while it answers. */
 const reading = new WeakMap<object, Read>();
@@ -429,8 +450,7 @@ const writing = new WeakMap<object, Promise<void>>();
 /** The log of the conversation of `ctx` takes its transcript as `read` gives it. */
 function logged(ctx: restate.ObjectContext, read: Read): Promise<void> {
   const write = async () => {
-    const transcript = new Transcript();
-    await read(transcript);
+    const transcript = await read();
     await log.sync(ctx.db, transcript.messages(), () => ctx.get<log.Start>(log.START));
     // The calls whose results the framework stored are made: see calls.ts.
     await settle(ctx, (id) => transcript.hasResult(id));

@@ -67,7 +67,7 @@ import {
   type Steerable,
   toolCallEnded,
   toolCallStarted,
-  type Transcript,
+  Transcript,
   transcribing,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
@@ -277,7 +277,7 @@ export const withPi = async <T>(
 
   try {
     // The log reads the root conversation through this Harness, while it is open.
-    const read = async (transcript: Transcript) => transcribe(await harness.root(context), context, transcript);
+    const read = async () => transcribe(await harness.root(context), context);
     return await transcribing(ctx, read, () =>
       Promise.race([abortOn(), work({ harness, context, conversation, prompt })]),
     );
@@ -322,7 +322,8 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
 export const messages = () => messagesHandler();
 
 /** The conversation of `root`, from pi-durable's entries, as `messages` gives it. */
-const transcribe = async (root: Conversation, context: Context, transcript: Transcript) => {
+const transcribe = async (root: Conversation, context: Context) => {
+  const transcript = new Transcript();
   for (let cursor: Parameters<typeof root.entries>[2]; ;) {
     const page = await root.entries({ order: 'ascending' }, 100, cursor, context);
     for (const m of page.items.flatMap((entry) => entry.model ?? [])) {
@@ -334,7 +335,7 @@ const transcribe = async (root: Conversation, context: Context, transcript: Tran
       if (m.role === 'toolResult') transcript.result(m.toolCallId, textOf(m.content), m.isError);
     }
     cursor = page.next;
-    if (cursor === undefined) return;
+    if (cursor === undefined) return transcript;
   }
 };
 

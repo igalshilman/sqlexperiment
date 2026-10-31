@@ -45,6 +45,14 @@ export class Conversation {
     return rows.map(([message]) => JSON.parse(String(message)));
   }
 
+  /** The messages stored after `seq`, in order, each with its own `seq`. */
+  async since(seq: number): Promise<[seq: number, message: MessageParam][]> {
+    const rows = await this.#db.query('SELECT seq, message FROM restate_claude_messages WHERE seq > ? ORDER BY seq', [
+      seq,
+    ]);
+    return rows.map(([at, message]) => [Number(at), JSON.parse(String(message)) as MessageParam]);
+  }
+
   /** The prompt being answered: the last message's, unless it is answered. */
   async pending(): Promise<string | undefined> {
     const [row] = await this.#db.query(

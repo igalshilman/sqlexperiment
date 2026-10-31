@@ -41,7 +41,7 @@ import {
   nextPromptId,
   toolCallEnded,
   toolCallStarted,
-  type Transcript,
+  Transcript,
   transcribing,
   refusal,
   UNANSWERED,
@@ -218,7 +218,7 @@ let shared: Anthropic | undefined;
 const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
-    (transcript) => transcribe(ctx.db, transcript),
+    () => transcribe(ctx.db),
     () => answerOnce(ctx, text, options),
   );
 
@@ -299,10 +299,20 @@ const storedText = (content: string | readonly { type: string; text?: string }[]
  */
 export const messages = () => messagesHandler();
 
+/**
+ * The transcript of each session's conversation (`ctx.db`, one per
+ * attempt), as far as it was read: the conversation only grows, so each
+ * read adds the messages stored since.
+ */
+const transcripts = new WeakMap<SqlSession, { seq: number; transcript: Transcript }>();
+
 /** The conversation in `db`, as `messages` gives it. */
-const transcribe = async (db: SqlSession, transcript: Transcript) => {
-  const conversation = await Conversation.open(db);
-  for (const m of await conversation.messages()) {
+const transcribe = async (db: SqlSession): Promise<Transcript> => {
+  const read = transcripts.get(db) ?? { seq: 0, transcript: new Transcript() };
+  transcripts.set(db, read);
+  const { transcript } = read;
+  for (const [seq, m] of await (await Conversation.open(db)).since(read.seq)) {
+    read.seq = seq;
     if (m.role === 'system') continue;
     transcript.say(m.role, storedText(m.content));
     if (typeof m.content === 'string') continue;
@@ -312,6 +322,7 @@ const transcribe = async (db: SqlSession, transcript: Transcript) => {
         transcript.result(block.tool_use_id, storedText(block.content), block.is_error === true);
     }
   }
+  return transcript;
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */

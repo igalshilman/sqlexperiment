@@ -55,7 +55,7 @@ import {
   type Steerable,
   toolCallEnded,
   toolCallStarted,
-  type Transcript,
+  Transcript,
   transcribing,
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
@@ -501,7 +501,7 @@ export const withOpenCode = async <T>(
 
   try {
     // The log reads the session through this host, while it is open.
-    const read = (transcript: Transcript) => transcribe(host, transcript);
+    const read = () => transcribe(host);
     return await transcribing(ctx, read, () => Promise.race([interruptOn(host, failure), work({ host, prompt })]));
   } finally {
     turn?.removeEventListener('abort', onCancel);
@@ -544,7 +544,8 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
 export const messages = () => messagesHandler();
 
 /** The session of `host`, as `messages` gives it. */
-const transcribe = async (host: Host, transcript: Transcript) => {
+const transcribe = async (host: Host) => {
+  const transcript = new Transcript();
   for (const m of await sessionMessages(host)) {
     if (m.type === 'user') transcript.say('user', m.text);
     if (m.type !== 'assistant') continue;
@@ -557,6 +558,7 @@ const transcribe = async (host: Host, transcript: Transcript) => {
       if (output !== undefined) transcript.result(c.id, output, c.state.status === 'error');
     }
   }
+  return transcript;
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */

@@ -66,7 +66,7 @@ import {
   type Steerable,
   toolCallEnded,
   toolCallStarted,
-  type Transcript,
+  Transcript,
   transcribing,
   refusal,
   UNANSWERED,
@@ -278,7 +278,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
-    (transcript) => transcribe(ctx.db, ctx.key, transcript),
+    () => transcribe(ctx.db, ctx.key),
     () => answerOnce(ctx, text, options),
   );
 
@@ -445,7 +445,8 @@ const parsed = (json: string): unknown => {
 export const messages = () => messagesHandler();
 
 /** The session `key` in `db`, from its log, as `messages` gives it. */
-const transcribe = async (db: SqlSession, key: string, transcript: Transcript) => {
+const transcribe = async (db: SqlSession, key: string) => {
+  const transcript = new Transcript();
   for (const e of await storedEvents(db, SessionId(key))) {
     // The prompts and the messages steered to them, not the requests to
     // continue an interrupted turn.
@@ -455,6 +456,7 @@ const transcribe = async (db: SqlSession, key: string, transcript: Transcript) =
     if (e.type === 'tool/result')
       transcript.result(e.data.message.toolCallId, textOf(e.data.message), e.data.message.isError);
   }
+  return transcript;
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */

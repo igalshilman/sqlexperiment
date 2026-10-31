@@ -48,7 +48,7 @@ import {
   providerOf,
   toolCallEnded,
   toolCallStarted,
-  type Transcript,
+  Transcript,
   transcribing,
   refusal,
   UNANSWERED,
@@ -196,7 +196,7 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 const promptText = (ctx: restate.ObjectContext, text: string, options: Options): Promise<string> =>
   transcribing(
     ctx,
-    (transcript) => transcribe(ctx.db, ctx.key, transcript),
+    () => transcribe(ctx.db, ctx.key),
     () => answerOnce(ctx, text, options),
   );
 
@@ -303,7 +303,8 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
 export const messages = () => messagesHandler();
 
 /** The thread `key` in `db`, from its last checkpoint, as `messages` gives it. */
-const transcribe = async (db: SqlSession, key: string, transcript: Transcript) => {
+const transcribe = async (db: SqlSession, key: string) => {
+  const transcript = new Transcript();
   const saved = await new SqlCheckpointSaver(db).getTuple({ configurable: { thread_id: key } });
   for (const m of (saved?.checkpoint.channel_values.messages ?? []) as BaseMessage[]) {
     if (HumanMessage.isInstance(m)) transcript.say('user', m.text);
@@ -313,6 +314,7 @@ const transcribe = async (db: SqlSession, key: string, transcript: Transcript) =
     }
     if (ToolMessage.isInstance(m)) transcript.result(m.tool_call_id, m.text, m.status === 'error');
   }
+  return transcript;
 };
 
 /** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
