@@ -20,6 +20,7 @@ agents. Each file builds on the ones before it, and runs on its own.
 | [`13_call.ts`](src/13_call.ts)               | Your objects as tools: `call`                             |
 | [`14_approval.ts`](src/14_approval.ts)       | A person in the loop: `signal`                            |
 | [`15_subagents.ts`](src/15_subagents.ts)     | Agents that delegate: `subagent`                          |
+| [`16_pi_durable.ts`](src/16_pi_durable.ts)   | pi-durable by hand: its Harness over `ctx.db`             |
 
 ## Run a lesson
 
@@ -34,7 +35,7 @@ curl localhost:8080/greeter/alice/greet
 ```
 
 Each lesson's comment says what to call. Every lesson serves on port 9080:
-stop one, start the next, and register it again. Lessons 09 to 15 ask
+stop one, start the next, and register it again. Lessons 09 to 16 ask
 OpenAI's models, with the API key in `OPENAI_API_KEY`.
 
 Restate's UI, at <http://localhost:9070>, shows each invocation and what it
