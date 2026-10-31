@@ -18,9 +18,10 @@ const NOTES = 'CREATE TABLE notes (text TEXT NOT NULL)';
 /** How many steps of the schema `name` the database in `map` has, as stored: its record. */
 async function stepsOf(map: Map<string, Uint8Array>, name: string) {
   const db = await open(`schema-${randomUUID()}`, memoryStore(map));
-  const record = await db.record(`schema/${name}`);
+  const record = await db.record('schema');
   await db.close();
-  return new TextDecoder().decode(record);
+  const applied = record.length === 0 ? {} : (JSON.parse(new TextDecoder().decode(record)) as Record<string, number>);
+  return applied[name] === undefined ? '' : String(applied[name]);
 }
 
 const TABLES = "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name";

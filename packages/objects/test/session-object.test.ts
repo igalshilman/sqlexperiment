@@ -2,7 +2,7 @@
 // contexts, transactions with sends, and the types users write against.
 import assert from 'node:assert/strict';
 import * as restate from 'restate-objects';
-import { invoke } from 'restate-objects/internal';
+import { invoke, reset, Schema } from 'restate-objects/internal';
 import { expectTypeOf, test, vi } from 'vitest';
 import { fakeContext, type Made } from './support.ts';
 
@@ -253,4 +253,80 @@ test('sends a crash left unmade go out as the next attempt starts, though it use
   } finally {
     vi.useRealTimers();
   }
+});
+
+const LIBRARY = new Schema('library', ['CREATE TABLE restate_library (v TEXT)']);
+
+const resettable = restate.sessionObject({
+  name: 'resettable',
+  schema: [
+    'CREATE TABLE items (v TEXT)',
+    'CREATE TABLE starts (at INTEGER)',
+    'CREATE VIEW counted AS SELECT count(*) AS n FROM items',
+    'CREATE TRIGGER stamped AFTER INSERT ON items BEGIN INSERT INTO starts VALUES (0); END',
+  ],
+  handlers: {
+    fill: async (ctx) => {
+      await LIBRARY.ensure(ctx.db);
+      await ctx.db.execute("INSERT INTO items VALUES ('a'), ('b')");
+      await ctx.db.execute("INSERT INTO restate_library VALUES ('x')");
+      await ctx.db.execute('CREATE TABLE extra (v TEXT)');
+    },
+    clear: async (ctx, start: number) => {
+      await LIBRARY.ensure(ctx.db);
+      await ctx.db.transaction(async (tx) => {
+        tx.send(resettable, 'other').fill();
+        await reset(tx);
+        await tx.execute('INSERT INTO starts VALUES (?)', [start]);
+      });
+    },
+    failing: async (ctx) =>
+      ctx.db.transaction(async (tx) => {
+        await reset(tx);
+        throw new restate.TerminalError('rolled back');
+      }),
+  },
+  views: {
+    state: async (ctx) => ({
+      items: await ctx.db.get<{ n: number }>('SELECT n FROM counted'),
+      starts: await ctx.db.query('SELECT at FROM starts'),
+      library: await ctx.db.query('SELECT v FROM restate_library'),
+      tables: await ctx.db.query("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"),
+    }),
+  },
+});
+
+test('reset empties the database in a transaction, with the schemas applied again and its sends kept', async () => {
+  const map = new Map<string, Uint8Array>();
+  const ctx = (sends: Made[] = []) => fakeContext({ map, service: 'resettable', sends });
+  await invoke(resettable, 'fill', ctx());
+  await assert.rejects(invoke(resettable, 'failing', ctx()), /rolled back/);
+  assert.deepEqual(await invoke(resettable, 'state', ctx()), {
+    items: { n: 2 },
+    starts: [{ at: 0 }, { at: 0 }],
+    library: [{ v: 'x' }],
+    tables: [{ name: 'extra' }, { name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+  });
+
+  const sends: Made[] = [];
+  await invoke(resettable, 'clear', ctx(sends), 7);
+  assert.deepEqual(await invoke(resettable, 'state', ctx()), {
+    items: { n: 0 },
+    starts: [{ at: 7 }],
+    library: [],
+    tables: [{ name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+  });
+  assert.deepEqual(
+    sends.map(({ method, key }) => [method, key]),
+    [['fill', 'other']],
+  );
+
+  // The trigger is back with the schema.
+  await invoke(resettable, 'fill', ctx());
+  assert.deepEqual(await invoke(resettable, 'state', ctx()), {
+    items: { n: 2 },
+    starts: [{ at: 7 }, { at: 0 }, { at: 0 }],
+    library: [{ v: 'x' }],
+    tables: [{ name: 'extra' }, { name: 'items' }, { name: 'restate_library' }, { name: 'starts' }],
+  });
 });

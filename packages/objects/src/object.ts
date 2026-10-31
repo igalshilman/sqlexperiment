@@ -273,3 +273,24 @@ export function sessionObject<
   entries.set(made, own);
   return made;
 }
+
+/** The SDK's context behind a session object's context. */
+function sdkOf(ctx: SessionContext | ViewContext) {
+  const sdk = sdkContexts.get(ctx);
+  if (sdk === undefined) throw new Error("this takes a session object's ctx");
+  return restate.internal.asInternal(sdk);
+}
+
+/**
+ * Resolves when Restate cancels the invocation of `ctx`, a handler's with
+ * `explicitCancellation: true`, whose awaits are left as they are: for a
+ * library that stops its own work then (a model's request, say).
+ */
+export const cancelled = async (ctx: SessionContext): Promise<void> => {
+  await sdkOf(ctx).cancellation();
+};
+
+/** Cancel the calls the attempt of `ctx` made, as a cancelled invocation's would be. */
+export const cancelCalls = async (ctx: SessionContext): Promise<void> => {
+  await sdkOf(ctx).cancelPreviousCalls();
+};

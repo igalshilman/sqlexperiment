@@ -21,7 +21,7 @@ import {
   type Store,
   type ConnectionTransaction,
 } from './database.ts';
-import { apply, ofObject, type Schema, sessions } from './schema.ts';
+import { apply, dropAll, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 import { type Send, sendOf } from './calls.ts';
 
@@ -179,8 +179,8 @@ const unbeside = (name: string) => (key: string) => {
  * rejects, so the session that made it ends instead of holding its lock for
  * the life of the process.
  */
-function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined): Store {
-  const keyOf = database === undefined ? (key: string) => key : beside(database);
+function objectStore(ctx: SqlHost, end: AttemptEnd, dbName: string | undefined): Store {
+  const keyOf = dbName === undefined ? (key: string) => key : beside(dbName);
   // TODO: read with protocol v8's ephemeral get, left out of the journal, once
   // a Restate release ships v8 and the SDK lets a library make one (FUTURE.md
   // at the repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
@@ -194,8 +194,8 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, database: string | undefined
     // The database's keys, for a garbage collection.
     keys: async () => {
       const keys = await end.race(ctx.stateKeys());
-      if (database === undefined) return keys;
-      const own = unbeside(database);
+      if (dbName === undefined) return keys;
+      const own = unbeside(dbName);
       return keys.flatMap((key) => own(key) ?? []);
     },
     sync: async () => {
@@ -247,6 +247,22 @@ export function asDatabase(connection: Connection): Database {
   return db;
 }
 
+// The transactions of `ctx.db`, each with how it empties the database (`reset`).
+const resets = new WeakMap<Transaction, () => Promise<void>>();
+
+/**
+ * Empty the key's database in `tx`, a transaction of an exclusive handler's
+ * `ctx.db`: every table, view, index and trigger is dropped, the schemas are
+ * applied again (the object's, and the libraries' the attempt applied), and
+ * the outbox stays. It commits with `tx`: what `tx` writes after it are the
+ * new database's first rows, in the same commit.
+ */
+export function reset(tx: Transaction): Promise<void> {
+  const of = resets.get(tx);
+  if (of === undefined) throw new Error("reset takes a transaction of an exclusive handler's ctx.db");
+  return forHandler(of());
+}
+
 /** The sends of a transaction that has no outbox: a shared handler's, or another database's. */
 const refusedSend: Send = () => {
   throw new TerminalError("a send of a transaction is an exclusive handler's, in the object's own database");
@@ -264,6 +280,8 @@ const refusedSend: Send = () => {
 
 /** A send, but its parameter, as it is stored. */
 type StoredSend = Omit<restate.GenericSend<unknown>, 'parameter' | 'inputSerde' | 'delay'> & {
+  /** Its delay, in milliseconds. */
+  delay?: number;
   /** When a delayed send is due (epoch ms): one made again waits only what remains. */
   due?: number;
 };
@@ -292,7 +310,9 @@ function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][numbe
   const { parameter, inputSerde, delay, ...rest } = send;
   return {
     ...rest,
-    ...(delay !== undefined ? { due: Date.now() + millisOrDurationToMillis(delay) } : {}),
+    ...(delay !== undefined
+      ? { delay: millisOrDurationToMillis(delay), due: Date.now() + millisOrDurationToMillis(delay) }
+      : {}),
     parameter: Buffer.from((inputSerde ?? serde.binary).serialize(parameter)).toString('base64'),
   };
 }
@@ -305,10 +325,10 @@ function settle<T>(outcome: Outcome<T>): T {
   return outcome.value;
 }
 
-// The attempts, by their `ctx.db`: for `databaseOf`.
+// The attempts, by their `ctx.db`: for `database`.
 const attempts = new WeakMap<object, SqlAttempt>();
 
-// A database's name (`databaseOf`).
+// A database's name (`database`).
 const DATABASE_NAME = /^[\w.-]{1,64}$/;
 
 /**
@@ -318,10 +338,10 @@ const DATABASE_NAME = /^[\w.-]{1,64}$/;
  * and ends with the attempt, as `ctx.db` does. A name is 1 to 64 letters,
  * digits, `_`, `-` or `.`.
  */
-export function databaseOf(db: Database, name: string): Database {
-  if (!DATABASE_NAME.test(name)) throw new Error(`databaseOf: ${JSON.stringify(name)} is not a database name`);
+export function database(db: Database, name: string): Database {
+  if (!DATABASE_NAME.test(name)) throw new Error(`database: ${JSON.stringify(name)} is not a database name`);
   const attempt = attempts.get(db);
-  if (attempt === undefined) throw new Error("databaseOf takes a handler's ctx.db");
+  if (attempt === undefined) throw new Error("database takes a handler's ctx.db");
   return attempt.database(name);
 }
 
@@ -329,7 +349,7 @@ export function databaseOf(db: Database, name: string): Database {
  * An attempt's SQL session: opened on its first use (`ctx.db` or
  * `ctx.transaction`), shared by everything the handler does, and saved when
  * the handler ends ({@link end}). With `name`, of the key's database `name`
- * ({@link databaseOf}), which has neither the object's schema nor an outbox.
+ * ({@link database}), which has neither the object's schema nor an outbox.
  */
 export class SqlAttempt {
   /** `ctx.db`. */
@@ -343,7 +363,7 @@ export class SqlAttempt {
   /** The ids of the outbox's transactions this attempt made the sends of. */
   private readonly made = new Set<string>();
   /** The schemas this attempt's database has all the steps of. */
-  private readonly ensured = new Set<string>();
+  private readonly ensured = new Map<string, Schema>();
   private ended = false;
   /** Opened when the attempt started ({@link openNow}), and no call has seen how it went yet. */
   private unseenOpen = false;
@@ -359,18 +379,22 @@ export class SqlAttempt {
       transaction: <T>(body: (tx: Transaction) => Promise<T>) =>
         this.ctx.shared || this.name !== undefined
           ? this.call((db) => db.transaction((tx) => body({ ...forBody(tx), send: refusedSend })))
-          : this.withSends((tx, record) => body({ ...tx, send: sendOf(record) })),
+          : this.withSends((tx, record, handle) => {
+              const transaction: Transaction = { ...tx, send: sendOf(record) };
+              resets.set(transaction, () => this.reset(handle));
+              return body(transaction);
+            }),
     };
     sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));
     attempts.set(this.db, this);
   }
 
-  /** The key's database `name`, in this attempt: see {@link databaseOf}. */
+  /** The key's database `name`, in this attempt: see {@link database}. */
   database(name: string): Database {
     if (this.ended) throw new Error('the handler has ended: its SQL session is closed');
-    let database = this.databases.get(name);
-    if (database === undefined) this.databases.set(name, (database = new SqlAttempt(this.ctx, name)));
-    return database.db;
+    let other = this.databases.get(name);
+    if (other === undefined) this.databases.set(name, (other = new SqlAttempt(this.ctx, name)));
+    return other.db;
   }
 
   /**
@@ -390,7 +414,11 @@ export class SqlAttempt {
    * `record`, which records a send.
    */
   private async withSends<T>(
-    body: (db: DatabaseWriter, record: (send: restate.GenericSend<unknown>) => void) => Promise<T>,
+    body: (
+      db: DatabaseWriter,
+      record: (send: restate.GenericSend<unknown>) => void,
+      handle: ConnectionTransaction,
+    ) => Promise<T>,
   ): Promise<T> {
     const sends: Outgoing['sends'] = [];
     let recording = true;
@@ -403,7 +431,7 @@ export class SqlAttempt {
       db.transaction(async (handle) => {
         let result: T;
         try {
-          result = await body(forBody(handle), record);
+          result = await body(forBody(handle), record, handle);
         } finally {
           recording = false;
         }
@@ -447,6 +475,13 @@ export class SqlAttempt {
     this.opened().catch(() => {});
   }
 
+  /** Empty the database in the transaction `handle` ({@link reset}), and apply the schemas this attempt applied again. */
+  private async reset(handle: ConnectionTransaction) {
+    const own = ofObject(this.ctx.request().target.service);
+    const schemas = [...(own ? [own] : []), ...[...this.ensured.values()].filter((s) => s !== own)];
+    await dropAll(handle, schemas);
+  }
+
   /** `call` on the session, opening it on the first; its failure as the handler fails with it. */
   private async call<T>(call: (db: Connection) => Promise<T>): Promise<T> {
     this.unseenOpen = false;
@@ -459,15 +494,16 @@ export class SqlAttempt {
     const lacking = schemas.filter((s) => !this.ensured.has(s.name));
     if (lacking.length === 0) return;
     await forHandler(apply(db, lacking));
-    for (const s of lacking) this.ensured.add(s.name);
+    for (const s of lacking) this.ensured.set(s.name, s);
   }
 
   /** Make the sends of a committed transaction: each with an idempotency key of the transaction (or its own), so that making them again is dropped. */
-  private make({ id, sends }: Outgoing) {
-    sends.forEach(({ parameter, due, ...send }, index) => {
+  private make({ id, sends }: Outgoing, again = false) {
+    sends.forEach(({ parameter, due, delay, ...send }, index) => {
       this.ctx.genericSend({
         ...send,
-        ...(due !== undefined ? { delay: Math.max(0, due - Date.now()) } : {}),
+        // Made again, a delayed send waits only what remains of its delay.
+        ...(delay !== undefined ? { delay: again && due !== undefined ? Math.max(0, due - Date.now()) : delay } : {}),
         parameter: new Uint8Array(Buffer.from(parameter, 'base64')),
         inputSerde: serde.binary,
         idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
@@ -517,7 +553,7 @@ export class SqlAttempt {
     try {
       // What a crash may have left unmade.
       if (!ctx.shared && this.name === undefined) {
-        decodeOutbox(await db.record(OUTBOX)).forEach((outgoing) => this.make(outgoing));
+        decodeOutbox(await db.record(OUTBOX)).forEach((outgoing) => this.make(outgoing, true));
       }
       if (own) await this.ensureSchemas(db, [own]);
     } catch (error) {

@@ -1,9 +1,9 @@
-// A key's databases apart from the object's own (databaseOf of restate-objects),
+// A key's databases apart from the object's own (database of restate-objects),
 // without a Restate server: each its own tables, stored in the object's state
 // beside `ctx.db`'s, opened on first use and ended with the attempt.
 import { randomUUID } from 'node:crypto';
 import type { DatabaseWriter } from 'restate-objects';
-import { databaseOf } from 'restate-objects/internal';
+import { database } from 'restate-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 
@@ -20,14 +20,14 @@ describe("a key's other database", () => {
     const first = sqlAttempt({ map });
     await first.end(async () => {
       await first.db.execute('CREATE TABLE notes (text TEXT)');
-      const other = databaseOf(first.db, 'library');
+      const other = database(first.db, 'library');
       await other.execute('CREATE TABLE notes (text TEXT)');
       await other.execute("INSERT INTO notes VALUES ('its own')");
     });
     const later = sqlAttempt({ map, id: 'later' });
     const [yours, its] = await later.end(async () => [
       await later.db.values('SELECT text FROM notes'),
-      await databaseOf(later.db, 'library').values('SELECT text FROM notes'),
+      await database(later.db, 'library').values('SELECT text FROM notes'),
     ]);
     expect(yours).toEqual([]);
     expect(its).toEqual([['its own']]);
@@ -36,7 +36,7 @@ describe("a key's other database", () => {
   it('is stored under the format’s prefix, apart from the object’s database', async () => {
     const map = new Map<string, Uint8Array>();
     const attempt = sqlAttempt({ map });
-    await attempt.end(() => databaseOf(attempt.db, 'pack').execute('CREATE TABLE t (x)'));
+    await attempt.end(() => database(attempt.db, 'pack').execute('CREATE TABLE t (x)'));
     expect([...map.keys()].filter((key) => !key.startsWith('v22/db/pack/'))).toEqual([]);
     expect(map.has('v22/db/pack/head')).toBe(true);
   });
@@ -44,7 +44,7 @@ describe("a key's other database", () => {
   it('has a name of letters, digits, _, - and .', () => {
     const attempt = sqlAttempt({ map: new Map() });
     for (const name of ['', 'a/b', 'a b', 'x'.repeat(65)]) {
-      expect(() => databaseOf(attempt.db, name)).toThrow(/not a database name/);
+      expect(() => database(attempt.db, name)).toThrow(/not a database name/);
     }
   });
 
@@ -56,7 +56,7 @@ describe("a key's other database", () => {
     const named = sqlAttempt({ map: new Map(), service, key: 'x' });
     const counts = await Promise.all([
       slashed.end(() => insertThree(slashed.db)),
-      named.end(() => insertThree(databaseOf(named.db, 'library'))),
+      named.end(() => insertThree(database(named.db, 'library'))),
     ]);
     expect(counts).toEqual([[[3]], [[3]]]);
   });
@@ -65,19 +65,19 @@ describe("a key's other database", () => {
     const map = new Map<string, Uint8Array>();
     const writer = sqlAttempt({ map });
     await writer.end(async () => {
-      const other = databaseOf(writer.db, 'library');
+      const other = database(writer.db, 'library');
       await other.execute('CREATE TABLE t (x)');
       await other.execute('INSERT INTO t VALUES (1)');
     });
     const stored = new Map(map);
     const reader = sqlAttempt({ map, shared: true, id: 'reader' });
-    expect(await reader.end(() => databaseOf(reader.db, 'library').values('SELECT x FROM t'))).toEqual([[1]]);
+    expect(await reader.end(() => database(reader.db, 'library').values('SELECT x FROM t'))).toEqual([[1]]);
     expect(map).toEqual(stored);
   });
 
   it('is refused once the handler ended', async () => {
     const attempt = sqlAttempt({ map: new Map() });
     await attempt.end(async () => {});
-    expect(() => databaseOf(attempt.db, 'library')).toThrow(/ended/);
+    expect(() => database(attempt.db, 'library')).toThrow(/ended/);
   });
 });

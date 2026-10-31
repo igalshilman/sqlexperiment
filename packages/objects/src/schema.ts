@@ -1,7 +1,7 @@
 // The schema of an object's databases: each key's database is made by the
 // same steps, in order, applied once per key, where its first handler opens
-// it. A database keeps how far each schema got in its record `schema/<name>`
-// (beside its tables, in none of them), committed with the steps, so a step
+// it. A database keeps how far each schema got in its record `schema` (beside
+// its tables, in none of them), committed with the steps, so a step
 // added later (a column, an index) runs on each key's database once, as that
 // key is next opened:
 //
@@ -20,11 +20,22 @@
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
 // they use them, in any object: internal, from restate-objects/internal.
-import type { Connection, DatabaseWriter, ConnectionTransaction } from './database.ts';
-import type { Database } from './session.ts';
+import type { Connection, DatabaseReader, DatabaseWriter, ConnectionTransaction } from './database.ts';
 
-/** The database's record of how many steps of the schema `name` it has. */
-const recordOf = (name: string) => `schema/${name}`;
+/**
+ * The database's record of its schemas: how many steps of each it has, by
+ * name. One record, so that `reset` clears all of them, a library's this
+ * process never loaded too.
+ */
+const RECORD = 'schema';
+
+/** How many steps of each schema the database has, by name. */
+type Applied = Record<string, number>;
+
+async function appliedIn(db: Connection | ConnectionTransaction): Promise<Applied> {
+  const record = await db.record(RECORD);
+  return record.length === 0 ? {} : (JSON.parse(new TextDecoder().decode(record)) as Applied);
+}
 
 /** A statement, or an async function of the transaction. */
 export type Step = string | ((tx: DatabaseWriter) => Promise<void>);
@@ -44,7 +55,7 @@ export class Schema {
    * any object. On a handler's `ctx.db`, once per attempt, and a shared
    * handler's are its own, vanishing with its session.
    */
-  ensure(db: Database | Connection): Promise<void> {
+  ensure(db: DatabaseReader | Connection): Promise<void> {
     const session = sessions.get(db);
     return session ? session([this]) : apply(db as Connection, [this]);
   }
@@ -64,26 +75,46 @@ export const ofObject = (name: string) => objects.get(name);
 
 /** Apply the steps of `schemas` that `db` lacks, in one transaction, with how far each got. */
 export async function apply(db: Connection, schemas: readonly Schema[]) {
-  if ((await behind(db, schemas)).length === 0) return;
-  await db.transaction(async (tx) => {
-    // Again, now that the transaction holds the session: a call before it
-    // may have applied them.
-    for (const { schema, done } of await behind(tx, schemas)) {
-      for (const step of schema.steps.slice(done)) {
-        await (typeof step === 'string' ? tx.execute(step) : step(tx));
-      }
-      tx.setRecord(recordOf(schema.name), new TextEncoder().encode(String(schema.steps.length)));
-    }
-  });
+  if (behind(await appliedIn(db), schemas).length === 0) return;
+  // Again in the transaction, which holds the session: a call before it may
+  // have applied them.
+  await db.transaction((tx) => applyIn(tx, schemas));
 }
 
-/** The schemas `db` lacks steps of, with how many it has. */
-async function behind(db: Connection | ConnectionTransaction, schemas: readonly Schema[]) {
-  const applied = await Promise.all(
-    schemas.map(async (schema) => {
-      const record = await db.record(recordOf(schema.name));
-      return { schema, done: record.length === 0 ? 0 : Number(new TextDecoder().decode(record)) };
-    }),
+/** Apply the steps of `schemas` that the transaction `tx` lacks, and record how far each got. */
+export async function applyIn(tx: ConnectionTransaction, schemas: readonly Schema[]) {
+  const applied = await appliedIn(tx);
+  const lacking = behind(applied, schemas);
+  if (lacking.length === 0) return;
+  for (const schema of lacking) {
+    for (const step of schema.steps.slice(applied[schema.name] ?? 0)) {
+      await (typeof step === 'string' ? tx.execute(step) : step(tx));
+    }
+    applied[schema.name] = schema.steps.length;
+  }
+  tx.setRecord(RECORD, new TextEncoder().encode(JSON.stringify(applied)));
+}
+
+/** The schemas of `schemas` that `applied` lacks steps of. */
+const behind = (applied: Applied, schemas: readonly Schema[]) =>
+  schemas.filter((schema) => (applied[schema.name] ?? 0) < schema.steps.length);
+
+/**
+ * Empty the database in the transaction `tx`: drop every table, view, index
+ * and trigger, and forget every schema, then apply `schemas` again. Its
+ * other records (the outbox) stay. It commits with `tx`: what `tx` writes
+ * after it are the new database's first rows.
+ */
+export async function dropAll(tx: ConnectionTransaction, schemas: readonly Schema[]) {
+  const made = await tx.query<{ type: string; name: string }>(
+    "SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
   );
-  return applied.filter(({ schema, done }) => done < schema.steps.length);
+  // A trigger or view may name a table; an index goes with its table.
+  for (const type of ['trigger', 'view', 'table']) {
+    for (const { name } of made.filter((m) => m.type === type)) {
+      await tx.execute(`DROP ${type.toUpperCase()} IF EXISTS "${name.replaceAll('"', '""')}"`);
+    }
+  }
+  tx.setRecord(RECORD, new Uint8Array());
+  await applyIn(tx, schemas);
 }

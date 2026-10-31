@@ -15,7 +15,7 @@
 // OPENAI_API_KEY).
 //
 // It runs `work` over a database of the key's own, beside `ctx.db`
-// (`databaseOf`): OpenCode's tables are alone there (db.ts), as OpenCode
+// (`database`): OpenCode's tables are alone there (db.ts), as OpenCode
 // boots only on a database that is empty or its own, and each OpenCode
 // transaction is an SQL transaction in it, stored in order with everything
 // else the handler does. `ctx.db` keeps the conversation's log, and the
@@ -36,7 +36,7 @@
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
 import * as restate from 'restate-objects';
-import { databaseOf } from 'restate-objects/internal';
+import { database } from 'restate-objects/internal';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
@@ -468,7 +468,7 @@ export const withOpenCode = async <T>(
     },
     has: (id) => inSession(host, messageIdOf(id)),
   };
-  const host = await openOpenCode(databaseOf(ctx.db, DATABASE), fence, {
+  const host = await openOpenCode(database(ctx.db, DATABASE), fence, {
     plugins: [
       ...plugins,
       steeringPlugin(ctx, steerable, fail),
