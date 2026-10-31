@@ -85,6 +85,11 @@ export const handlers = {
 export const ledger = restate.sessionObject({
   name: 'Ledger',
   handlers,
+  views: {
+    /** The transfers' ids, in the order they were made. */
+    transfers: async (ctx) =>
+      (await ctx.db.query<{ id: string }>('SELECT id FROM transfers ORDER BY rowid')).map((t) => t.id),
+  },
   options: {
     // Without end: the server pauses an invocation after its default attempts.
     retryPolicy: { initialInterval: 50, maxInterval: 500, maxAttempts: 100_000 },

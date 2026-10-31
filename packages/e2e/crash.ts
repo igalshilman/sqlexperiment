@@ -371,6 +371,14 @@ for (const [id, answer] of paid) {
 }
 
 const audit = await call<Audit>('Ledger/bank/audit');
+if (audit.transfers !== AGENTS.length * SESSIONS * PROMPTS) {
+  // Which sessions moved money more often than they were asked to.
+  const ids = await call<string[]>('Ledger/bank/transfers');
+  const bySession = Map.groupBy(ids, (id) => id.split('/').slice(0, 2).join('/'));
+  for (const [session, made] of bySession) {
+    if (made.length !== PROMPTS) console.error(`${session}: ${made.length} transfers: ${made.join(', ')}`);
+  }
+}
 assert.deepEqual(audit, {
   accounts: ACCOUNTS,
   total: ACCOUNTS * OPENING,
