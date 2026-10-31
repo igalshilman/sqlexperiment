@@ -12,7 +12,7 @@ on:
     paths: &paths
       - packages/examples/advanced/factory/**
       - packages/examples/package.json
-      - packages/objects/**
+      - packages/sessions/**
       - packages/agents/**
       - package.json
       - pnpm-workspace.yaml

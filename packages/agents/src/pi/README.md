@@ -4,7 +4,7 @@
 durable agent harness: it commits conversations, model turns and tool calls
 to storage, and resumes unfinished work when the storage is opened again.
 Here its storage is the agent's SQL database, in the Restate virtual object
-([SQL in Restate virtual objects](../../../objects/README.md)).
+([SQL in Restate virtual objects](../../../sessions/README.md)).
 
 ## Use
 
@@ -100,6 +100,6 @@ which needs no key (`pnpm --filter restate-agents test pi`, from the repository 
 - [`test/pi.test.ts`](../../test/pi.test.ts): the chat,
   its system prompt, `messages`, and sub-agents.
 - [`test/pi.ts`](../../test/pi.ts): the bank agent,
-  whose tools move money in the [ledger](../../../objects/test/ledger.ts)
+  whose tools move money in the [ledger](../../../sessions/test/ledger.ts)
   with the tool call id as the transfer id, through crashes in
   [the crash test](../../../e2e/crash.ts) (`pnpm --filter e2e crash`).

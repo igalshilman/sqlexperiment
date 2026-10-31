@@ -12,7 +12,7 @@
  *   curl localhost:8080/account/bob/balance                                            # 30, once the send arrived
  *   curl localhost:8080/account/alice/transfer --json '{"to": "bob", "amount": 500}'   # fails, and sends nothing
  */
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 
 const balanceOf = async (db: restate.DatabaseReader) =>
   (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;

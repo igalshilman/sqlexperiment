@@ -1,0 +1,16 @@
+{
+  "name": "restate-sessions-darwin-arm64",
+  "version": "0.1.0",
+  "private": true,
+  "description": "restate-sessions' addon for macOS on Apple silicon: installed with restate-sessions, on that platform alone",
+  "files": [
+    "sessions.node"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "sessions.node"
+}

@@ -3,7 +3,7 @@
 // anything on the way out. Its model is the teller (../fakes/opencode.ts).
 // `pnpm --filter restate-agents test opencode`.
 import { describe, expect, it, vi } from 'vitest';
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 import {
   afterCancel,
   cancelledTransfer,

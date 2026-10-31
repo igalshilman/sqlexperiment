@@ -2,12 +2,12 @@
 // agent's handler with the `signals` object, and a conversation with a ledger
 // that records its calls, through crashes of the handler.
 import { expect } from 'vitest';
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 import { type Steer, tool, type Tool } from 'restate-agents';
-import { type AttemptContext, contextOf } from 'restate-session-objects/internal';
-import { type AttemptOptions, sqlAttempt as baseAttempt } from 'restate-session-objects/test/support';
+import { type AttemptContext, contextOf } from 'restate-sessions/internal';
+import { type AttemptOptions, sqlAttempt as baseAttempt } from 'restate-sessions/test/support';
 import { z } from 'zod';
-import type { Audit, Transfer } from 'restate-session-objects/test/ledger';
+import type { Audit, Transfer } from 'restate-sessions/test/ledger';
 
 /**
  * The `signals` object of an agent's tests, as far as steering and following
@@ -66,7 +66,7 @@ const made = (c: Made): Made => ({
 });
 
 /**
- * An attempt of a handler, restate-session-objects's own, with the `signals` object
+ * An attempt of a handler, restate-sessions's own, with the `signals` object
  * of steering over `map`: `ctx`, a handler's context, and `view`, a view's.
  * `route` answers the calls to anything but `signals`.
  */

@@ -10,7 +10,7 @@
  *   curl localhost:8080/wallet/alice/add --json -25   # fails: the balance would go below zero
  *   curl localhost:8080/wallet/alice/history          # [10]: the failed change left no trace
  */
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 
 const wallet = restate.sessionObject({
   name: 'wallet',

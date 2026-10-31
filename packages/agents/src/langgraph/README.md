@@ -3,7 +3,7 @@
 [LangGraph](https://langchain-ai.github.io/langgraphjs/) runs an agent as a
 graph of steps and stores a checkpoint after each one, so a run can resume
 where it stopped. Here the checkpoints are in the agent's SQL database
-([SQL in Restate virtual objects](../../../objects/README.md)), and the thread is
+([SQL in Restate virtual objects](../../../sessions/README.md)), and the thread is
 the object's key.
 
 ## Use

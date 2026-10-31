@@ -1,7 +1,7 @@
 packages:
   - packages/*
-  # restate-session-objects' addon, a package per platform.
-  - packages/objects/npm/*
+  # restate-sessions' addon, a package per platform.
+  - packages/sessions/npm/*
 # Dependencies whose install scripts run (npm ran them all).
 allowBuilds:
   '@google/genai': true

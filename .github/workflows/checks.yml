@@ -23,7 +23,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/objects/native
+          workspaces: packages/sessions/native
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -34,7 +34,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm -r --workspace-concurrency=1 test
 
-  # The addon's Rust tests (`pnpm --filter restate-session-objects test:rust`).
+  # The addon's Rust tests (`pnpm --filter restate-sessions test:rust`).
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -42,5 +42,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/objects/native
-      - run: cargo test --locked --release --manifest-path packages/objects/native/Cargo.toml
+          workspaces: packages/sessions/native
+      - run: cargo test --locked --release --manifest-path packages/sessions/native/Cargo.toml

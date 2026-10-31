@@ -1,0 +1,87 @@
+[package]
+name = "restate-sessions"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Node.js addon of restate-sessions: an object's SQLite-compatible database, kept in its Restate state"
+
+# Its own workspace.
+[workspace]
+
+[lib]
+# cdylib: the addon; rlib: the benchmarks, with `bench`.
+crate-type = ["cdylib", "rlib"]
+bench = false
+
+[features]
+default = []
+# The storage, public for the benchmarks, with its fault-injecting stores, the
+# monitor and the latency simulator (those always in tests); no addon then.
+bench = []
+# Blobs in an object store (S3, GCS, Azure, a directory): `state::blobs::ObjectStoreBlobs`.
+# Enable the backend on `object_store` itself (its feature `aws` for S3).
+object-store = ["dep:object_store"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
+napi-derive = "3"
+turso_core = { version = "=0.8.2", default-features = false, features = ["fs", "uuid", "json"] }
+futures = "0.3"
+bytes = "1.10"
+# The engine retains an owned schema lock across open-time I/O. Allow that
+# guard to move with the host future between executor threads, without a worker.
+parking_lot = { version = "0.12", features = ["send_guard"] }
+# Pages: zstd frames, a delta against the page before as the reference prefix.
+zstd-safe = { version = "7.2", default-features = false, features = ["std"] }
+# Pinned with its subcrates in Cargo.lock: 0.22.4 to 0.22.6 print a debug line
+# to stdout whenever a file device opens.
+foyer = "=0.22.3"
+# foyer's disk tier runs on tokio; the cache starts a small runtime when the host has none.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+object_store = { version = "0.14", optional = true, default-features = false }
+
+[lints.rust]
+# Public is what the crate root exports; anything else says how far it reaches.
+unreachable_pub = "warn"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.dev]
+debug = 0
+
+# The addon a package ships (pnpm build:dist): smaller (18 MB, not 28) and
+# whole-program optimized, at minutes more to build.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.test]
+debug = 0
+
+[[bench]]
+name = "amplification"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "small_databases"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "flush_costs"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "read_latency"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "cache_cpu"
+harness = false
+required-features = ["bench"]

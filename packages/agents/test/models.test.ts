@@ -11,8 +11,8 @@ import * as pi from 'restate-agents/pi';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Teller } from './fakes/langgraph.ts';
-import { invoke } from 'restate-session-objects/internal';
-import { fakeContext } from 'restate-session-objects/test/support';
+import { invoke } from 'restate-sessions/internal';
+import { fakeContext } from 'restate-sessions/test/support';
 import { conversation } from './support.ts';
 
 /** The Anthropic SDK's error of a wrong API key. */
@@ -95,7 +95,7 @@ describe('a wrong model', () => {
   });
 
   it("that pi does not know fails as terminal outside an agent's handlers too", async () => {
-    // As in a handler of restate-session-objects' own: no chatHandler or object() maps it.
+    // As in a handler of restate-sessions' own: no chatHandler or object() maps it.
     const ctx = {} as Parameters<typeof pi.withPi>[0];
     const failed = pi.withPi(ctx, { model: 'nobody/gpt-6-sol' }, async () => 'answered');
     await expect(failed).rejects.toBeInstanceOf(restate.TerminalError);

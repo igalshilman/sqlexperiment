@@ -17,8 +17,8 @@
 // is not its result: OpenCode gives the call it interrupted one, and the
 // model makes it again. Once stored, the model has its result, and an
 // identical call it makes later is a call of its own.
-import type * as restate from 'restate-session-objects';
-import { Schema } from 'restate-session-objects/internal';
+import type * as restate from 'restate-sessions';
+import { Schema } from 'restate-sessions/internal';
 import { randomUUID } from 'node:crypto';
 
 /** A tool's call: the tool, its input as JSON, the ids it was made with (the first is its own), and the attempt that last made it. */

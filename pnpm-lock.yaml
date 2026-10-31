@@ -183,9 +183,9 @@ importers:
       effect:
         specifier: 4.0.1
         version: 4.0.1
-      restate-session-objects:
+      restate-sessions:
         specifier: workspace:*
-        version: link:../objects
+        version: link:../sessions
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -204,9 +204,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-session-objects:
+      restate-sessions:
         specifier: workspace:*
-        version: link:../objects
+        version: link:../sessions
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -247,9 +247,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-session-objects:
+      restate-sessions:
         specifier: workspace:*
-        version: link:../objects
+        version: link:../sessions
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -261,7 +261,7 @@ importers:
         specifier: 8.3.4
         version: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)
 
-  packages/objects:
+  packages/sessions:
     dependencies:
       '@restatedev/restate-sdk':
         specifier: 1.17.4
@@ -270,21 +270,21 @@ importers:
         specifier: 1.17.4
         version: 1.17.4
     optionalDependencies:
-      restate-session-objects-darwin-arm64:
+      restate-sessions-darwin-arm64:
         specifier: workspace:*
         version: link:npm/darwin-arm64
-      restate-session-objects-linux-arm64-gnu:
+      restate-sessions-linux-arm64-gnu:
         specifier: workspace:*
         version: link:npm/linux-arm64-gnu
-      restate-session-objects-linux-x64-gnu:
+      restate-sessions-linux-x64-gnu:
         specifier: workspace:*
         version: link:npm/linux-x64-gnu
 
-  packages/objects/npm/darwin-arm64: {}
+  packages/sessions/npm/darwin-arm64: {}
 
-  packages/objects/npm/linux-arm64-gnu: {}
+  packages/sessions/npm/linux-arm64-gnu: {}
 
-  packages/objects/npm/linux-x64-gnu: {}
+  packages/sessions/npm/linux-x64-gnu: {}
 
   packages/template:
     dependencies:
@@ -300,9 +300,9 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-session-objects:
+      restate-sessions:
         specifier: workspace:*
-        version: link:../objects
+        version: link:../sessions
       zod:
         specifier: 4.6.5
         version: 4.6.5

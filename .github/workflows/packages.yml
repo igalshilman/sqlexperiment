@@ -1,6 +1,6 @@
-# The packages as published: restate-session-objects' addon built for each platform it
-# ships (packages/objects/src/platform.ts), each into its package
-# (restate-session-objects-<platform>), then every package packed and installed with
+# The packages as published: restate-sessions' addon built for each platform it
+# ships (packages/sessions/src/platform.ts), each into its package
+# (restate-sessions-<platform>), then every package packed and installed with
 # npm on each platform (packages/e2e/packaging.ts).
 #
 # The tarballs are the run's `packages` artifact; nothing is published yet.
@@ -11,7 +11,7 @@ on:
   push:
     branches: [main]
     paths: &paths
-      - packages/objects/**
+      - packages/sessions/**
       - packages/agents/**
       - packages/e2e/packaging.ts
       - packages/e2e/package.json
@@ -46,13 +46,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/objects/native
-      - run: cargo build --locked --profile dist --manifest-path packages/objects/native/Cargo.toml
-      - run: cp packages/objects/native/target/dist/librestate_session_objects.$([ "$RUNNER_OS" = macOS ] && echo dylib || echo so) objects.node
+          workspaces: packages/sessions/native
+      - run: cargo build --locked --profile dist --manifest-path packages/sessions/native/Cargo.toml
+      - run: cp packages/sessions/native/target/dist/librestate_sessions.$([ "$RUNNER_OS" = macOS ] && echo dylib || echo so) sessions.node
       - uses: actions/upload-artifact@v4
         with:
           name: addon-${{ matrix.platform }}
-          path: objects.node
+          path: sessions.node
           if-no-files-found: error
 
   # Every package packed, each platform's addon in its own.
@@ -73,9 +73,9 @@ jobs:
           path: addons
       - name: Each addon into its package
         run: |
-          for addon in addons/addon-*; do mv "$addon/objects.node" "packages/objects/npm/${addon#addons/addon-}/"; done
-          for package in packages/objects/npm/*/; do test -f "$package/objects.node" || { echo "no addon in $package"; exit 1; }; done
-      - run: pnpm --filter restate-session-objects --filter restate-agents --filter './packages/objects/npm/*' pack --pack-destination "$PWD/packages-out"
+          for addon in addons/addon-*; do mv "$addon/sessions.node" "packages/sessions/npm/${addon#addons/addon-}/"; done
+          for package in packages/sessions/npm/*/; do test -f "$package/sessions.node" || { echo "no addon in $package"; exit 1; }; done
+      - run: pnpm --filter restate-sessions --filter restate-agents --filter './packages/sessions/npm/*' pack --pack-destination "$PWD/packages-out"
       - run: ls -l packages-out
       - uses: actions/upload-artifact@v4
         with:

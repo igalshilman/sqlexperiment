@@ -3,7 +3,7 @@
 // way out of a crashed attempt. `pnpm --filter restate-agents test langgraph`. Its model is the teller (../fakes/langgraph.ts).
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
-import type { ViewContext } from 'restate-session-objects';
+import type { ViewContext } from 'restate-sessions';
 import { CANCELLED, REFUSED, UNANSWERED } from 'restate-agents';
 import {
   afterCancel,

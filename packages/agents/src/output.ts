@@ -11,7 +11,7 @@
 // answer again; then the prompt fails (a terminal error), saying how the
 // reply starts. A retried attempt resumes the conversation, so it reads the
 // same reply.
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 import { z } from 'zod';
 
 /** What a prompt answers: its text, or with `output`, the value of the agent's reply. */

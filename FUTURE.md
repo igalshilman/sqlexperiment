@@ -8,8 +8,8 @@ it waits on, and where the code marks it (`TODO:` comments).
 **Waits on:** a Restate release with service protocol v8, and a TypeScript
 SDK release that exposes its ephemeral get.
 
-**Now:** the SQL store of `restate-session-objects` reads the object's state with
-regular, journaled gets (`objectStore` in `packages/objects/src/session.ts`:
+**Now:** the SQL store of `restate-sessions` reads the object's state with
+regular, journaled gets (`objectStore` in `packages/sessions/src/session.ts`:
 `ctx.get`). Restate 1.8.0, the release the tests run
 (`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
 at most.
@@ -49,12 +49,12 @@ every tail entry and pack, and a session's first read is the head
 (`v22/head`): a round trip, cached or not.
 
 **Then:** with lazy state still on, whitelist `v22/head` (`HEAD_KEY`, in
-`packages/objects/native/src/state/format.rs`); the server ships it with the
+`packages/sessions/native/src/state/format.rs`); the server ships it with the
 invocation (best effort, within its eager-state size limit), and the open
 starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be
-listed. The options are `sqlOptions` in `restate-session-objects`
-(`packages/objects/src/object.ts`), which every session object has; its
+listed. The options are `sqlOptions` in `restate-sessions`
+(`packages/sessions/src/object.ts`), which every session object has; its
 `TODO:` marks them.
 
 ## Concurrent awaits in the TypeScript SDK
@@ -62,8 +62,8 @@ listed. The options are `sqlOptions` in `restate-session-objects`
 **Waits on:** an SDK release whose explicit recovery lets a handler
 await concurrently.
 
-**Now:** `restate-session-objects` drives a SQL handler's promises with a selector of its
-own (`packages/objects/src/selector.ts`), which takes over the
+**Now:** `restate-sessions` drives a SQL handler's promises with a selector of its
+own (`packages/sessions/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
 package pins `@restatedev/restate-sdk` 1.17.4. The published SDK lets one
 awaited promise wait for the server at a time
@@ -84,4 +84,4 @@ asks for transparent huge pages: where the kernel grants them on request
 2 MiB page to be zeroed, up to 15 ms on a virtual machine. The Node.js addon
 runs in its users' processes, which it leaves alone.
 
-**Then:** open the engine without huge pages in the addon's `sql` module (`open_engine`, `packages/objects/native/src/sql`).
+**Then:** open the engine without huge pages in the addon's `sql` module (`open_engine`, `packages/sessions/native/src/sql`).

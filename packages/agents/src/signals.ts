@@ -6,8 +6,8 @@
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
-import type { SessionContext } from 'restate-session-objects';
-import { sdk as restate } from 'restate-session-objects/internal';
+import type { SessionContext } from 'restate-sessions';
+import { sdk as restate } from 'restate-sessions/internal';
 import type { Turn } from './common.ts';
 import type { Status, Stopped } from './object.ts';
 

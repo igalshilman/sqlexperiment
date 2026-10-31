@@ -9,12 +9,12 @@
 //
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
-import type * as restate from 'restate-session-objects';
+import type * as restate from 'restate-sessions';
 import { object, signals } from 'restate-agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
-import { serveIfMain } from 'restate-session-objects/test/faults';
-import { ledger } from 'restate-session-objects/test/ledger';
+import { serveIfMain } from 'restate-sessions/test/faults';
+import { ledger } from 'restate-sessions/test/ledger';
 import * as pi from 'restate-agents/pi';
 
 /** The bank tools of an invocation: they reach the ledger through `ctx`. */

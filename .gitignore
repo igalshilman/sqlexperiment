@@ -1,6 +1,6 @@
 target/
 # The addon, built (pnpm build), and the packages' JavaScript (pnpm pack).
-packages/objects/npm/*/objects.node
+packages/sessions/npm/*/sessions.node
 dist/
 node_modules/
 .env

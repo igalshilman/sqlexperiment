@@ -7,7 +7,7 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
 
 - [`crash.ts`](crash.ts): the agents of
   [`restate-agents`'s tests](../agents/test) and the SQL objects of
-  [`restate-session-objects`'s](../objects/test) (the ledger and the shop), through
+  [`restate-sessions`'s](../sessions/test) (the ledger and the shop), through
   crashes: the services abort at random, and the server is killed twice
   (`pnpm --filter e2e crash`). The agents' models are the scripted ones of
   [`restate-agents/test/fakes`](../agents/test/fakes/fakes.ts).

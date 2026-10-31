@@ -118,7 +118,7 @@
     "@opencode/server": "2.0.32",
     "@restatedev/restate-sdk": "1.17.4",
     "effect": "4.0.1",
-    "restate-session-objects": "workspace:*",
+    "restate-sessions": "workspace:*",
     "zod": "4.6.5"
   },
   "peerDependencies": {
@@ -148,7 +148,7 @@
     "@opencode/sdk": "2.0.32",
     "@opencode/server": "2.0.32",
     "effect": "4.0.1",
-    "restate-session-objects": "workspace:^",
+    "restate-sessions": "workspace:^",
     "zod": "^4.6.5"
   },
   "peerDependenciesMeta": {

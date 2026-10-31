@@ -27,7 +27,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { AssistantEntry, createRegistry, defineExtension, Harness, section } from '@earendil-works/pi-durable';
-import { TerminalError } from 'restate-session-objects';
+import { TerminalError } from 'restate-sessions';
 import { object, serve } from 'restate-agents';
 import { openSqlKvStorage } from 'restate-agents/pi/storage';
 

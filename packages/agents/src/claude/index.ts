@@ -23,8 +23,8 @@
 //   model's last reply, and a retried attempt returns it.
 // - A reply cut off at `maxTokens`, or declined, ends the prompt: its tool
 //   calls do not run, and the handler fails with a terminal error.
-import * as restate from 'restate-session-objects';
-import type { Database } from 'restate-session-objects';
+import * as restate from 'restate-sessions';
+import type { Database } from 'restate-sessions';
 import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {

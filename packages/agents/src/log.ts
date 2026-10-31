@@ -14,8 +14,8 @@
 // got to: the next conversation's ids and cursors go on from there (its
 // start, a row of `restate_agent_log_start`), so a client following it reads
 // on, and drops the messages before `first`.
-import type { Database, DatabaseReader, DatabaseWriter } from 'restate-session-objects';
-import { Schema } from 'restate-session-objects/internal';
+import type { Database, DatabaseReader, DatabaseWriter } from 'restate-sessions';
+import { Schema } from 'restate-sessions/internal';
 import type { ChatMessage, Messages, MessagesRequest } from './common.ts';
 
 const TABLE = 'restate_agent_log';

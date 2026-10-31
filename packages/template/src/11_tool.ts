@@ -10,7 +10,7 @@
  *   node src/11_tool.ts   # and register it (see 01)
  *   curl localhost:8080/timekeeper/alice/chat -d 'What time is it in Lisbon and in Tokyo?'
  */
-import { TerminalError } from 'restate-session-objects';
+import { TerminalError } from 'restate-sessions';
 import { serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';

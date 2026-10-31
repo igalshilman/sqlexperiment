@@ -2,7 +2,7 @@
 // is a subpath (restate-agents/pi, /opencode, /langgraph, /claude,
 // /deepseek); this is what they share: virtual objects with SQL, tools for
 // any of them, and the tools that are Restate itself.
-import { sdk as restate } from 'restate-session-objects/internal';
+import { sdk as restate } from 'restate-sessions/internal';
 import { signals } from './signals.ts';
 
 export {

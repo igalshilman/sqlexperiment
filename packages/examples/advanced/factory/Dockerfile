@@ -17,9 +17,9 @@
 # The SQL addon, for Linux.
 FROM rust:1-bookworm AS addon
 WORKDIR /src
-COPY packages/objects/native packages/objects/native
-RUN cd packages/objects/native && cargo build --locked --release \
-  && cp target/release/librestate_session_objects.so objects.node
+COPY packages/sessions/native packages/sessions/native
+RUN cd packages/sessions/native && cargo build --locked --release \
+  && cp target/release/librestate_sessions.so sessions.node
 
 # The workspace's packages that the examples use, laid out as in the
 # repository: the pnpm workspace at its root.
@@ -27,10 +27,10 @@ FROM node:24-bookworm AS deps
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/objects packages/objects
-# Into the package of the image's platform (packages/objects/src/platform.ts).
-COPY --from=addon /src/packages/objects/native/objects.node /tmp/objects.node
-RUN mv /tmp/objects.node packages/objects/npm/linux-$(node -p process.arch)-gnu/
+COPY packages/sessions packages/sessions
+# Into the package of the image's platform (packages/sessions/src/platform.ts).
+COPY --from=addon /src/packages/sessions/native/sessions.node /tmp/sessions.node
+RUN mv /tmp/sessions.node packages/sessions/npm/linux-$(node -p process.arch)-gnu/
 COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
 # With development dependencies: restate-agents' harnesses are its optional

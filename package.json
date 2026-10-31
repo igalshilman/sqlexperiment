@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter restate-session-objects build",
-    "test": "pnpm -r --workspace-concurrency=1 test && pnpm --filter restate-session-objects test:rust",
+    "build": "pnpm --filter restate-sessions build",
+    "test": "pnpm -r --workspace-concurrency=1 test && pnpm --filter restate-sessions test:rust",
     "typecheck": "tsc -p . && tsc -p packages/examples && tsc -p packages/examples/ui && tsc -p packages/examples/advanced/factory/board",
-    "lint": "pnpm typecheck && OXLINT_TSGOLINT_PATH=node_modules/.bin/tsgolint oxlint --type-aware packages && oxfmt --check && pnpm --filter restate-session-objects lint:rust",
-    "format": "oxfmt && pnpm --filter restate-session-objects format:rust"
+    "lint": "pnpm typecheck && OXLINT_TSGOLINT_PATH=node_modules/.bin/tsgolint oxlint --type-aware packages && oxfmt --check && pnpm --filter restate-sessions lint:rust",
+    "format": "oxfmt && pnpm --filter restate-sessions format:rust"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",

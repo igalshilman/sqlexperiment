@@ -8,10 +8,10 @@
 // A framework that gives a tool call cut off by a crash a new id (OpenCode,
 // the DeepSeek Harness) has the model retry it with `retryOf`, the id of the
 // call it retries.
-import type * as restate from 'restate-session-objects';
+import type * as restate from 'restate-sessions';
 import { tool } from 'restate-agents';
 import { z } from 'zod';
-import { ledger } from 'restate-session-objects/test/ledger';
+import { ledger } from 'restate-sessions/test/ledger';
 
 /** The ledger. */
 const books = (ctx: restate.SessionContext, idempotencyKey: string) => ctx.rpc(ledger, 'bank', { idempotencyKey });

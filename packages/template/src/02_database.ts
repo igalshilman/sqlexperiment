@@ -11,7 +11,7 @@
  *   curl localhost:8080/greeter/alice/greet   # "Hello, alice! (greeting 2)"
  *   curl localhost:8080/greeter/bob/greet     # "Hello, bob! (greeting 1)": another key, another database
  */
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 
 const greeter = restate.sessionObject({
   name: 'greeter',

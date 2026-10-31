@@ -5,8 +5,8 @@
 // ../faults.ts).
 import { object, signals } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
-import { serveIfMain } from 'restate-session-objects/test/faults';
-import { ledger } from 'restate-session-objects/test/ledger';
+import { serveIfMain } from 'restate-sessions/test/faults';
+import { ledger } from 'restate-sessions/test/ledger';
 import { bank } from './bank.ts';
 
 /** Answer a message, once per invocation. */

@@ -7,9 +7,9 @@ import { signals } from 'restate-agents';
 type Services = restate.ServeOptions['services'];
 
 const groups: Record<string, () => Promise<Services>> = {
-  ledger: async () => [(await import('restate-session-objects/test/ledger')).ledger],
+  ledger: async () => [(await import('restate-sessions/test/ledger')).ledger],
   shop: async () => {
-    const { warehouse, orders } = await import('restate-session-objects/test/shop');
+    const { warehouse, orders } = await import('restate-sessions/test/shop');
     return [warehouse, orders];
   },
   agent: async () => [(await import('restate-agents/test/pi')).agent],

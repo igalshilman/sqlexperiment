@@ -22,7 +22,7 @@
 //
 // Environment: PORT, MODEL (see restate-agents/pi) with its provider's
 // API key, and WORKSPACE.
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';

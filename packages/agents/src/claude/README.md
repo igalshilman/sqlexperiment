@@ -5,7 +5,7 @@ The Anthropic SDK's tool runner (`client.beta.messages.toolRunner` in
 is a light agent harness: the tool-calling loop, in the process, with nothing
 stored. It keeps the conversation in its params, so an agent built on it is
 durable when the conversation is: here it is in the agent's SQL database
-([SQL in Restate virtual objects](../../../objects/README.md)).
+([SQL in Restate virtual objects](../../../sessions/README.md)).
 
 It is lighter than the Claude Agent SDK, which runs Claude Code as a
 subprocess. Claude Code's own tools (bash, read, write, edit, glob, grep)
@@ -79,6 +79,6 @@ The tests run on a scripted model, [`test/fakes/claude.ts`](../../test/fakes/cla
   any of its state requests, and abandon it, keeping what it committed; and
   `messages`.
 - [`test/claude.ts`](../../test/claude.ts): the bank
-  agent, whose tools move money in the [ledger](../../../objects/test/ledger.ts),
+  agent, whose tools move money in the [ledger](../../../sessions/test/ledger.ts),
   through crashes in [the crash test](../../../e2e/crash.ts)
   (`pnpm --filter e2e crash`): every message moves money exactly once.

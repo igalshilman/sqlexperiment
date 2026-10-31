@@ -9,7 +9,7 @@
  *   curl localhost:8080/inventory/apples/restock --json 12
  *   curl localhost:8080/clerk/alice/chat -d 'Do we have apples? And pears?'
  */
-import * as restate from 'restate-session-objects';
+import * as restate from 'restate-sessions';
 import { call, serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
