@@ -261,7 +261,8 @@ export function lazyDatabase(opener: () => Promise<Database>): Database {
   sessions.set(lazy, async (schemas) => {
     const inner = await db();
     const ensure = sessions.get(inner);
-    if (ensure === undefined) throw new TerminalError("lazyDatabase opens a handler's ctx.db, or a database of asDatabase");
+    if (ensure === undefined)
+      throw new TerminalError("lazyDatabase opens a handler's ctx.db, or a database of asDatabase");
     await ensure(schemas);
   });
   return lazy;

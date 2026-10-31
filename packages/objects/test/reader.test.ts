@@ -24,9 +24,7 @@ describe("a shared handler's ctx.db", () => {
   it('refuses a write, which no attempt would keep', async () => {
     const { reader } = await object();
     const first = reader();
-    await expect(first.end(() => first.db.execute('INSERT INTO numbers VALUES (99)'))).rejects.toThrow(
-      /query_only/,
-    );
+    await expect(first.end(() => first.db.execute('INSERT INTO numbers VALUES (99)'))).rejects.toThrow(/query_only/);
     const second = reader('again');
     expect(await second.end(() => second.db.values('SELECT n FROM numbers'))).toEqual([[1]]);
   });

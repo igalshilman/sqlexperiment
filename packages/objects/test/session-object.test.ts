@@ -2,7 +2,7 @@
 // contexts, transactions with sends, and the types users write against.
 import assert from 'node:assert/strict';
 import * as restate from 'restate-session-objects';
-import { invoke, reset, Schema } from 'restate-session-objects/internal';
+import { cancelCalls, invoke, reset, Schema } from 'restate-session-objects/internal';
 import { expectTypeOf, test, vi } from 'vitest';
 import { fakeContext, type Made } from './support.ts';
 
@@ -151,11 +151,13 @@ test('an object or workflow needs its key, a service has none', async () => {
   });
   await assert.rejects(
     invoke(wrong, 'noKey', fakeContext({ map: new Map(), service: 'wrong' })),
-    (error: Error) => error instanceof restate.TerminalError && /account is an object: call it with its key/.test(error.message),
+    (error: Error) =>
+      error instanceof restate.TerminalError && /account is an object: call it with its key/.test(error.message),
   );
   await assert.rejects(
     invoke(wrong, 'key', fakeContext({ map: new Map(), service: 'wrong' })),
-    (error: Error) => error instanceof restate.TerminalError && /pricing is a service: call it without a key/.test(error.message),
+    (error: Error) =>
+      error instanceof restate.TerminalError && /pricing is a service: call it without a key/.test(error.message),
   );
 });
 
@@ -337,18 +339,12 @@ test('reset empties the database in a transaction, with the schemas applied agai
     items: { n: 0 },
     starts: [{ at: 7 }],
     library: [],
-    tables: [
-      { name: 'child' },
-      { name: 'items' },
-      { name: 'parent' },
-      { name: 'restate_library' },
-      { name: 'starts' },
-    ],
+    tables: [{ name: 'child' }, { name: 'items' }, { name: 'parent' }, { name: 'restate_library' }, { name: 'starts' }],
   });
   assert.deepEqual(await invoke(resettable, 'sqliteNamed', ctx()), []);
   // A view's write fails, rather than vanish.
   await assert.rejects(
-    invoke(resettable, 'writing', fakeContext({ map, service: 'resettable', shared: true })),
+    invoke(resettable, 'writing', ctx()),
     (error: Error) => error instanceof restate.TerminalError && /query_only/.test(error.message),
   );
   assert.deepEqual(
@@ -372,4 +368,23 @@ test('reset empties the database in a transaction, with the schemas applied agai
       { name: 'starts' },
     ],
   });
+});
+
+test('cancelled and cancelCalls take the ctx of a handler with explicitCancellation', async () => {
+  const cancelling = restate.sessionObject({
+    name: 'cancelling',
+    handlers: {
+      implicit: async (ctx) => cancelCalls(ctx),
+      explicit: { explicitCancellation: true, handler: async (ctx) => cancelCalls(ctx) },
+    },
+  });
+  await assert.rejects(
+    invoke(cancelling, 'implicit', fakeContext({ map: new Map(), service: 'cancelling' })),
+    (error: Error) => error instanceof restate.TerminalError && /explicitCancellation: true/.test(error.message),
+  );
+  // The fake context has no calls to cancel: past the check, it fails otherwise.
+  await assert.rejects(
+    invoke(cancelling, 'explicit', fakeContext({ map: new Map(), service: 'cancelling' })),
+    (error: Error) => !error.message.includes('explicitCancellation'),
+  );
 });

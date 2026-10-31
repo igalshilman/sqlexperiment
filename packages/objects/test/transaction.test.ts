@@ -239,7 +239,7 @@ describe('the sends of a transaction', () => {
       });
     await Promise.all(['book', 'pen', 'ink', 'cup'].map(sending));
     a.abort();
-    expect(a.sent.map(decode).sort()).toEqual(['book', 'cup', 'ink', 'pen']);
+    expect(a.sent.map(decode).toSorted((x, y) => String(x).localeCompare(String(y)))).toEqual(['book', 'cup', 'ink', 'pen']);
     expect(await o.outbox()).toEqual([]);
   });
 
@@ -256,7 +256,7 @@ describe('the sends of a transaction', () => {
           committed = Date.now();
         });
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('crashed');
     const next = o.attempt();
     await next.end(() => next.db.values('SELECT 1'));
     const [delay] = next.sent.map((s) => s.delay as number);

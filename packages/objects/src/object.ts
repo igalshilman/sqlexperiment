@@ -149,11 +149,21 @@ function readerOf(db: Database): DatabaseReader {
 /**
  * The context of a handler (or, with `view`, of a view) over the SDK's
  * context `ctx`, with the database `db`: what an attempt gets, and a test's
- * over a context of its own.
+ * over a context of its own. With `explicitCancellation`, a handler's with
+ * that option, which {@link cancelled} and {@link cancelCalls} take.
  */
-export function contextOf(ctx: AttemptContext, db: Database, view: true): ViewContext;
-export function contextOf(ctx: AttemptContext, db: Database, view?: false): SessionContext;
-export function contextOf(ctx: AttemptContext, db: Database, view = false): SessionContext | ViewContext {
+export function contextOf(ctx: AttemptContext, db: Database, options: { view: true }): ViewContext;
+export function contextOf(
+  ctx: AttemptContext,
+  db: Database,
+  options?: { view?: false; explicitCancellation?: boolean },
+): SessionContext;
+export function contextOf(
+  ctx: AttemptContext,
+  db: Database,
+  { view = false, explicitCancellation = false }: { view?: boolean; explicitCancellation?: boolean } = {},
+): SessionContext | ViewContext {
+  if (explicitCancellation) explicitlyCancelled.add(ctx);
   const rpc = rpcOf(ctx);
   const context: SessionContext | ViewContext = view
     ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(db), rpc })
@@ -169,25 +179,35 @@ export function contextOf(ctx: AttemptContext, db: Database, view = false): Sess
 }
 
 /** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
-function attempt(fn: Fn<never>, view: boolean, ctx: AttemptContext, input: unknown): Promise<unknown> {
+function attempt(
+  fn: Fn<never>,
+  { view, explicit }: { view: boolean; explicit: boolean },
+  ctx: AttemptContext,
+  input: unknown,
+): Promise<unknown> {
   const session = new Attempt(host(ctx, view));
   session.openNow();
-  const context = view ? contextOf(ctx, session.db, true) : contextOf(ctx, session.db);
+  const context = view
+    ? contextOf(ctx, session.db, { view: true })
+    : contextOf(ctx, session.db, { explicitCancellation: explicit });
   return withAttempt(() => fn(context as never, input as never), session);
 }
 
 /** `fn` as the SDK's handler: one loop drives each attempt's awaits (see selector.ts), until it ends. */
-function wrap(fn: Fn<never>, view: boolean) {
+function wrap(fn: Fn<never>, view: boolean, explicit: boolean) {
   return (ctx: restate.ObjectContext | restate.ObjectSharedContext, input: never) => {
     const unhook = hookSelector(ctx);
     const runtime = ctx as unknown as Runtime;
     runtime.invocationEndPromise.promise.catch(unhook);
-    return attempt(fn, view, ctx as unknown as AttemptContext, input).finally(unhook);
+    return attempt(fn, { view, explicit }, ctx as unknown as AttemptContext, input).finally(unhook);
   };
 }
 
 /** Each session object's handlers and views, by name: for {@link invoke}. */
-const entries = new WeakMap<object, Map<string, { fn: Fn<never>; view: boolean }>>();
+const entries = new WeakMap<object, Map<string, { fn: Fn<never>; view: boolean; explicit: boolean }>>();
+
+/** The SDK's contexts of the handlers with `explicitCancellation: true`: for {@link cancelled}. */
+const explicitlyCancelled = new WeakSet<object>();
 
 /**
  * Run handler or view `name` of `definition` for one attempt over `ctx`, a
@@ -196,7 +216,7 @@ const entries = new WeakMap<object, Map<string, { fn: Fn<never>; view: boolean }
 export function invoke(definition: { name: string }, name: string, ctx: AttemptContext, input?: unknown) {
   const entry = entries.get(definition)?.get(name);
   if (entry === undefined) throw new Error(`${definition.name}.${name} is no handler or view of a session object`);
-  return attempt(entry.fn, entry.view, ctx, input);
+  return attempt(entry.fn, entry, ctx, input);
 }
 
 /** Whether `value` is a handler of the SDK's already. */
@@ -222,9 +242,10 @@ function handlerOf(object: string, name: string, entry: unknown, view: boolean) 
     );
   }
   const opts = { ...options, ...recovery() } as HandlerOptions;
-  const made = wrap(fn as Fn<never>, view) as never;
+  const explicit = (options as HandlerOptions).explicitCancellation === true;
+  const made = wrap(fn as Fn<never>, view, explicit) as never;
   const handler = view ? restate.handlers.object.shared(opts, made) : restate.handlers.object.exclusive(opts, made);
-  return { handler, entry: { fn: fn as Fn<never>, view } };
+  return { handler, entry: { fn: fn as Fn<never>, view, explicit } };
 }
 
 /**
@@ -261,7 +282,7 @@ export function sessionObject<
   if (both.length > 0) throw new Error(`${name}: ${both.join(', ')} is a handler and a view: name one otherwise`);
   if (schema) register(name, schema);
   const sdkHandlers: Record<string, (ctx: restate.ObjectContext, input?: unknown) => Promise<unknown>> = {};
-  const own = new Map<string, { fn: Fn<never>; view: boolean }>();
+  const own = new Map<string, { fn: Fn<never>; view: boolean; explicit: boolean }>();
   for (const [view, map] of [
     [false, handlers],
     [true, views],
@@ -283,10 +304,13 @@ export function sessionObject<
   return made;
 }
 
-/** The SDK's context behind a session object's context. */
-function sdkOf(ctx: SessionContext | ViewContext) {
+/** The SDK's context behind `ctx`, a handler's with `explicitCancellation: true`. */
+function explicitOf(ctx: SessionContext, of: string) {
   const sdk = sdkContexts.get(ctx);
-  if (sdk === undefined) throw new restate.TerminalError("this takes a session object's ctx");
+  if (sdk === undefined) throw new restate.TerminalError(`${of} takes a session object's ctx`);
+  if (!explicitlyCancelled.has(sdk)) {
+    throw new restate.TerminalError(`${of} takes the ctx of a handler with explicitCancellation: true`);
+  }
   return restate.internal.asInternal(sdk);
 }
 
@@ -296,10 +320,13 @@ function sdkOf(ctx: SessionContext | ViewContext) {
  * library that stops its own work then (a model's request, say).
  */
 export const cancelled = async (ctx: SessionContext): Promise<void> => {
-  await sdkOf(ctx).cancellation();
+  await explicitOf(ctx, 'cancelled').cancellation();
 };
 
-/** Cancel the calls the attempt of `ctx` made, as a cancelled invocation's would be. */
+/**
+ * Cancel the calls the attempt of `ctx` made, as a cancelled invocation's
+ * would be: a handler's with `explicitCancellation: true`.
+ */
 export const cancelCalls = async (ctx: SessionContext): Promise<void> => {
-  await sdkOf(ctx).cancelPreviousCalls();
+  await explicitOf(ctx, 'cancelCalls').cancelPreviousCalls();
 };

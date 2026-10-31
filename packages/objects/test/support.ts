@@ -138,7 +138,7 @@ export function sqlAttempt({
     /** The handler's context, over this attempt's `ctx.db`. */
     ctx: contextOf(sdkOf(ctx), attempt.db),
     /** A view's context, over this attempt's `ctx.db`. */
-    view: contextOf(sdkOf(ctx), attempt.db, true),
+    view: contextOf(sdkOf(ctx), attempt.db, { view: true }),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => withAttempt(handler, attempt),
     /** The attempt ends, as when Restate fences or suspends it. */
