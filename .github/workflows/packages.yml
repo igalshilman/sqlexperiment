@@ -29,7 +29,8 @@ permissions:
 jobs:
   # The addon, as its package ships it (cargo's `dist` profile), each on a
   # runner of its platform. Linux builds on Ubuntu 22.04: it runs on glibc
-  # 2.35 or later.
+  # 2.35 or later. macOS builds on the newest runner: Rust targets macOS 11,
+  # whichever macOS builds it.
   addon:
     strategy:
       matrix:
@@ -39,7 +40,7 @@ jobs:
           - platform: linux-arm64-gnu
             runner: ubuntu-22.04-arm
           - platform: darwin-arm64
-            runner: macos-15
+            runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -90,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-15]
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
