@@ -678,20 +678,13 @@ impl KvIo {
         private.sizes[WAL] != 0 || private.dirty.keys().any(|(file, _)| *file == DB)
     }
 
-    /// Whether pages copied into a mutation wait for the state to flush or drop
-    /// it ([`Self::flush_into`]).
-    pub(crate) fn has_pending(&self) -> bool {
-        !self.private.lock().unwrap().flushed.is_empty()
-    }
-
     /// Copy the database's private pages into the state's file `db`, in
     /// `mutation`, once no SQL transaction remains and the engine WAL is
     /// truncated. They stay in the private view, read ahead of the file,
-    /// until the state flushes the mutation ([`Self::settle_flushed`]) or drops
-    /// it ([`Self::settle_discarded`]): the file does not hold them before.
-    /// Pages a pending mutation already holds go in again, so that whichever
-    /// mutation the state flushes carries them all. After an error the mutation may hold
-    /// part of the copy: drop it.
+    /// until the state flushes the mutation ([`Self::settle_flushed`]): the
+    /// file does not hold them before. A flush that fails ends the engine,
+    /// which keeps them. After an error the mutation may hold part of the
+    /// copy: drop it.
     pub(crate) fn flush_into(&self, mutation: &mut Mutation) -> io::Result<()> {
         if self.pending_count() != 0 {
             return Err(invalid("cannot flush pages with pending I/O"));
@@ -748,15 +741,6 @@ impl KvIo {
                     None => old.get(index as usize).cloned().unwrap_or_else(zero),
                 })
                 .collect();
-        }
-    }
-
-    /// The mutation the pages were copied into was dropped: they are private
-    /// changes again, for the next flush (a page changed since stands).
-    pub(crate) fn settle_discarded(&self) {
-        let mut private = self.private.lock().unwrap();
-        for (block, page) in std::mem::take(&mut private.flushed) {
-            private.dirty.entry((DB, block)).or_insert(page);
         }
     }
 }

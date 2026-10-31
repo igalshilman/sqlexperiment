@@ -22,7 +22,7 @@ mod node;
 mod sql;
 mod state;
 
-pub use sql::{Database, Numeric, Open, Rows, Value};
+pub use sql::{Database, Numeric, Open, Refused, Rows, Value};
 pub use state::{PageCache, PageCacheConfig, Result, StateOptions, blobs::BlobStore, kv::KvStore};
 
 #[cfg(feature = "bench")]

@@ -37,7 +37,7 @@
 //! | Head | `v22/head`: the version, the checkpoint and the one before, the tail's extent | Yes, after an acknowledged flush |
 //! | Tail | `v22/tail/<version>/<part>`: the mutation a flush made: records, pages (each a zstd frame against the page before it) | Yes, until a checkpoint after the next one |
 //! | Manifests | `v22/manifest/<version>-<nonce>/<part>`: where a checkpoint's frames and records are | Yes, while the head names its checkpoint |
-//! | Packs | `l0/<version>-<nonce>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large records | Yes, until no checkpoint the head names needs it |
+//! | Packs | `v22/pack/l0/<version>-<nonce>/<part>` in Restate, `l1/<version>-<nonce>` in the blob store: frames of [`StateOptions::frame_pages`] pages, large records | Yes, until no checkpoint the head names needs it |
 //!
 //! # Ownership and concurrency
 //!
@@ -207,6 +207,9 @@ struct Shared {
     reader: bool,
     /// A flush failed or was cancelled: its outcome is unknown.
     poisoned: AtomicBool,
+    /// A flush is running: a second one is refused, as it would build on the
+    /// same snapshot and lose the first one's writes.
+    flushing: AtomicBool,
     /// When the next checkpoint may be tried, after some failed: the
     /// cache's, which the namespace's next states share, if it has one.
     backoff: Mutex<Backoff>,
@@ -284,6 +287,7 @@ impl Flushing<'_> {
 
 impl Drop for Flushing<'_> {
     fn drop(&mut self) {
+        self.shared.flushing.store(false, Ordering::SeqCst);
         if !self.done {
             self.shared.poisoned.store(true, Ordering::SeqCst);
         }
@@ -370,6 +374,7 @@ impl State {
                 parked: Mutex::new(parked),
                 reader,
                 poisoned: AtomicBool::new(false),
+                flushing: AtomicBool::new(false),
                 backoff: Mutex::new(backoff),
             }),
         })
@@ -680,6 +685,9 @@ impl Mutation {
         let shared = self.shared.clone();
         if shared.reader {
             return Err("a reader writes nothing".into());
+        }
+        if shared.flushing.swap(true, Ordering::SeqCst) {
+            return Err("a flush of this state is running".into());
         }
         let mut running = Flushing {
             shared: &shared,

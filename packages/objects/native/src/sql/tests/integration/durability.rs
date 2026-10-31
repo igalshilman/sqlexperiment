@@ -475,3 +475,34 @@ fn records_commit_with_their_transaction() -> Result<()> {
         Ok(())
     })
 }
+
+/// A commit whose flush the state refuses (more names than a state holds)
+/// writes nothing, and ends the session: its records read as stored, not as
+/// refused, and a save does not claim the dropped changes stored. The error
+/// says a retry would repeat it.
+#[test]
+fn a_refused_flush_ends_the_session_with_nothing_stored() -> Result<()> {
+    futures::executor::block_on(async {
+        let store = Arc::new(MemoryKv::default());
+        let db = Db::open(store.clone(), options(None)).await?;
+        db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, n INTEGER)")
+            .await?;
+        db.begin().await?;
+        db.execute("INSERT INTO t VALUES(1, 0)").await?;
+        // A state holds at most 2^16 names.
+        let records = (0..=1 << 16)
+            .map(|i| (format!("r{i}"), Bytes::from_static(b"x")))
+            .chain([("outbox".to_owned(), Bytes::from_static(b"sends"))]);
+        let refused = db.commit(records.collect::<Vec<_>>()).await.unwrap_err();
+        assert!(refused.is::<crate::Refused>(), "{refused}");
+        assert!(refused.to_string().contains("files and records"));
+        assert!(!db.is_usable());
+        assert_eq!(db.record("outbox").await?, "");
+        assert!(db.save().await.is_err());
+
+        let db = Db::open(store.clone(), options(None)).await?;
+        assert_eq!(count(&db).await?, 0);
+        assert_eq!(db.outbox(), "");
+        Ok(())
+    })
+}

@@ -64,9 +64,9 @@ type Dispatch = ThreadsafeFunction<Args, Promise<Reply>, Args, Status, false, tr
 
 /// The queue that every request to `store` goes through: one function, run
 /// on the JavaScript thread, that calls the store's method for the request,
-/// with the store as `this`. A failed write cannot fail its caller, which
-/// has moved on: the next `sync`, and every one after it, rejects with its
-/// error.
+/// with the store as `this`; a method that answers may answer a value or a
+/// promise of it. A failed write cannot fail its caller, which has moved on:
+/// the next `sync`, and every one after it, rejects with its error.
 fn dispatcher(env: &Env, store: Object) -> Result<Dispatch> {
     let failure = RefCell::new(None::<Error>);
     let dispatch = env.create_function_from_closure::<Args, _, _>("dispatch", move |ctx| {
@@ -85,14 +85,19 @@ fn dispatcher(env: &Env, store: Object) -> Result<Dispatch> {
         {
             return Err(error.try_clone()?);
         }
-        let result = call(&store, op, &args);
+        let result = call(&store, op.method(), &args);
         if op == Op::Set || op == Op::Clear {
             if let Err(error) = result {
                 failure.borrow_mut().get_or_insert(error);
             }
             return unsafe { <()>::to_napi_value(ctx.env.raw(), ()) };
         }
-        result
+        // `Promise`, a function, as the object `resolve` is called on.
+        let promise: Object = ctx
+            .env
+            .get_global()?
+            .get_named_property_unchecked("Promise")?;
+        call(&promise, "resolve", &[result?])
     })?;
     // Typed as the queue calls it: each method it awaits answers a promise.
     let dispatch =
@@ -105,15 +110,15 @@ fn dispatcher(env: &Env, store: Object) -> Result<Dispatch> {
         .build()
 }
 
-/// `store[op](...args)`, with the store as `this`; a throw is its error.
-fn call(store: &Object, op: Op, args: &[sys::napi_value]) -> Result<sys::napi_value> {
-    let method: Unknown = store.get_named_property(op.method())?;
-    let env = store.value().env;
+/// `object[name](...args)`, with the object as `this`; a throw is its error.
+fn call(object: &Object, name: &str, args: &[sys::napi_value]) -> Result<sys::napi_value> {
+    let method: Unknown = object.get_named_property(name)?;
+    let env = object.value().env;
     let mut result = std::ptr::null_mut();
     napi::check_pending_exception!(env, unsafe {
         sys::napi_call_function(
             env,
-            store.raw(),
+            object.raw(),
             method.raw(),
             args.len(),
             args.as_ptr(),
@@ -207,8 +212,14 @@ impl KvStore for JsQueue {
     }
 }
 
-fn error(error: impl std::fmt::Display) -> Error {
-    Error::from_reason(error.to_string())
+/// A failure of the database as JavaScript gets it: one a retry would repeat
+/// ([`crate::Refused`]) has the code `InvalidArg`, which `src/database.ts`
+/// tells apart, as it may have ended the session.
+fn error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
+    match error.is::<crate::Refused>() {
+        true => Error::new(Status::InvalidArg, error.to_string()),
+        false => Error::from_reason(error.to_string()),
+    }
 }
 
 /// One session of a namespace's database (see [`crate::Database`]): every

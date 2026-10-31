@@ -278,6 +278,27 @@ const ENDED: &str =
 /// body.
 const BODY_ENDED: &str = "a statement ended the transaction of transaction(), whose body must not: the session has ended";
 
+/// A failure that a retry would repeat, whether or not it ended the session:
+/// it comes of what the host gave (its SQL, its records, a transaction it left
+/// open), not of storage. An SQL error the engine undid is one too, but the
+/// session goes on after it ([`Database::is_usable`]); one of these ends it.
+#[derive(Debug)]
+pub struct Refused(String);
+
+impl Refused {
+    fn boxed(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(Refused(message.into()))
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// How to open a [`Database`] ([`Database::open`]): await it to open.
 #[must_use = "a database opens when awaited"]
 pub struct Open(crate::state::Open);
@@ -461,7 +482,8 @@ impl Database {
 
     /// The record `name` as this session holds it: as the last commit that
     /// set it left it, empty if none did. A reader's own commits set its
-    /// records, as they change its SQL, though they are never stored.
+    /// records, as they change its SQL, though they are never stored. Once a
+    /// failure ended the session, it is the record as stored.
     pub async fn record(&self, name: &str) -> Result<Bytes> {
         let mut session = self.session.lock().await;
         let engine = session.engine()?;
@@ -480,7 +502,9 @@ impl Database {
         let engine = session.engine()?;
         let saved = match (engine.is_usable(), engine.in_transaction()) {
             (false, _) => Err(ENDED.into()),
-            (true, true) => Err("a transaction was left open: its changes are lost".into()),
+            (true, true) => Err(Refused::boxed(
+                "a transaction was left open: its changes are lost",
+            )),
             (true, false) => Ok(()),
         };
         // Dropped, a clean engine parks for the next session.
@@ -548,7 +572,7 @@ impl Database {
             // ended the transaction too is the error to report.
             return match result {
                 Err(error) if !engine.is_usable() => Err(error),
-                _ => Err(BODY_ENDED.into()),
+                _ => Err(Refused::boxed(BODY_ENDED)),
             };
         }
         let committed =
@@ -697,16 +721,17 @@ impl Engine {
     /// last flush, in one flush of the state. No SQL transaction may be
     /// open. The engine WAL goes into the private view of the file, whose
     /// pages move into a mutation; SQL goes on reading them from its view
-    /// until the flush settles them: the state holds them once it flushed,
-    /// and they are private again, for the next commit, if it was refused,
-    /// as the records are. Any other failure ends the state, and the engine
+    /// until the flush settles them: the state holds them once it flushed.
+    /// A flush the state refused (for writes it cannot store) wrote nothing,
+    /// but the engine holds what it committed: the engine ends, with a
+    /// [`Refused`] error. Any other failure ends the state, and the engine
     /// with it.
     async fn commit(&mut self) -> Result<()> {
         let mut mutation = self.state.mutation();
         for (name, value) in &self.records {
             mutation.set_record(name, value.clone())?;
         }
-        if self.io.has_changes() || self.io.has_pending() {
+        if self.io.has_changes() {
             self.checkpoint().await?;
             // Failing, the move leaves the mutation and the engine apart:
             // the engine ends.
@@ -721,10 +746,14 @@ impl Engine {
                 self.records.clear();
                 Ok(())
             }
-            Err(error) => {
-                self.io.settle_discarded();
-                Err(error)
+            // Refused, the flush wrote nothing and the state goes on, but the
+            // engine committed what it refused: the session ends, with
+            // nothing of the call stored.
+            Err(error) if self.state.is_usable() => {
+                self.poisoned = true;
+                Err(Refused::boxed(error.to_string()))
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -809,10 +838,12 @@ impl Engine {
                         self.poisoned = false;
                         return Err("parameters bind to a single statement".into());
                     }
-                    Err(error) => {
+                    // A parse or name error: nothing ran.
+                    Err(error) if !self.io.failed() => {
                         self.poisoned = false;
                         return Err(error.into());
                     }
+                    Err(error) => return Err(error.into()),
                 }
                 if values.len() != statement.parameters_count() {
                     self.poisoned = false;
@@ -846,7 +877,7 @@ impl Engine {
             };
             // Before the next statement of `sql`, which would run outside it.
             if self.in_body && connection.get_auto_commit() {
-                return Err(BODY_ENDED.into());
+                return Err(Refused::boxed(BODY_ENDED));
             }
             self.poisoned = false;
             // The statement had no effect; earlier statements of `sql` stand.
@@ -939,6 +970,9 @@ async fn drive_completion(io: &KvIo, completion: turso_core::types::IOCompletion
     Ok(())
 }
 
+// TODO: open the engine without transparent huge pages, once a turso release
+// lets its buffer arena do without `MADV_HUGEPAGE` (FUTURE.md at the
+// repository's root): a cold open's first read may wait for a huge page.
 async fn open_engine(io: &Arc<KvIo>) -> Result<Arc<turso_core::Database>> {
     let mounted: Arc<dyn IO> = Arc::new(MountedIo(io.clone()));
     let file = mounted.open_file(DB_PATH, OpenFlags::Create, false)?;
@@ -1047,7 +1081,9 @@ async fn query_engine(
                     .collect();
                 bytes += row.iter().map(value_bytes).sum::<usize>();
                 if bytes > max_bytes {
-                    return Err("result rows exceed Limits::max_result_bytes".into());
+                    return Err(Failure::Fatal(Refused::boxed(
+                        "result rows exceed Limits::max_result_bytes",
+                    )));
                 }
                 rows.push(row);
             }

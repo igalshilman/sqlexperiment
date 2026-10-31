@@ -226,6 +226,28 @@ fn a_cancelled_flush_ends_the_state_and_no_other_flushes_on_top() -> Result<()> 
     })
 }
 
+/// A second flush while one runs is refused: it would build on the same
+/// snapshot, and one of the two would lose its writes.
+#[test]
+fn a_flush_while_another_runs_is_refused() -> Result<()> {
+    futures::executor::block_on(async {
+        // Cached, so that the open itself does not sync.
+        let namespace = fresh_namespace();
+        let state = State::open(Arc::new(Stalled(Default::default())))
+            .cached(&namespace.cache, &namespace.key)
+            .await?;
+        let mut first = state.mutation();
+        first.set_record("outbox", "1".into())?;
+        let mut first = Box::pin(first.flush());
+        assert!((&mut first).now_or_never().is_none());
+        let mut second = state.mutation();
+        second.set_record("outbox", "2".into())?;
+        let error = second.flush().await.unwrap_err().to_string();
+        assert!(error.contains("is running"), "{error}");
+        Ok(())
+    })
+}
+
 #[test]
 fn a_parked_value_heavier_than_the_budget_is_not_kept_and_evicts_nothing() -> Result<()> {
     futures::executor::block_on(async {

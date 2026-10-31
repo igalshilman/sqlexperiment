@@ -1,7 +1,6 @@
 //! A crash at every write of every flush of a sequence that sets records
-//! (inline and in packs), writes several files (one with a base), shrinks
-//! one, and checkpoints, with checkpoints in the store and
-//! in S3: each flush is atomic, durable once its head is, and the state
+//! (inline and in packs), writes the file, shrinks it, and checkpoints, with
+//! checkpoints in the store and in S3: each flush is atomic, durable once its head is, and the state
 //! goes on; a checkpoint, or a garbage collection, that fails takes nothing
 //! a head needs.
 
