@@ -18,10 +18,10 @@
 //! store, and the rows are what S3 would bill:
 //! requests and bytes per flush, and dollars per million flushes and per
 //! month stored, at S3 Standard's and S3 Express One Zone's prices.
-use restate_objects::simulation::{
+use restate_session_objects::simulation::{
     LatencyKv, MemoryBlobs, MemoryKv, Namespace, cache_config, open_cache,
 };
-use restate_objects::{Database, KvStore, Result, StateOptions, Value};
+use restate_session_objects::{Database, KvStore, Result, StateOptions, Value};
 use std::sync::Arc;
 
 type Store = Arc<LatencyKv<MemoryKv>>;
@@ -116,7 +116,7 @@ struct Workload {
 }
 
 const WORKLOADS: [Workload; 11] = [
-    // A restate-objects object: a message row, and its sends in the outbox.
+    // A restate-session-objects object: a message row, and its sends in the outbox.
     Workload {
         name: "chat+outbox",
         rows: 0,

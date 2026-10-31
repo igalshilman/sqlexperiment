@@ -5,8 +5,8 @@
 // ../faults.ts).
 import { object, signals } from 'restate-agents';
 import * as claude from 'restate-agents/claude';
-import { serveIfMain } from 'restate-objects/test/faults';
-import { ledger } from 'restate-objects/test/ledger';
+import { serveIfMain } from 'restate-session-objects/test/faults';
+import { ledger } from 'restate-session-objects/test/ledger';
 import { bank } from './bank.ts';
 
 /** Answer a message, once per invocation. */

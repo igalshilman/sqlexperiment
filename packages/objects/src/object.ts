@@ -128,7 +128,7 @@ export function host(
   };
 }
 
-/** The SDK's contexts behind the session objects' contexts, for restate-objects/internal. */
+/** The SDK's contexts behind the session objects' contexts, for restate-session-objects/internal. */
 export const sdkContexts = new WeakMap<
   SessionContext | ViewContext,
   restate.ObjectContext | restate.ObjectSharedContext
@@ -200,10 +200,7 @@ export function invoke(definition: { name: string }, name: string, ctx: AttemptC
 }
 
 /** Whether `value` is a handler of the SDK's already. */
-const isSdkHandler = (value: object) =>
-  Object.getOwnPropertySymbols(value).some(
-    (s) => s.description === 'Handler' || s.description === 'restate-objects handler',
-  );
+const isSdkHandler = (value: object) => Object.getOwnPropertySymbols(value).some((s) => s.description === 'Handler');
 
 /** The SDK's handler of entry `name` of `object`. */
 function handlerOf(object: string, name: string, entry: unknown, view: boolean) {

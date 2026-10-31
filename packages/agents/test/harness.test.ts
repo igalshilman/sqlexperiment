@@ -1,7 +1,7 @@
 // pi's Harness configured as it runs, as examples/harness.ts does, without a
 // Restate server: each user's model and persona from its database, and the
 // conversation compacted and reset.
-import type * as restate from 'restate-objects';
+import type * as restate from 'restate-session-objects';
 import { tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';

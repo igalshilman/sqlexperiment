@@ -2,8 +2,8 @@
 // has `ctx.db` over the object's state in memory, and records the sends it
 // makes. A crash is an attempt whose later writes and
 // sends are lost: what it stored before stays.
-import * as restate from 'restate-objects';
-import { open } from 'restate-objects/internal';
+import * as restate from 'restate-session-objects';
+import { open } from 'restate-session-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore, sqlAttempt } from './support.ts';
 

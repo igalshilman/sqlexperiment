@@ -1,10 +1,10 @@
 //! Phase-separated logical traffic benchmark. No network/replication model.
 //! A write runs in a transaction, measured as its SQL, then its commit (the
 //! engine's checkpoint and the flush), apart.
-use restate_objects::simulation::{
+use restate_session_objects::simulation::{
     Effect, Failpoint, FaultKv, MemoryKv, Operation, Stats, Traffic, object_kind,
 };
-use restate_objects::{Database, KvStore, Result};
+use restate_session_objects::{Database, KvStore, Result};
 use std::sync::Arc;
 
 /// A session of the database in `store`.

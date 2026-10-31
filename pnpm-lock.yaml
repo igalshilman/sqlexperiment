@@ -183,7 +183,7 @@ importers:
       effect:
         specifier: 4.0.1
         version: 4.0.1
-      restate-objects:
+      restate-session-objects:
         specifier: workspace:*
         version: link:../objects
       zod:
@@ -204,7 +204,7 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-objects:
+      restate-session-objects:
         specifier: workspace:*
         version: link:../objects
       zod:
@@ -247,7 +247,7 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-objects:
+      restate-session-objects:
         specifier: workspace:*
         version: link:../objects
       zod:
@@ -270,13 +270,13 @@ importers:
         specifier: 1.17.4
         version: 1.17.4
     optionalDependencies:
-      restate-objects-darwin-arm64:
+      restate-session-objects-darwin-arm64:
         specifier: workspace:*
         version: link:npm/darwin-arm64
-      restate-objects-linux-arm64-gnu:
+      restate-session-objects-linux-arm64-gnu:
         specifier: workspace:*
         version: link:npm/linux-arm64-gnu
-      restate-objects-linux-x64-gnu:
+      restate-session-objects-linux-x64-gnu:
         specifier: workspace:*
         version: link:npm/linux-x64-gnu
 
@@ -300,7 +300,7 @@ importers:
       restate-agents:
         specifier: workspace:*
         version: link:../agents
-      restate-objects:
+      restate-session-objects:
         specifier: workspace:*
         version: link:../objects
       zod:

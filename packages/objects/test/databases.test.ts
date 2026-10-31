@@ -1,9 +1,9 @@
-// A key's databases apart from the object's own (database of restate-objects),
+// A key's databases apart from the object's own (database of restate-session-objects),
 // without a Restate server: each its own tables, stored in the object's state
 // beside `ctx.db`'s, opened on first use and ended with the attempt.
 import { randomUUID } from 'node:crypto';
-import type { DatabaseWriter } from 'restate-objects';
-import { database } from 'restate-objects/internal';
+import type { DatabaseWriter } from 'restate-session-objects';
+import { database } from 'restate-session-objects/internal';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 

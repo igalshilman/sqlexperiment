@@ -1,6 +1,6 @@
 //! Operation/byte benchmark. MemoryKv is a simulator, not a remote durability benchmark.
-use restate_objects::simulation::{MemoryKv, Stats};
-use restate_objects::{Database, KvStore, Result};
+use restate_session_objects::simulation::{MemoryKv, Stats};
+use restate_session_objects::{Database, KvStore, Result};
 use std::{
     sync::Arc,
     time::{Duration, Instant},

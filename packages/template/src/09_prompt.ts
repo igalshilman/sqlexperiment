@@ -4,7 +4,7 @@
  * `pi.prompt(ctx, text)` asks a model from a handler. It answers once: the
  * conversation is kept in the key's database, and a retry resumes it instead
  * of asking again. Each key is a conversation of its own: here, one per
- * language. `object` comes from restate-agents: restate-objects' object, set
+ * language. `object` comes from restate-agents: restate-session-objects' object, set
  * up for agents.
  *
  *   node src/09_prompt.ts                                                      # and register it (see 01)

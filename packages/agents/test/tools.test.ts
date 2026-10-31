@@ -1,9 +1,9 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
-import { type AttemptContext, contextOf } from 'restate-objects/internal';
-import { memoryDatabase } from 'restate-objects/test/support';
+import { type AttemptContext, contextOf } from 'restate-session-objects/internal';
+import { memoryDatabase } from 'restate-session-objects/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { settle } from '../src/calls.ts';

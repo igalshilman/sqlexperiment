@@ -229,8 +229,8 @@ export function hookSelector(ctx: object): () => void {
   const missing = executor ? FIELDS.filter((field) => executor[field] === undefined) : ['promisesExecutor'];
   if (missing.length > 0 || typeof executor?.coreVm.do_progress !== 'function') {
     throw new Error(
-      `restate-objects drives a handler's promises through the SDK's internals, which this SDK version does not have ` +
-        `(${missing.join(', ') || 'coreVm.do_progress'}): use the @restatedev/restate-sdk that restate-objects pins`,
+      `restate-session-objects drives a handler's promises through the SDK's internals, which this SDK version does not have ` +
+        `(${missing.join(', ') || 'coreVm.do_progress'}): use the @restatedev/restate-sdk that restate-session-objects pins`,
     );
   }
   const { coreVm, outputPump, externalProgressChannel, runClosuresTracker, ephemeralRequestTracker } = executor;

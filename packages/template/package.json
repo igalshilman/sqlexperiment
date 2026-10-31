@@ -9,7 +9,7 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
     "restate-agents": "workspace:*",
-    "restate-objects": "workspace:*",
+    "restate-session-objects": "workspace:*",
     "zod": "4.6.5"
   },
   "engines": {

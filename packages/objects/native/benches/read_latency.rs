@@ -18,8 +18,8 @@ use futures::{
     future::BoxFuture,
     task::{ArcWake, waker},
 };
-use restate_objects::simulation::{MemoryBlobs, MemoryKv};
-use restate_objects::{BlobStore, Database, KvStore, Result, StateOptions, Value};
+use restate_session_objects::simulation::{MemoryBlobs, MemoryKv};
+use restate_session_objects::{BlobStore, Database, KvStore, Result, StateOptions, Value};
 use std::{
     io,
     ops::Range,

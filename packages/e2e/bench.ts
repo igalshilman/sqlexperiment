@@ -18,8 +18,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import * as restate from 'restate-objects';
-import { row } from 'restate-objects/test/sql';
+import * as restate from 'restate-session-objects';
+import { row } from 'restate-session-objects/test/sql';
 import { RESTATE_SERVER } from './restate-server.ts';
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS rows(id INTEGER PRIMARY KEY, v);

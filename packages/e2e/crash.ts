@@ -27,8 +27,8 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import type { ChildProcess } from 'node:child_process';
 import type { Messages } from 'restate-agents';
-import type { Audit } from 'restate-objects/test/ledger';
-import type { Order, Reservation } from 'restate-objects/test/shop';
+import type { Audit } from 'restate-session-objects/test/ledger';
+import type { Order, Reservation } from 'restate-session-objects/test/shop';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
@@ -65,7 +65,7 @@ const PROMPTS = 8;
 const ACCOUNTS = 8;
 const OPENING = 1000;
 
-const dir = mkdtempSync(join(tmpdir(), 'restate-objects-examples-'));
+const dir = mkdtempSync(join(tmpdir(), 'restate-session-objects-examples-'));
 // One descriptor per log, however often its process restarts.
 const logs = new Map<string, number>();
 const log = (name: string) => logs.get(name) ?? logs.set(name, openSync(join(dir, name), 'a')).get(name)!;

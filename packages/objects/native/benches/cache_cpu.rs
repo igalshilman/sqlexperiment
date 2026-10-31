@@ -8,8 +8,8 @@
 //! tier. The backend is strong, so nothing is
 //! confirmed. Output is CSV; traffic counters are deterministic, time is the
 //! median of the repeats.
-use restate_objects::simulation::{LatencyKv, MemoryKv, cache_config, open_cache};
-use restate_objects::{Database, KvStore, PageCache, Result};
+use restate_session_objects::simulation::{LatencyKv, MemoryKv, cache_config, open_cache};
+use restate_session_objects::{Database, KvStore, PageCache, Result};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{

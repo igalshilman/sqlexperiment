@@ -9,7 +9,7 @@
  *   curl localhost:8080/greeter/alice/greet --json '"cheerful"'   # "Hello, alice! You look cheerful."
  *   curl localhost:8080/greeter/alice/history                     # the greetings of 02 and 03 have no mood
  */
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const greeter = restate.sessionObject({
   name: 'greeter',

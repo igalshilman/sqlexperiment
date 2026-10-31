@@ -74,8 +74,8 @@
 //! # Example
 //!
 //! ```ignore
-//! # use restate_objects::Database;
-//! # async fn example(store: Arc<dyn KvStore>, cache: &PageCache) -> restate_objects::Result<()> {
+//! # use restate_session_objects::Database;
+//! # async fn example(store: Arc<dyn KvStore>, cache: &PageCache) -> restate_session_objects::Result<()> {
 //! let db = Database::open(store).cached(cache, "chat/42").await?;
 //! db.execute("CREATE TABLE messages(body TEXT)").await?; // durable now
 //! db.begin().await?;

@@ -1,5 +1,5 @@
 {
-  "name": "restate-objects",
+  "name": "restate-session-objects",
   "version": "0.1.0",
   "private": true,
   "description": "SQL in Restate virtual objects: a database per key, kept in the object's state (ctx.db)",
@@ -42,9 +42,9 @@
     "@restatedev/restate-sdk-core": "1.17.4"
   },
   "optionalDependencies": {
-    "restate-objects-darwin-arm64": "workspace:*",
-    "restate-objects-linux-arm64-gnu": "workspace:*",
-    "restate-objects-linux-x64-gnu": "workspace:*"
+    "restate-session-objects-darwin-arm64": "workspace:*",
+    "restate-session-objects-linux-arm64-gnu": "workspace:*",
+    "restate-session-objects-linux-x64-gnu": "workspace:*"
   },
   "engines": {
     "node": ">=24"

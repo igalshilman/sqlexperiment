@@ -2,7 +2,7 @@
 // key. It is the Restate SDK, with `restate.sessionObject` beside its own
 // objects, services and workflows:
 //
-//   import * as restate from 'restate-objects';
+//   import * as restate from 'restate-session-objects';
 //
 //   const notes = restate.sessionObject({
 //     name: 'notes',

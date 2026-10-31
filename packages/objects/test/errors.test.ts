@@ -2,7 +2,7 @@
 // retries: an SQL error would repeat on a retry, so it is terminal while the
 // session goes on; a storage error ends the session, and is retried; the
 // handler's own errors pass as they are.
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 import { expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 

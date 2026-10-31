@@ -1,5 +1,5 @@
-// The platforms restate-objects ships its addon for, each a package of its
-// own (npm/<platform>, `restate-objects-<platform>`) that restate-objects
+// The platforms restate-session-objects ships its addon for, each a package of its
+// own (npm/<platform>, `restate-session-objects-<platform>`) that restate-session-objects
 // depends on optionally: a package manager installs the one of its machine
 // alone (by the `os`, `cpu` and `libc` of each). The CI builds them
 // (.github/workflows/packages.yml); `pnpm build` builds this machine's.

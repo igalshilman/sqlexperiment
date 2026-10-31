@@ -1,13 +1,13 @@
 // withPi over an SQL database in memory, without a Restate server: the
 // coding tools of a workspace write to the local file system.
-import type * as restate from 'restate-objects';
+import type * as restate from 'restate-session-objects';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { open } from 'restate-objects/internal';
+import { open } from 'restate-session-objects/internal';
 import { describe, expect, it } from 'vitest';
-import { memoryStore } from 'restate-objects/test/support';
+import { memoryStore } from 'restate-session-objects/test/support';
 import { callTools, fakeProvider, say } from '../fakes/pi.ts';
 import { withPi } from 'restate-agents/pi';
 

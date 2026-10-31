@@ -35,8 +35,8 @@
 // argument). A tool that throws fails the attempt rather than hand the error
 // to the model: from then on the attempt stores nothing (its fence closes),
 // and the next attempt finds the call interrupted.
-import * as restate from 'restate-objects';
-import { database, reset } from 'restate-objects/internal';
+import * as restate from 'restate-session-objects';
+import { database, reset } from 'restate-session-objects/internal';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';

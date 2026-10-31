@@ -1,6 +1,6 @@
-# The packages as published: restate-objects' addon built for each platform it
+# The packages as published: restate-session-objects' addon built for each platform it
 # ships (packages/objects/src/platform.ts), each into its package
-# (restate-objects-<platform>), then every package packed and installed with
+# (restate-session-objects-<platform>), then every package packed and installed with
 # npm on each platform (packages/e2e/packaging.ts).
 #
 # The tarballs are the run's `packages` artifact; nothing is published yet.
@@ -48,7 +48,7 @@ jobs:
         with:
           workspaces: packages/objects/native
       - run: cargo build --locked --profile dist --manifest-path packages/objects/native/Cargo.toml
-      - run: cp packages/objects/native/target/dist/librestate_objects.$([ "$RUNNER_OS" = macOS ] && echo dylib || echo so) objects.node
+      - run: cp packages/objects/native/target/dist/librestate_session_objects.$([ "$RUNNER_OS" = macOS ] && echo dylib || echo so) objects.node
       - uses: actions/upload-artifact@v4
         with:
           name: addon-${{ matrix.platform }}
@@ -75,7 +75,7 @@ jobs:
         run: |
           for addon in addons/addon-*; do mv "$addon/objects.node" "packages/objects/npm/${addon#addons/addon-}/"; done
           for package in packages/objects/npm/*/; do test -f "$package/objects.node" || { echo "no addon in $package"; exit 1; }; done
-      - run: pnpm --filter restate-objects --filter restate-agents --filter './packages/objects/npm/*' pack --pack-destination "$PWD/packages-out"
+      - run: pnpm --filter restate-session-objects --filter restate-agents --filter './packages/objects/npm/*' pack --pack-destination "$PWD/packages-out"
       - run: ls -l packages-out
       - uses: actions/upload-artifact@v4
         with:

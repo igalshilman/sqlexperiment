@@ -8,7 +8,7 @@ it waits on, and where the code marks it (`TODO:` comments).
 **Waits on:** a Restate release with service protocol v8, and a TypeScript
 SDK release that exposes its ephemeral get.
 
-**Now:** the SQL store of `restate-objects` reads the object's state with
+**Now:** the SQL store of `restate-session-objects` reads the object's state with
 regular, journaled gets (`objectStore` in `packages/objects/src/session.ts`:
 `ctx.get`). Restate 1.8.0, the release the tests run
 (`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
@@ -53,7 +53,7 @@ every tail entry and pack, and a session's first read is the head
 invocation (best effort, within its eager-state size limit), and the open
 starts with it. Tail entries and packs
 change names with each flush and checkpoint, so only the head can be
-listed. The options are `sqlOptions` in `restate-objects`
+listed. The options are `sqlOptions` in `restate-session-objects`
 (`packages/objects/src/object.ts`), which every session object has; its
 `TODO:` marks them.
 
@@ -62,7 +62,7 @@ listed. The options are `sqlOptions` in `restate-objects`
 **Waits on:** an SDK release whose explicit recovery lets a handler
 await concurrently.
 
-**Now:** `restate-objects` drives a SQL handler's promises with a selector of its
+**Now:** `restate-session-objects` drives a SQL handler's promises with a selector of its
 own (`packages/objects/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
 package pins `@restatedev/restate-sdk` 1.17.4. The published SDK lets one

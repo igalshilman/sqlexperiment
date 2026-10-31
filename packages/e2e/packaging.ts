@@ -1,11 +1,11 @@
-// The packages as a user installs them: restate-objects, its addon's package
+// The packages as a user installs them: restate-session-objects, its addon's package
 // for this machine, and restate-agents packed (pnpm pack, which builds their
 // JavaScript), checked (publint, and Are the Types Wrong?), then installed
 // with npm into a new project with pi's harness alone. A database opens
 // through the addon, the agent runs and type-checks, the other harnesses'
 // subpaths fail for their missing packages, and the install is weighed.
 //
-//   pnpm --filter restate-objects build:dist   # the addon as a package ships it
+//   pnpm --filter restate-session-objects build:dist   # the addon as a package ships it
 //   pnpm --filter e2e packaging
 //
 // PACKAGES=<dir> takes the tarballs there instead, every platform's addon
@@ -31,7 +31,7 @@ console.log(`in ${at}`);
 const packages = process.env.PACKAGES ?? at;
 if (!process.env.PACKAGES) {
   const addon = `./packages/objects/npm/${platform()}`;
-  const filters = ['restate-objects', 'restate-agents', addon].flatMap((name) => ['--filter', name]);
+  const filters = ['restate-session-objects', 'restate-agents', addon].flatMap((name) => ['--filter', name]);
   run('pnpm', [...filters, 'pack', '--pack-destination', at], { cwd: root, stdio: ['ignore', 'ignore', 'inherit'] });
 }
 const tarballs = readdirSync(packages).filter((name) => name.endsWith('.tgz'));
@@ -43,10 +43,10 @@ const tarball = (name: string) =>
 // Each platform's addon, which npm installs on its platform alone.
 const addons = Object.fromEntries(
   tarballs
-    .filter((t) => t.startsWith('restate-objects-') && !/^restate-objects-\d/.test(t))
+    .filter((t) => t.startsWith('restate-session-objects-') && !/^restate-session-objects-\d/.test(t))
     .map((t) => [t.slice(0, t.lastIndexOf('-')), `file:${join(packages, t)}`]),
 );
-for (const name of ['restate-objects', 'restate-agents']) {
+for (const name of ['restate-session-objects', 'restate-agents']) {
   run(bin('publint'), ['run', tarball(name), '--strict']);
   // ESM only: CommonJS imports them with import().
   run(bin('attw'), [tarball(name), '--profile', 'esm-only', '--no-emoji', '--format', 'table-flipped']);
@@ -66,7 +66,7 @@ writeFileSync(
     private: true,
     type: 'module',
     dependencies: {
-      'restate-objects': `file:${tarball('restate-objects')}`,
+      'restate-session-objects': `file:${tarball('restate-session-objects')}`,
       'restate-agents': `file:${tarball('restate-agents')}`,
       ...Object.fromEntries(pi.map((name) => [name, agents.devDependencies[name]])),
     },
@@ -82,7 +82,7 @@ writeFileSync(
   join(app, 'agent.ts'),
   `import { object } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
-import { open } from 'restate-objects/internal';
+import { open } from 'restate-session-objects/internal';
 
 const values = new Map<string, Uint8Array>();
 const db = await open('packaging', {
@@ -150,7 +150,7 @@ const size = (path: string): number =>
 const installed = output('npm', ['ls', '--all', '--parseable'], app).trim().split('\n').length - 1;
 const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
 console.log(`installed: ${installed} packages, ${mb(size(join(app, 'node_modules')))}`);
-for (const name of ['restate-objects', `restate-objects-${platform()}`, 'restate-agents']) {
+for (const name of ['restate-session-objects', `restate-session-objects-${platform()}`, 'restate-agents']) {
   console.log(`  ${name}: ${mb(size(join(app, 'node_modules', name)))} (packed ${mb(statSync(tarball(name)).size)})`);
 }
 rmSync(at, { recursive: true });

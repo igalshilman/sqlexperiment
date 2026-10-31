@@ -1,8 +1,8 @@
 {
-  "name": "restate-objects-linux-arm64-gnu",
+  "name": "restate-session-objects-linux-arm64-gnu",
   "version": "0.1.0",
   "private": true,
-  "description": "restate-objects' addon for Linux on arm64, glibc 2.35 or later: installed with restate-objects, on that platform alone",
+  "description": "restate-session-objects' addon for Linux on arm64, glibc 2.35 or later: installed with restate-session-objects, on that platform alone",
   "files": [
     "objects.node"
   ],

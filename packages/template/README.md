@@ -45,7 +45,7 @@ cancel it there.
 
 ## Then
 
-- [`restate-objects`](../objects/README.md) and
+- [`restate-session-objects`](../objects/README.md) and
   [`restate-agents`](../agents/README.md): everything the lessons touch,
   in full.
 - [The examples](../examples/README.md): applications that put it together.

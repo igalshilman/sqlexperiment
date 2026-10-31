@@ -1,6 +1,6 @@
 // The ledger's handlers without a Restate server: each call an attempt with
 // its `ctx.db` over the object's state in memory.
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 import { describe, expect, it } from 'vitest';
 import { sqlAttempt } from './support.ts';
 import { handlers, type Transfer } from './ledger.ts';

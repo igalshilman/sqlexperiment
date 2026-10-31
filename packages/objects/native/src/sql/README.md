@@ -21,7 +21,7 @@ layers](../../README.md#inside-the-layers).
 its store (the addon, over the JavaScript one), then:
 
 ```rust,ignore
-use restate_objects::Database;
+use restate_session_objects::Database;
 
 // Kept warm in the process's page cache under the namespace's stable key.
 let db = Database::open(store).cached(&cache, "object-42").await?;

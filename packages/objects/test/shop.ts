@@ -22,7 +22,7 @@
 //
 // Environment: PORT (default 9080), SHOP_EXPIRY_MS (how long an unpaid order
 // holds its stock, default 5000) and ABORT_PER_MILLE (see faults.ts).
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 import { serveIfMain } from './faults.ts';
 
 const EXPIRY_MS = Number(process.env.SHOP_EXPIRY_MS ?? 5000);

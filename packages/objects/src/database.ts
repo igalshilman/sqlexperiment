@@ -124,13 +124,13 @@ const addon = load();
 /** The addon of this machine's platform, from its package (see platform.ts). */
 function load(): Addon {
   const machine = platform();
-  const name = `restate-objects-${machine}`;
+  const name = `restate-session-objects-${machine}`;
   try {
     return createRequire(import.meta.url)(name) as Addon;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw error;
     throw new Error(
-      `restate-objects found no addon for ${machine}, the package ${name}: it ships them for ` +
+      `restate-session-objects found no addon for ${machine}, the package ${name}: it ships them for ` +
         `${PLATFORMS.join(', ')}. In its repository, \`pnpm build\` builds this machine's.`,
       { cause: error },
     );

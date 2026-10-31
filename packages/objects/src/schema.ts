@@ -19,7 +19,7 @@
 // session, which stores nothing, then reads: a key never written reads as
 // empty tables. This repository's libraries (restate-agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
-// they use them, in any object: internal, from restate-objects/internal.
+// they use them, in any object: internal, from restate-session-objects/internal.
 import type { Connection, DatabaseReader, DatabaseWriter, ConnectionTransaction } from './database.ts';
 
 /**

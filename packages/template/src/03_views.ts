@@ -9,7 +9,7 @@
  *   curl localhost:8080/greeter/alice/greet
  *   curl localhost:8080/greeter/alice/history   # when alice was greeted, 02's greetings too
  */
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const greeter = restate.sessionObject({
   name: 'greeter',

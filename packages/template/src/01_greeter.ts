@@ -14,7 +14,7 @@
  *
  * Every lesson serves on port 9080: register it again when you start the next.
  */
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const greeter = restate.sessionObject({
   name: 'greeter',

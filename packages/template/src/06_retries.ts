@@ -12,7 +12,7 @@
  *   curl localhost:8080/savings/alice/deposit --json '{"id": "d1", "amount": 10}'   # 10: the same deposit, sent again
  *   curl localhost:8080/savings/alice/deposit --json '{"id": "d2", "amount": 5}'    # 15
  */
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const failed = new Set<string>();
 

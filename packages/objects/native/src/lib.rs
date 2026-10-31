@@ -1,4 +1,4 @@
-//! The Node.js addon of restate-objects: an object's SQLite-compatible
+//! The Node.js addon of restate-session-objects: an object's SQLite-compatible
 //! database, kept in its Restate state, over a key/value store the host
 //! implements in JavaScript.
 //!

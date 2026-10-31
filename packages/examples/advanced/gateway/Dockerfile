@@ -14,7 +14,7 @@ FROM rust:1-bookworm AS addon
 WORKDIR /src
 COPY packages/objects/native packages/objects/native
 RUN cd packages/objects/native && cargo build --locked --release \
-  && cp target/release/librestate_objects.so objects.node
+  && cp target/release/librestate_session_objects.so objects.node
 
 # The workspace's packages that the examples use, laid out as in the
 # repository: the pnpm workspace at its root.

@@ -6,7 +6,7 @@ Two layers, the second on the first:
    handlers run without journal replay, so a retried attempt runs again
    against the state as stored, each key with its own SQLite-compatible
    database, stored in the object's state
-   ([`restate-objects`](packages/objects/README.md)).
+   ([`restate-session-objects`](packages/objects/README.md)).
 2. **[AI agents](#ai-agents)** in those objects, their conversation in the
    object's database: pi, OpenCode, LangGraph, Claude and more
    ([`restate-agents`](packages/agents/README.md)).
@@ -17,12 +17,12 @@ file, from a virtual object to agents that delegate.
 ## Objects with SQL
 
 Each key of a virtual object has a SQLite database of its own, up to 10 GiB,
-kept in the object's state: no database to run. `restate-objects` is the
+kept in the object's state: no database to run. `restate-session-objects` is the
 Restate SDK with those objects, `restate.sessionObject`
 ([`examples/basic/notes.ts`](packages/examples/basic/notes.ts)):
 
 ```ts
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const notes = restate.sessionObject({
   name: 'notes',
@@ -52,7 +52,7 @@ curl localhost:8080/notes/alice/list
 
 A statement is durable when it returns. `ctx.db.transaction` groups
 statements, and the sends made in it (`tx.send`), into one commit. See
-[`restate-objects`](packages/objects/README.md).
+[`restate-session-objects`](packages/objects/README.md).
 
 ## AI agents
 
@@ -100,7 +100,7 @@ conversation, and a handler of yours serves that table, for a profile page
 say ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-objects';
+import { handlers } from 'restate-session-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -160,7 +160,7 @@ curl localhost:8080/assistant/alice/facts
 A pnpm workspace ([`pnpm-workspace.yaml`](pnpm-workspace.yaml)) of five
 packages, each with its README, and its tests in its `test/` directory:
 
-- [`packages/objects`](packages/objects/README.md): `restate-objects`, session
+- [`packages/objects`](packages/objects/README.md): `restate-session-objects`, session
   objects (a SQL database per key, `ctx.db`) on the published SDK, with
   its storage in a Rust addon, [`native/`](packages/objects/native/README.md):
   [the layers](packages/objects/native/README.md#inside-the-layers), from
@@ -178,10 +178,10 @@ packages, each with its README, and its tests in its `test/` directory:
 
 ## Requirements
 
-|                | Version                                                                    |
-| -------------- | -------------------------------------------------------------------------- |
-| Restate server | 1.8 or later                                                               |
-| TypeScript SDK | 1.17.4, as published, with [`restate-objects`](packages/objects/README.md) |
+|                | Version                                                                            |
+| -------------- | ---------------------------------------------------------------------------------- |
+| Restate server | 1.8 or later                                                                       |
+| TypeScript SDK | 1.17.4, as published, with [`restate-session-objects`](packages/objects/README.md) |
 
 ```sh
 docker run --rm -p 8080:8080 -p 9070:9070 --add-host=host.docker.internal:host-gateway \
@@ -219,10 +219,10 @@ To run an example, see [Run an example](packages/examples/README.md#run-an-examp
 ### Packages
 
 In the workspace, node runs each package's TypeScript as it is. Packed
-(`pnpm pack`), `restate-objects` and `restate-agents` are JavaScript and its
+(`pnpm pack`), `restate-session-objects` and `restate-agents` are JavaScript and its
 types, compiled into `dist/` (`pnpm --filter <package> build:ts`), ESM only,
-each module a file of its own. restate-objects' addon is a package per
-platform (`restate-objects-<platform>`, in `packages/objects/npm`), which it
+each module a file of its own. restate-session-objects' addon is a package per
+platform (`restate-session-objects-<platform>`, in `packages/objects/npm`), which it
 depends on optionally: a package manager installs its machine's alone. CI
 builds them for Linux (x64 and arm64, glibc 2.35 or later) and macOS on Apple
 silicon, packs every package, and installs them on each
@@ -232,6 +232,6 @@ a project installs those of the frameworks it imports
 ([which](packages/agents/README.md#choose-a-framework)).
 
 ```sh
-pnpm --filter restate-objects build:dist   # this machine's addon as it ships: smaller and whole-program optimized (minutes)
+pnpm --filter restate-session-objects build:dist   # this machine's addon as it ships: smaller and whole-program optimized (minutes)
 pnpm --filter e2e packaging                # both packed, linted, and installed as a user's project with pi alone
 ```

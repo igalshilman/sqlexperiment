@@ -6,7 +6,7 @@
 // A tool runs with the agent's context, and with the id of the model's tool
 // call: Restate calls carry an idempotency key made of the invocation id and
 // that id, so a tool call run again after a crash makes the same call, once.
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 import { z } from 'zod';
 import { cancellationOf, type Configure, configured, ToolError } from './common.ts';
 import { callOf } from './calls.ts';

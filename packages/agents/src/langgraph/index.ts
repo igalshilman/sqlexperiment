@@ -25,8 +25,8 @@
 //   agent lacks, or with arguments that do not fit, is the model's to fix.
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
-import * as restate from 'restate-objects';
-import type { Database } from 'restate-objects';
+import * as restate from 'restate-session-objects';
+import type { Database } from 'restate-session-objects';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { ChatAnthropic } from '@langchain/anthropic';
 import type { ChatOpenAI } from '@langchain/openai';

@@ -2,7 +2,7 @@
 // and lost writes.
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { open, type Connection, type Store, type ConnectionTransaction } from 'restate-objects/internal';
+import { open, type Connection, type Store, type ConnectionTransaction } from 'restate-session-objects/internal';
 import { test } from 'vitest';
 
 /** Stored values, and writes issued but not yet synced. */

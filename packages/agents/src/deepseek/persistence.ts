@@ -31,8 +31,8 @@ import {
   type SessionPersistenceCreateOptions,
   type SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence';
-import type { Database } from 'restate-objects';
-import { Schema } from 'restate-objects/internal';
+import type { Database } from 'restate-session-objects';
+import { Schema } from 'restate-session-objects/internal';
 
 const SCHEMA = new Schema('restate-agents.deepseek', [
   'CREATE TABLE restate_deepseek_sessions (id TEXT PRIMARY KEY, header TEXT NOT NULL, inherited INTEGER NOT NULL)',

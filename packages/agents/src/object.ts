@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
-import * as restate from 'restate-objects';
-import { reset } from 'restate-objects/internal';
+import * as restate from 'restate-session-objects';
+import { reset } from 'restate-session-objects/internal';
 import {
   cleared,
   inBackground,
@@ -225,7 +225,7 @@ type With<H, V> = Functions<typeof BUILT_IN> &
 
 /**
  * A Restate virtual object with a SQL database per key, `ctx.db`: a
- * `restate.sessionObject` of restate-objects, set up for agents.
+ * `restate.sessionObject` of restate-session-objects, set up for agents.
  *
  *   const notes = object({
  *     name: 'notes',

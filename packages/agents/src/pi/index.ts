@@ -31,8 +31,8 @@
 // The files are not in the database: they last as long as the disk does,
 // and a coding tool cut off by a crash is not run again (the model is told
 // it was interrupted).
-import * as restate from 'restate-objects';
-import type { Database } from 'restate-objects';
+import * as restate from 'restate-session-objects';
+import type { Database } from 'restate-session-objects';
 import type { Context } from '@earendil-works/chord';
 import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';

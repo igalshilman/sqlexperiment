@@ -10,7 +10,7 @@
 //
 // pi-durable's tables and indexes are named `restate_pi_<name>` (its
 // storage's `prefix`), apart from the tables of yours in the same database.
-import type { DatabaseWriter, Database } from 'restate-objects';
+import type { DatabaseWriter, Database } from 'restate-session-objects';
 import {
   SqliteStorage,
   type SqliteDatabase,

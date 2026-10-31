@@ -79,7 +79,7 @@ message it answers), `clear` (forget it all), `sync`, `notifications` and
 
 Each framework's packages are optional peer dependencies of
 restate-agents: a project installs restate-agents, whose required peers
-(restate-objects, the Restate SDK and zod) npm and pnpm install with it, and
+(restate-session-objects, the Restate SDK and zod) npm and pnpm install with it, and
 the packages of the frameworks it imports, so that `restate-agents/pi`
 brings pi alone:
 
@@ -553,7 +553,7 @@ own: here, an assistant whose tools keep facts in its own table
 ([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
-import { handlers } from 'restate-objects';
+import { handlers } from 'restate-session-objects';
 import { object, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
@@ -615,7 +615,7 @@ API, such as compacting the conversation (see their READMEs).
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. It is a `restate.sessionObject` of
-[`restate-objects`](../objects/README.md): `handlers` run one at a time per
+[`restate-session-objects`](../objects/README.md): `handlers` run one at a time per
 key, and `views` beside them. Its own cannot be named `signal`, `pending`,
 `status`, `stop`, `steer`, `notifications` or `watch`, views every object
 has, nor `sync`, `clear` or `erase`, which an agent has (one with a
@@ -625,7 +625,7 @@ database as committed, beside a message being answered.
 ## Build your own
 
 `restate-agents` is not published: it runs on
-[`restate-objects`](../objects/README.md) (SQL in virtual objects, with its
+[`restate-session-objects`](../objects/README.md) (SQL in virtual objects, with its
 Node.js addon), which this repository builds.
 Build them once, at the repository's root, with `pnpm install && pnpm build`:
 it needs Rust (for the addon), Node 24 or later, and pnpm (see

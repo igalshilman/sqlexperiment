@@ -13,7 +13,7 @@
  *   curl localhost:8080/user/alice/rename --json '"ace"'   # "alice is now ace"
  *   curl localhost:8080/user/bob/rename --json '"ace"'     # fails: ace is alice's
  */
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const nickname = restate.sessionObject({
   name: 'nickname',

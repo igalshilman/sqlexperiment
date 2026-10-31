@@ -1,6 +1,6 @@
 # The addon: an object's database in its state
 
-The storage of [`restate-objects`](../README.md): SQLite-compatible SQL over
+The storage of [`restate-session-objects`](../README.md): SQLite-compatible SQL over
 a key/value store implemented in JavaScript, the object's state. A native
 addon ([napi-rs](https://napi.rs)), one Rust crate, with the [state and SQL
 on it](#inside-the-layers) inside. [`src/database.ts`](../src/database.ts)
@@ -78,7 +78,7 @@ Three layers, each knowing only the one below it. A change stays private to
 the database until a call commits it, and the state's flush makes it durable.
 
 ```
-host       restate-objects (TypeScript): ctx.db, transaction(), the outbox
+host       restate-session-objects (TypeScript): ctx.db, transaction(), the outbox
                │
                ▼
 database   Database: SQL on a private view of one file; each call that

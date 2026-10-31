@@ -1,4 +1,4 @@
-# restate-objects: session objects, SQL in Restate virtual objects
+# restate-session-objects: SQL in Restate virtual objects
 
 Each key of a session object, a Restate virtual object, gets a SQL database
 of its own, `ctx.db`, kept in the object's state. Its handlers run with the
@@ -11,7 +11,7 @@ SDK (1.17.4, pinned: see [concurrent awaits](#concurrent-awaits-one-await-point)
 It runs on a released Restate server: see [the requirements](../../README.md#requirements).
 
 ```ts
-import * as restate from 'restate-objects';
+import * as restate from 'restate-session-objects';
 
 const ledger = restate.sessionObject({
   name: 'Ledger',
@@ -29,7 +29,7 @@ const ledger = restate.sessionObject({
 });
 ```
 
-`restate-objects` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
+`restate-session-objects` is the Restate SDK (it re-exports `@restatedev/restate-sdk`),
 with session objects beside its own objects, services and workflows.
 `restate.sessionObject({ name, schema, handlers, views })` is a virtual object
 whose state is a SQL database per key:
@@ -363,14 +363,14 @@ await, since a suspension is a restart.
 
 The library's own: [`test/`](test) (sessions, transactions and their sends,
 readers, SQL errors, lost writes) without a server
-(`pnpm --filter restate-objects test`), the addon's in
+(`pnpm --filter restate-session-objects test`), the addon's in
 [`native/`](native/README.md#build-and-test)
-(`pnpm --filter restate-objects test:rust`), and
+(`pnpm --filter restate-session-objects test:rust`), and
 [`e2e/concurrency.ts`](../e2e/concurrency.ts) and
 [`e2e/crash.ts`](../e2e/crash.ts) against one.
 [`test/support.ts`](test/support.ts) runs a handler's attempts over an
 object's state in memory, through crashes and fencing; `restate-agents`'s
-tests use it too (`restate-objects/test/support`). `restate-objects/internal`
+tests use it too (`restate-session-objects/test/support`). `restate-session-objects/internal`
 has what the tests take apart: a handler run for one attempt over a context
 of their own (`invoke`), an attempt's session (`Attempt`, `withAttempt`), a
 database over a store of their own (`open`, `asDatabase`), and the store's
