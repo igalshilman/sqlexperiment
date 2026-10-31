@@ -16,6 +16,12 @@
 //! Every database of the process is kept warm in one page cache
 //! ([`page_cache`]); a session itself, and its commits, is a
 //! [`crate::Database`].
+//!
+//! A call runs on the JavaScript thread as far as it can ([`answer`]): one
+//! that needs nothing from the store, such as SQL on cached pages or a
+//! statement inside a transaction, returns its value, or throws its error;
+//! one that waits for the store goes on in the runtime and returns a promise.
+//! The caller `await`s either.
 use crate::{KvStore, Numeric, PageCache, PageCacheConfig, Value};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -225,7 +231,26 @@ fn error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
 /// One session of a namespace's database (see [`crate::Database`]): every
 /// SQL commit is durable when its call resolves.
 #[napi]
-pub struct Database(crate::Database);
+pub struct Database(Arc<crate::Database>);
+
+/// `call`'s value if it is ready at once, polled here on the JavaScript
+/// thread; else a promise of it, as it goes on in the runtime. Ready, a call
+/// spares two thread hops and a thread-safe function: what a call to the
+/// addon costs otherwise, several times the SQL it runs.
+fn answer<'env, T>(
+    env: &'env Env,
+    call: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<Either<T, PromiseRaw<'env, T>>>
+where
+    T: ToNapiValue + Send + 'static,
+{
+    use std::task::{Context, Poll, Waker};
+    let mut call = Box::pin(call);
+    match call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result.map(Either::A),
+        Poll::Pending => env.spawn_future(call).map(Either::B),
+    }
+}
 
 /// The page cache shared by the process's databases: 256 MiB of memory and
 /// 1 GiB of disk, in a file under the temporary directory, or the file
@@ -269,7 +294,7 @@ pub(crate) fn open<'env>(
         if reader == Some(true) {
             open = open.reader();
         }
-        Ok(Database(open.await.map_err(error)?))
+        Ok(Database(Arc::new(open.await.map_err(error)?)))
     })
 }
 
@@ -280,45 +305,57 @@ impl Database {
     /// commit is durable when this resolves.
     #[napi(
         ts_args_type = "sql: string, params?: SqlValue[]",
-        ts_return_type = "Promise<{ columns: string[]; rows: SqlValue[][] }>"
+        ts_return_type = "Answer<{ columns: string[]; rows: SqlValue[][] }>"
     )]
-    pub async fn query_columns(
+    pub fn query_columns<'env>(
         &self,
+        env: &'env Env,
         sql: String,
         params: Option<Vec<SqlValue>>,
-    ) -> Result<QueryResult> {
-        let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
-        let (columns, rows) = self.0.query_columns(&sql, params).await.map_err(error)?;
-        Ok(QueryResult {
-            columns,
-            rows: rows
-                .into_iter()
-                .map(|row| row.into_iter().map(SqlValue).collect())
-                .collect(),
+    ) -> Result<Either<QueryResult, PromiseRaw<'env, QueryResult>>> {
+        let db = self.0.clone();
+        answer(env, async move {
+            let params = params.map(|params| params.into_iter().map(|p| p.0).collect());
+            let (columns, rows) = db.query_columns(&sql, params).await.map_err(error)?;
+            Ok(QueryResult {
+                columns,
+                rows: rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(SqlValue).collect())
+                    .collect(),
+            })
         })
     }
 
     /// See [`crate::Database::begin`].
-    #[napi]
-    pub async fn begin(&self) -> Result<()> {
-        self.0.begin().await.map_err(error)
+    #[napi(ts_return_type = "Answer<void>")]
+    pub fn begin<'env>(&self, env: &'env Env) -> Result<Either<(), PromiseRaw<'env, ()>>> {
+        let db = self.0.clone();
+        answer(env, async move { db.begin().await.map_err(error) })
     }
 
     /// See [`crate::Database::commit`]: `records` by name.
-    #[napi(ts_args_type = "records?: Record<string, Buffer>")]
-    pub async fn commit(&self, records: Option<HashMap<String, Buffer>>) -> Result<()> {
-        let records = (records.unwrap_or_default().into_iter())
-            .map(|(name, value)| (name, Bytes::copy_from_slice(&value)));
-        self.0
-            .commit(records.collect::<Vec<_>>())
-            .await
-            .map_err(error)
+    #[napi(
+        ts_args_type = "records?: Record<string, Buffer>",
+        ts_return_type = "Answer<void>"
+    )]
+    pub fn commit<'env>(
+        &self,
+        env: &'env Env,
+        records: Option<HashMap<String, Buffer>>,
+    ) -> Result<Either<(), PromiseRaw<'env, ()>>> {
+        let records: Vec<_> = (records.unwrap_or_default().into_iter())
+            .map(|(name, value)| (name, Bytes::copy_from_slice(&value)))
+            .collect();
+        let db = self.0.clone();
+        answer(env, async move { db.commit(records).await.map_err(error) })
     }
 
     /// See [`crate::Database::rollback`].
-    #[napi]
-    pub async fn rollback(&self) -> Result<()> {
-        self.0.rollback().await.map_err(error)
+    #[napi(ts_return_type = "Answer<void>")]
+    pub fn rollback<'env>(&self, env: &'env Env) -> Result<Either<(), PromiseRaw<'env, ()>>> {
+        let db = self.0.clone();
+        answer(env, async move { db.rollback().await.map_err(error) })
     }
 
     /// See [`crate::Database::is_usable`].
@@ -328,16 +365,24 @@ impl Database {
     }
 
     /// See [`crate::Database::record`].
-    #[napi]
-    pub async fn record(&self, name: String) -> Result<Buffer> {
-        let value = self.0.record(&name).await.map_err(error)?;
-        Ok(Buffer::from(value.to_vec()))
+    #[napi(ts_return_type = "Answer<Buffer>")]
+    pub fn record<'env>(
+        &self,
+        env: &'env Env,
+        name: String,
+    ) -> Result<Either<Buffer, PromiseRaw<'env, Buffer>>> {
+        let db = self.0.clone();
+        answer(env, async move {
+            let value = db.record(&name).await.map_err(error)?;
+            Ok(Buffer::from(value.to_vec()))
+        })
     }
 
     /// See [`crate::Database::save`].
-    #[napi]
-    pub async fn save(&self) -> Result<()> {
-        self.0.save().await.map_err(error)
+    #[napi(ts_return_type = "Answer<void>")]
+    pub fn save<'env>(&self, env: &'env Env) -> Result<Either<(), PromiseRaw<'env, ()>>> {
+        let db = self.0.clone();
+        answer(env, async move { db.save().await.map_err(error) })
     }
 
     /// See [`crate::Database::close`].

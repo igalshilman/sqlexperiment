@@ -101,18 +101,23 @@ interface Addon {
 
 /**
  * A session of the addon: one call at a time holds it. A transaction's body
- * runs between `begin` and `commit` (or `rollback`).
+ * runs between `begin` and `commit` (or `rollback`). A call answers at once
+ * with its value (or throws) when it needs nothing from the store, such as
+ * SQL on cached pages, and with a promise when it waits for the store.
  */
 interface NativeSession {
-  queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult>;
-  begin(): Promise<void>;
-  commit(records: Record<string, Buffer>): Promise<void>;
-  rollback(): Promise<void>;
-  record(name: string): Promise<Buffer>;
+  queryColumns(sql: string, params?: SqlParam[]): Answer<SqlQueryResult>;
+  begin(): Answer<void>;
+  commit(records: Record<string, Buffer>): Answer<void>;
+  rollback(): Answer<void>;
+  record(name: string): Answer<Buffer>;
   isUsable(): boolean;
-  save(): Promise<void>;
+  save(): Answer<void>;
   close(): Promise<void>;
 }
+
+/** A value, or a promise of it: `await` takes either. */
+type Answer<T> = T | Promise<T>;
 
 const addon = load();
 
@@ -172,9 +177,10 @@ abstract class Sql implements DatabaseWriter {
 
   /**
    * `call`'s result, or its {@link failure}: `call` makes the request, as the
-   * addon throws arguments it cannot convert as it is called.
+   * addon throws as it is called (arguments it cannot convert, and the error
+   * of a call that answers at once).
    */
-  protected async request<T>(call: () => Promise<T>): Promise<T> {
+  protected async request<T>(call: () => Answer<T>): Promise<T> {
     try {
       return await call();
     } catch (error) {
@@ -283,7 +289,9 @@ export class Connection extends Sql {
 
   /** Roll back, unless a storage error ended the session: the caller rethrows its own error, which says why. */
   private async rollback(): Promise<void> {
-    await this.native.rollback().catch(() => {});
+    try {
+      await this.native.rollback();
+    } catch {}
   }
 }
 

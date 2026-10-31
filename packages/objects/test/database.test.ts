@@ -243,6 +243,25 @@ test('a store may answer a value rather than a promise of it', async () => {
   await reopened.close();
 });
 
+test('a long statement lets the event loop run while it does', async () => {
+  // A call answers at once when it can, on the JavaScript thread: one that
+  // runs long yields, and goes on beside it.
+  const db = await open(fresh(), new Backend().request());
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 1);
+  // Run twice: the second run, of a statement it knows to be slow, too.
+  const count =
+    'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 300000) SELECT count(*) AS n FROM c';
+  for (let run = 0; run < 2; run++) {
+    ticks = 0;
+    const row = await db.get<{ n: number }>(count);
+    assert.equal(row?.n, 300000);
+    assert.ok(ticks > 0, `the timer ran while the statement did (run ${run + 1})`);
+  }
+  clearInterval(timer);
+  await db.save();
+});
+
 test('a transaction holds the session: other calls wait until it ends', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');
