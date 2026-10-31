@@ -10,6 +10,8 @@ import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
 import {
   open,
+  type Row,
+  sqlOver,
   SqlError,
   type Database,
   type SqlDatabase,
@@ -22,7 +24,7 @@ import {
 import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
 
-export type { SqlDatabase, SqlParam, SqlQueryResult, SqlValue };
+export type { Row, SqlDatabase, SqlParam, SqlQueryResult, SqlValue };
 
 /**
  * The object's database, `ctx.db`, for the whole handler: each statement
@@ -215,12 +217,8 @@ async function forHandler<T>(call: Promise<T>): Promise<T> {
 }
 
 /** The SQL of a transaction's body: `tx`'s, failing as {@link forHandler} does. */
-function forBody(tx: SqlDatabase): SqlDatabase {
-  return {
-    query: (sql, params) => forHandler(tx.query(sql, params)),
-    queryColumns: (sql, params) => forHandler(tx.queryColumns(sql, params)),
-    execute: (sql, params) => forHandler(tx.execute(sql, params)),
-  };
+function forBody(tx: Transaction): SqlDatabase {
+  return sqlOver((sql, params) => forHandler(tx.queryColumns(sql, params)));
 }
 
 // A transaction's sends commit with it, in the database's record `outbox`
@@ -320,9 +318,7 @@ export class SqlAttempt {
     this.ctx = ctx;
     this.name = name;
     this.db = {
-      query: (sql, params) => this.call((db) => db.query(sql, params)),
-      queryColumns: (sql, params) => this.call((db) => db.queryColumns(sql, params)),
-      execute: (sql, params) => this.call((db) => db.execute(sql, params)),
+      ...sqlOver((sql, params) => this.call((db) => db.queryColumns(sql, params))),
       transaction: (body) => this.call((db) => db.transaction((tx) => body(forBody(tx)))),
     };
     sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));

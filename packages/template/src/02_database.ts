@@ -19,7 +19,7 @@ const greeter = restate.object({
   handlers: {
     greet: async (ctx: restate.ObjectContext) => {
       await ctx.db.execute('INSERT INTO greetings DEFAULT VALUES');
-      const greetings = await ctx.db.query('SELECT at FROM greetings'); // rows, each an array of values
+      const greetings = await ctx.db.values('SELECT at FROM greetings'); // rows, each an array of values
       return `Hello, ${ctx.key}! (greeting ${greetings.length})`;
     },
   },

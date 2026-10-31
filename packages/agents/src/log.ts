@@ -68,10 +68,10 @@ const heads = new WeakMap<SqlSession, Head>();
 async function headOf(db: SqlSession, start: () => Promise<Start | null>): Promise<Head> {
   const cached = heads.get(db);
   if (cached) return cached;
-  const rows = (await db.query(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
+  const rows = (await db.values(`SELECT id, message FROM ${TABLE} WHERE position IS NOT NULL ORDER BY position`)).map(
     ([id, json]) => ({ id: Number(id), message: JSON.parse(String(json)) as Said, json: String(json) }),
   );
-  const [[last, next]] = (await db.query(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
+  const [[last, next]] = (await db.values(`SELECT MAX(seq), MAX(id) + 1 FROM ${TABLE}`)) as [
     [number | null, number | null],
   ];
   if (last !== null) return { rows, seq: last, next: next! };
@@ -139,7 +139,7 @@ export async function page(
   await SCHEMA.ensure(db);
   const first = start ? { first: start.id } : {};
   if (cursor !== undefined) {
-    const rows = await db.query(`SELECT id, message, seq FROM ${TABLE} WHERE seq > ? ORDER BY seq LIMIT ?`, [
+    const rows = await db.values(`SELECT id, message, seq FROM ${TABLE} WHERE seq > ? ORDER BY seq LIMIT ?`, [
       cursor,
       limit + 1,
     ]);
@@ -151,8 +151,8 @@ export async function page(
       ...first,
     };
   }
-  const [[now]] = (await db.query(`SELECT COALESCE(MAX(seq), ?) FROM ${TABLE}`, [start?.seq ?? 0])) as [[number]];
-  const rows = await db.query(`SELECT id, message FROM ${TABLE} WHERE id < ? ORDER BY id DESC LIMIT ?`, [
+  const [[now]] = (await db.values(`SELECT COALESCE(MAX(seq), ?) FROM ${TABLE}`, [start?.seq ?? 0])) as [[number]];
+  const rows = await db.values(`SELECT id, message FROM ${TABLE} WHERE id < ? ORDER BY id DESC LIMIT ?`, [
     before ?? Number.MAX_SAFE_INTEGER,
     limit + 1,
   ]);

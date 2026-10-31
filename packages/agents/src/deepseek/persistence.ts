@@ -42,7 +42,7 @@ const SCHEMA = new Schema('restate-agents.deepseek', [
 /** The stored events of session `id`, in order: for reading the log without a harness. */
 export async function storedEvents(db: SqlSession, id: SessionId): Promise<SessionEvent[]> {
   await SCHEMA.ensure(db);
-  const rows = await db.query('SELECT event FROM restate_deepseek_events WHERE session = ? ORDER BY seq', [id]);
+  const rows = await db.values('SELECT event FROM restate_deepseek_events WHERE session = ? ORDER BY seq', [id]);
   return rows.map(([event]) => JSON.parse(String(event)) as SessionEvent);
 }
 
@@ -104,7 +104,7 @@ export class SqlSessionPersistence extends SessionPersistence {
     const created = this.created.get(id);
     if (created) return { ...created, count: 0 };
     const [row] = await this.serial((db) =>
-      db.query(
+      db.values(
         'SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions WHERE id = ?',
         [id],
       ),
@@ -150,7 +150,7 @@ export class SqlSessionPersistence extends SessionPersistence {
 
   async list(): Promise<readonly SessionPersistenceSnapshot[]> {
     const rows = await this.serial((db) =>
-      db.query(
+      db.values(
         'SELECT header, inherited, (SELECT count(*) FROM restate_deepseek_events WHERE session = id) FROM restate_deepseek_sessions',
       ),
     );
@@ -212,7 +212,7 @@ class SqlSessionHandle implements SessionHandle {
   async read(offset = 0, length = Infinity): Promise<SessionHandleReadResult> {
     this.#check('read');
     const rows = await this.#store.serial((db) =>
-      db.query('SELECT event FROM restate_deepseek_events WHERE session = ? AND seq >= ? ORDER BY seq', [
+      db.values('SELECT event FROM restate_deepseek_events WHERE session = ? AND seq >= ? ORDER BY seq', [
         this.id,
         offset,
       ]),

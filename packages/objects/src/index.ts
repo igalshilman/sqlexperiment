@@ -31,6 +31,7 @@ export type {
   SqlTransaction,
   SqlTransactionSends,
   SqlParam,
+  Row,
   SqlQueryResult,
   SqlValue,
 } from './session.ts';

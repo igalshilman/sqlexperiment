@@ -48,7 +48,7 @@ export const handlers = {
    */
   transfer: (ctx: restate.ObjectContext, t: Transfer) =>
     ctx.transaction(async ({ db }): Promise<Transfer> => {
-      const [seen] = await db.query('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
+      const [seen] = await db.values('SELECT src, dst, amount FROM transfers WHERE id = ?', [t.id]);
       if (seen) {
         const [from, to, amount] = seen as [number, number, number];
         return { id: t.id, from, to, amount };

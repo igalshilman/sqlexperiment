@@ -22,7 +22,7 @@ const ledger = restate.object({
         await db.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, id]);
       }), // one transaction: durable as a whole once ctx.transaction resolves
     balance: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext, id: number) =>
-      ctx.db.query('SELECT balance FROM accounts WHERE id = ?', [id]),
+      ctx.db.get<{ balance: number }>('SELECT balance FROM accounts WHERE id = ?', [id]),
     ),
   },
 });
@@ -46,6 +46,14 @@ handler runs or not: see [Shared handlers](#shared-handlers). Each statement is 
 `db.transaction(fn)` groups several; calls run one at a time, in call order.
 A crash between two commits keeps the first: statements that must stand or
 fall together go in one transaction.
+
+Rows come back as objects by column name: `query<T>(sql, params)` returns
+them all, and `get<T>` the first, or `undefined`. `T` declares a row's shape
+without checking it; integers past 2^53 come back as bigints, and booleans as
+0 or 1. An expression needs `AS` to be named, and two columns of one name are
+an error. `values(sql, params)` returns the rows as arrays, in column order:
+for adapters, and for columns that share a name. `execute` runs one or more
+statements, without rows.
 
 `ctx.transaction(body)` is the handler's unit of work: `body` gets
 `{ db, tx }`, one transaction's SQL and its sends, which commit together (see
@@ -318,7 +326,7 @@ of the exclusive handler's commits fails, and Restate retries it
 
 ```ts
 count: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) =>
-  ctx.db.query('SELECT count(*) FROM accounts'),
+  ctx.db.get<{ accounts: number }>('SELECT count(*) AS accounts FROM accounts'),
 ),
 ```
 

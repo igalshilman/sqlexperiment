@@ -167,7 +167,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     const versions = Object.entries(checkpoint.channel_versions ?? {});
     const values: Record<string, unknown> = {};
     if (versions.length === 0) return values;
-    const rows = await this.#db.query(
+    const rows = await this.#db.values(
       `SELECT channel, type, value FROM restate_langgraph_channel_values WHERE thread_id = ? AND checkpoint_ns = ? AND (${versions
         .map(() => '(channel = ? AND version = ?)')
         .join(' OR ')})`,
@@ -193,7 +193,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     // A checkpoint of an earlier format (v < 4) keeps its pending sends as
     // writes of its parent.
     if (checkpoint.v < 4 && parentId !== null) await this.#migratePendingSends(checkpoint, threadId, ns, parentId);
-    const writes = await this.#db.query(
+    const writes = await this.#db.values(
       'SELECT task_id, channel, type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
       [threadId, ns, checkpointId],
     );
@@ -216,7 +216,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
   }
 
   async #migratePendingSends(checkpoint: Checkpoint, threadId: string, ns: string, parentId: string) {
-    const sends = await this.#db.query(
+    const sends = await this.#db.values(
       'SELECT type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? AND channel = ? ORDER BY rowid',
       [threadId, ns, parentId, TASKS],
     );
@@ -232,11 +232,11 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     return this.#serial(async () => {
       const { thread_id, checkpoint_ns = '', checkpoint_id } = config.configurable ?? {};
       const rows = checkpoint_id
-        ? await this.#db.query(
+        ? await this.#db.values(
             `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
             [thread_id, checkpoint_ns, checkpoint_id],
           )
-        : await this.#db.query(
+        : await this.#db.values(
             `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? ORDER BY checkpoint_id DESC LIMIT 1`,
             [thread_id, checkpoint_ns],
           );
@@ -262,7 +262,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
         where.push(condition);
         params.push(value);
       }
-      const rows = await this.#db.query(
+      const rows = await this.#db.values(
         `SELECT ${COLUMNS} FROM restate_langgraph_checkpoints ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY checkpoint_id DESC`,
         params,
       );

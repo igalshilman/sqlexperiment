@@ -22,7 +22,7 @@ const inventory = restate.object({
     },
 
     count: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
-      const [count] = (await ctx.db.query('SELECT count FROM stock')).map(([n]) => n);
+      const [count] = (await ctx.db.values('SELECT count FROM stock')).map(([n]) => n);
       return count;
     }),
   },

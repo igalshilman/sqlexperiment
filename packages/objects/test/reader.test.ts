@@ -18,7 +18,7 @@ describe("a shared handler's ctx.db", () => {
   it('reads what the exclusive handler committed, while it runs', async () => {
     const { reader } = await object();
     const shared = reader();
-    expect(await shared.end(() => shared.db.query('SELECT n FROM numbers'))).toEqual([[1]]);
+    expect(await shared.end(() => shared.db.values('SELECT n FROM numbers'))).toEqual([[1]]);
   });
 
   it('keeps what it writes to itself', async () => {
@@ -29,20 +29,20 @@ describe("a shared handler's ctx.db", () => {
       await first.db.execute('INSERT INTO numbers VALUES (99)');
     });
     const second = reader('again');
-    expect(await second.end(() => second.db.query('SELECT n FROM numbers'))).toEqual([[1]]);
+    expect(await second.end(() => second.db.values('SELECT n FROM numbers'))).toEqual([[1]]);
   });
 
   it('reads the state it opened on, whatever the exclusive handler commits meanwhile', async () => {
     const { owner, reader } = await object();
     const shared = reader();
     const reads = shared.end(async () => {
-      const before = await shared.db.query('SELECT n FROM numbers');
+      const before = await shared.db.values('SELECT n FROM numbers');
       await owner.db.execute('INSERT INTO numbers VALUES (2)');
-      return [before, await shared.db.query('SELECT n FROM numbers ORDER BY n')];
+      return [before, await shared.db.values('SELECT n FROM numbers ORDER BY n')];
     });
     expect(await reads).toEqual([[[1]], [[1]]]);
     const later = reader('later');
-    expect(await later.end(() => later.db.query('SELECT n FROM numbers ORDER BY n'))).toEqual([[1], [2]]);
+    expect(await later.end(() => later.db.values('SELECT n FROM numbers ORDER BY n'))).toEqual([[1], [2]]);
   });
 
   it('has no transaction of its own', async () => {

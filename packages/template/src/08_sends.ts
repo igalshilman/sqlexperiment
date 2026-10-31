@@ -15,7 +15,7 @@
 import * as restate from 'restate-objects';
 
 const balanceOf = async (db: restate.SqlDatabase) => {
-  const [balance] = (await db.query('SELECT coalesce(sum(amount), 0) FROM entries')).map(([sum]) => sum);
+  const [balance] = (await db.values('SELECT coalesce(sum(amount), 0) FROM entries')).map(([sum]) => sum);
   return Number(balance);
 };
 
@@ -34,7 +34,7 @@ const account = restate.object({
       ctx.transaction(async ({ db, tx }) => {
         const id = ctx.request().id; // the transfer's id: the same on every attempt
         // A retry finds the transfer committed, and its send made: it moves nothing.
-        const [done] = await db.query('SELECT 1 FROM entries WHERE id = ?', [id]);
+        const [done] = await db.values('SELECT 1 FROM entries WHERE id = ?', [id]);
         if (done === undefined) {
           if ((await balanceOf(db)) < amount) throw new restate.TerminalError('Insufficient funds');
           await db.execute('INSERT INTO entries (id, amount) VALUES (?, ?)', [id, -amount]);

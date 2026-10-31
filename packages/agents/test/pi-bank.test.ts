@@ -48,7 +48,7 @@ describe('the bank agent on pi', () => {
     const c = conversation(besideYours, 'tables');
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: /);
     const names = await c.read(async (ctx) =>
-      (await ctx.db.query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")).map(([name]) => name),
+      (await ctx.db.values("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")).map(([name]) => name),
     );
     expect(names.filter((name) => !String(name).startsWith('restate_'))).toEqual(['tasks']);
   });

@@ -66,7 +66,7 @@ export const warehouse = restate.object({
     reserve: (ctx: Ctx, { order, qty }: { order: string; qty: number }) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
-        const [held] = await db.query('SELECT state FROM reservations WHERE orderId = ?', [order]);
+        const [held] = await db.values('SELECT state FROM reservations WHERE orderId = ?', [order]);
         if (held) return held[0] !== 'rejected';
         const [available] = await row<[number]>(db, 'SELECT available FROM stock');
         const ok = available >= qty;
@@ -86,7 +86,7 @@ export const warehouse = restate.object({
     release: (ctx: Ctx, { order }: { order: string }) =>
       ctx.transaction(async ({ db }) => {
         await db.execute(WAREHOUSE);
-        const [held] = await db.query(`SELECT qty FROM reservations WHERE orderId = ? AND state = 'held'`, [order]);
+        const [held] = await db.values(`SELECT qty FROM reservations WHERE orderId = ? AND state = 'held'`, [order]);
         if (!held) return;
         await db.execute('UPDATE stock SET available = available + ?', [held[0]!]);
         await db.execute(`UPDATE reservations SET state = 'released' WHERE orderId = ?`, [order]);
@@ -98,7 +98,7 @@ export const warehouse = restate.object({
         await db.execute(WAREHOUSE);
         const [available] = await row<[number]>(db, 'SELECT available FROM stock');
         const [restocked] = await row<[number]>(db, 'SELECT coalesce(sum(qty), 0) FROM restocks');
-        const reservations = await db.query('SELECT orderId, qty, state FROM reservations ORDER BY orderId');
+        const reservations = await db.values('SELECT orderId, qty, state FROM reservations ORDER BY orderId');
         return { available, restocked, reservations: reservations as Reservation[] };
       }),
   },
@@ -116,7 +116,7 @@ export interface Order {
 
 async function readOrder(db: restate.SqlDatabase): Promise<Order | null> {
   await db.execute(ORDER);
-  const [stored] = await db.query('SELECT sku, qty, status FROM orders');
+  const [stored] = await db.values('SELECT sku, qty, status FROM orders');
   return stored ? { sku: String(stored[0]), qty: Number(stored[1]), status: String(stored[2]) } : null;
 }
 

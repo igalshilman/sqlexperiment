@@ -35,8 +35,8 @@ const notes = restate.object({
 
     /** Shared: it reads while `add` writes; a key with no notes yet has none. */
     list: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext) => {
-      const rows = await ctx.db.query('SELECT text FROM notes ORDER BY rowid');
-      return rows.map(([text]) => text);
+      const rows = await ctx.db.query<{ text: string }>('SELECT text FROM notes ORDER BY rowid');
+      return rows.map(({ text }) => text);
     }),
   },
 });
@@ -119,8 +119,8 @@ const recall = tool({
   description: 'Everything remembered about the user.',
   input: z.object({}),
   run: async (_input, { ctx }) => {
-    const rows = await ctx.db.query('SELECT fact FROM facts ORDER BY rowid');
-    return rows.map(([fact]) => fact);
+    const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+    return rows.map(({ fact }) => fact);
   },
 });
 
@@ -137,8 +137,8 @@ const assistant = object({
 
     /** What the assistant knows about the user: shared, so it answers while a message is answered. */
     facts: handlers.object.shared(async (ctx) => {
-      const rows = await ctx.db.query('SELECT fact FROM facts ORDER BY rowid');
-      return rows.map(([fact]) => fact);
+      const rows = await ctx.db.query<{ fact: string }>('SELECT fact FROM facts ORDER BY rowid');
+      return rows.map(({ fact }) => fact);
     }),
   },
 });

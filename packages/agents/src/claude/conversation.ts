@@ -35,19 +35,19 @@ export class Conversation {
 
   /** The answer to prompt `id`, or undefined. */
   async answer(id: string): Promise<string | undefined> {
-    const [row] = await this.#db.query('SELECT answer FROM restate_claude_answers WHERE prompt = ?', [id]);
+    const [row] = await this.#db.values('SELECT answer FROM restate_claude_answers WHERE prompt = ?', [id]);
     return row?.[0] as string | undefined;
   }
 
   /** The messages, in order. */
   async messages(): Promise<MessageParam[]> {
-    const rows = await this.#db.query('SELECT message FROM restate_claude_messages ORDER BY seq');
+    const rows = await this.#db.values('SELECT message FROM restate_claude_messages ORDER BY seq');
     return rows.map(([message]) => JSON.parse(String(message)));
   }
 
   /** The messages stored after `seq`, in order, each with its own `seq`. */
   async since(seq: number): Promise<[seq: number, message: MessageParam][]> {
-    const rows = await this.#db.query('SELECT seq, message FROM restate_claude_messages WHERE seq > ? ORDER BY seq', [
+    const rows = await this.#db.values('SELECT seq, message FROM restate_claude_messages WHERE seq > ? ORDER BY seq', [
       seq,
     ]);
     return rows.map(([at, message]) => [Number(at), JSON.parse(String(message)) as MessageParam]);
@@ -55,7 +55,7 @@ export class Conversation {
 
   /** The prompt being answered: the last message's, unless it is answered. */
   async pending(): Promise<string | undefined> {
-    const [row] = await this.#db.query(
+    const [row] = await this.#db.values(
       'SELECT prompt FROM restate_claude_messages WHERE prompt NOT IN (SELECT prompt FROM restate_claude_answers) ORDER BY seq DESC LIMIT 1',
     );
     return row?.[0] as string | undefined;

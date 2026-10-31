@@ -70,7 +70,7 @@ test('runs SQL and round-trips values', async () => {
   await db.execute('CREATE TABLE t(i INTEGER, r REAL, s TEXT, b BLOB, n INTEGER)');
   await db.execute('INSERT INTO t VALUES(?, ?, ?, ?, ?)', [42, 1.5, 'héllo', Uint8Array.from([1, 2, 3]), null]);
   await db.execute('INSERT INTO t VALUES(?, ?, ?, ?, ?)', [2n ** 62n, -0.25, '', new Uint8Array(0), true]);
-  const rows = await db.query('SELECT * FROM t ORDER BY i');
+  const rows = await db.values('SELECT * FROM t ORDER BY i');
   assert.deepEqual(rows[0], [42, 1.5, 'héllo', Buffer.from([1, 2, 3]), null]);
   assert.deepEqual(rows[1], [2n ** 62n, -0.25, '', Buffer.alloc(0), 1]);
   await db.save();
@@ -78,15 +78,54 @@ test('runs SQL and round-trips values', async () => {
   // Another session, and another process's view (no cached state), read it.
   for (const name of [ns, fresh()]) {
     const again = await open(name, backend.request());
-    assert.deepEqual(await again.query('SELECT count(*) FROM t'), [[2]]);
+    assert.deepEqual(await again.values('SELECT count(*) FROM t'), [[2]]);
     await again.save();
   }
+});
+
+test('rows come back as objects by column name, or as arrays from values', async () => {
+  const db = await open(fresh(), new Backend().request());
+  await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, big INTEGER, flag INTEGER)');
+  await db.execute('INSERT INTO t VALUES(?, ?, ?, ?)', [1, 'a', 2n ** 62n, true]);
+  await db.execute('INSERT INTO t VALUES(?, ?, ?, ?)', [2, 'b', 7, false]);
+
+  assert.deepEqual(await db.query('SELECT id, name FROM t ORDER BY id'), [
+    { id: 1, name: 'a' },
+    { id: 2, name: 'b' },
+  ]);
+  // Past 2^53 a bigint; a boolean parameter comes back as 0 or 1; an expression is named by AS.
+  assert.deepEqual(await db.get('SELECT big, flag, id * 10 AS tenfold FROM t WHERE id = 1'), {
+    big: 2n ** 62n,
+    flag: 1,
+    tenfold: 10,
+  });
+  assert.equal(await db.get('SELECT id FROM t WHERE id = 3'), undefined);
+  assert.deepEqual(await db.values('SELECT id, name FROM t ORDER BY id'), [
+    [1, 'a'],
+    [2, 'b'],
+  ]);
+
+  // Two columns of one name: an error for objects, which would lose one; values has both.
+  const join = 'SELECT a.id, b.id FROM t a JOIN t b ON a.id = b.id';
+  await assert.rejects(db.query(join), /column id is named twice/);
+  await assert.rejects(db.get(join), /column id is named twice/);
+  assert.deepEqual(await db.values(`${join} ORDER BY a.id`), [
+    [1, 1],
+    [2, 2],
+  ]);
+  assert.equal(db.isUsable(), true);
+
+  assert.deepEqual(
+    await db.transaction(async (tx) => tx.get<{ id: number }>('INSERT INTO t (id) VALUES (3) RETURNING id')),
+    { id: 3 },
+  );
+  await db.save();
 });
 
 test('an SQL error leaves the session usable; a transaction rolls back', async () => {
   const db = await open(fresh(), new Backend().request());
   await db.execute('CREATE TABLE t(id INTEGER PRIMARY KEY)');
-  await assert.rejects(db.query('SELECT * FROM missing'), /no such table/);
+  await assert.rejects(db.values('SELECT * FROM missing'), /no such table/);
   assert.equal(db.isUsable(), true);
   await assert.rejects(
     db.transaction(async (tx) => {
@@ -95,9 +134,9 @@ test('an SQL error leaves the session usable; a transaction rolls back', async (
     }),
     /abort/,
   );
-  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  assert.deepEqual(await db.values('SELECT count(*) FROM t'), [[0]]);
   assert.equal(
-    await db.transaction(async (tx) => tx.query('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0]![0]),
+    await db.transaction(async (tx) => tx.values('INSERT INTO t VALUES(2) RETURNING id')).then((r) => r[0]![0]),
     2,
   );
   await db.save();
@@ -130,10 +169,10 @@ async function consistentAfterLoss(lost: number, seed: number) {
   const seen: number[] = [];
   for (const name of [ns, fresh()]) {
     const view = await open(name, backend.request());
-    const [[rows, landed]] = (await view.query('SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t', [lost])) as [
+    const [[rows, landed]] = (await view.values('SELECT count(*), count(*) FILTER (WHERE id = ?) FROM t', [lost])) as [
       [number, number],
     ];
-    const [[integrity]] = (await view.query('PRAGMA integrity_check')) as [[string]];
+    const [[integrity]] = (await view.values('PRAGMA integrity_check')) as [[string]];
     await view.save();
     if (rows !== 19 + landed || integrity !== 'ok') return false;
     seen.push(landed);
@@ -181,7 +220,7 @@ test('a store of a class has its methods called on it', async () => {
   const db = await open(fresh(), new MapStore());
   await db.execute('CREATE TABLE t(id INTEGER)');
   await db.execute('INSERT INTO t VALUES (1)');
-  assert.deepEqual(await db.query('SELECT id FROM t'), [[1]]);
+  assert.deepEqual(await db.values('SELECT id FROM t'), [[1]]);
   await db.save();
 });
 
@@ -197,10 +236,10 @@ test('a store may answer a value rather than a promise of it', async () => {
   const db = await open(fresh(), store as unknown as Store);
   await db.execute('CREATE TABLE t(id INTEGER)');
   await db.execute('INSERT INTO t VALUES (1)');
-  assert.deepEqual(await db.query('SELECT id FROM t'), [[1]]);
+  assert.deepEqual(await db.values('SELECT id FROM t'), [[1]]);
   await db.save();
   const reopened = await open(fresh(), store as unknown as Store);
-  assert.deepEqual(await reopened.query('SELECT id FROM t'), [[1]]);
+  assert.deepEqual(await reopened.values('SELECT id FROM t'), [[1]]);
   await reopened.close();
 });
 
@@ -220,8 +259,8 @@ test('a transaction holds the session: other calls wait until it ends', async ()
   await assert.rejects(rolledBack, /abort/);
   await write;
   await committed;
-  assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[2], [3]]);
-  await assert.rejects(async () => handle!.query('SELECT 1'), /the transaction has ended/);
+  assert.deepEqual(await db.values('SELECT id FROM t ORDER BY id'), [[2], [3]]);
+  await assert.rejects(async () => handle!.values('SELECT 1'), /the transaction has ended/);
   await db.save();
 });
 
@@ -237,9 +276,9 @@ test('a COMMIT that fails rolls the transaction back', async () => {
   );
   assert.ok(db.isUsable());
   // Nothing of it is left, and the next transaction can begin.
-  assert.deepEqual(await db.query('SELECT * FROM c'), []);
+  assert.deepEqual(await db.values('SELECT * FROM c'), []);
   await db.transaction(async (tx) => tx.execute('INSERT INTO p VALUES(7)'));
-  assert.deepEqual(await db.query('SELECT id FROM p'), [[7]]);
+  assert.deepEqual(await db.values('SELECT id FROM p'), [[7]]);
   await db.save();
 });
 
@@ -259,7 +298,7 @@ test('a statement that ends the transaction of a body ends the session, and comm
     );
     assert.equal(session.isUsable(), false);
   }
-  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  assert.deepEqual(await db.values('SELECT count(*) FROM t'), [[0]]);
   await db.save();
 });
 
@@ -272,7 +311,7 @@ test('save refuses a transaction left open, whose changes are lost', async () =>
   await db.execute('INSERT INTO t VALUES(1)');
   await assert.rejects(db.save(), /left open/);
   const again = await open(ns, backend.request());
-  assert.deepEqual(await again.query('SELECT count(*) FROM t'), [[0]]);
+  assert.deepEqual(await again.values('SELECT count(*) FROM t'), [[0]]);
   await again.save();
 });
 
@@ -294,7 +333,7 @@ test('records a commit cannot hold are refused, and the session goes on', async 
     /cannot name a record/,
   );
   assert.ok(db.isUsable());
-  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  assert.deepEqual(await db.values('SELECT count(*) FROM t'), [[0]]);
   await db.save();
 });
 
@@ -312,9 +351,9 @@ test('a call running meanwhile does not make the session look unusable', async (
       /no/,
     );
   }
-  assert.deepEqual(await db.query('SELECT count(*) FROM t'), [[0]]);
+  assert.deepEqual(await db.values('SELECT count(*) FROM t'), [[0]]);
   // Nor while a statement runs.
-  const running = db.query(
+  const running = db.values(
     'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000) SELECT count(*) FROM n',
   );
   await new Promise((resolve) => setImmediate(resolve));
@@ -341,7 +380,7 @@ test('records commit with their transaction, and only then', async () => {
   let before: string | undefined;
   let after: string | undefined;
   await db.transaction(async (tx) => {
-    await tx.query('SELECT * FROM t');
+    await tx.values('SELECT * FROM t');
     const earlier = text(tx);
     tx.setRecord('outbox', bytes('sends 1'));
     tx.setRecord('schema', bytes('1'));
@@ -390,7 +429,7 @@ test('a call to the session inside its transaction is refused, not left waiting'
     later = new Promise((resolve) => setTimeout(resolve, 5)).then(() => db.execute('INSERT INTO t VALUES(3)'));
   });
   await later;
-  assert.deepEqual(await db.query('SELECT id FROM t ORDER BY id'), [[1], [3]]);
+  assert.deepEqual(await db.values('SELECT id FROM t ORDER BY id'), [[1], [3]]);
   await db.save();
 });
 
@@ -399,12 +438,12 @@ test('a call to a session inside a transaction of another, inside its own, is re
   const b = await open(fresh(), new Backend().request());
   await a.transaction(async () => {
     await b.transaction(async (tx) => {
-      await tx.query('SELECT 1');
+      await tx.values('SELECT 1');
       // `a` waits for its transaction, which waits for this body.
-      await assert.rejects(a.query('SELECT 1'), /use the transaction handle/);
+      await assert.rejects(a.values('SELECT 1'), /use the transaction handle/);
     });
     // Once b's transaction has ended, b may be used again from a's body.
-    assert.deepEqual(await b.query('SELECT 1'), [[1]]);
+    assert.deepEqual(await b.values('SELECT 1'), [[1]]);
   });
   await a.save();
   await b.save();
@@ -467,7 +506,7 @@ for (const { how, keys } of [
       for (; committed < 40; committed++) await db.execute('INSERT INTO t VALUES (randomblob(3000))');
     }, /listing failed/);
     const reopened = await open(ns, backend.request());
-    assert.deepEqual(await reopened.query('SELECT count(*) FROM t'), [[committed]]);
+    assert.deepEqual(await reopened.values('SELECT count(*) FROM t'), [[committed]]);
     await reopened.close();
   });
 }
@@ -492,22 +531,22 @@ test('a reader reads beside the owner, writes nothing, and keeps the state it op
   await owner.execute('INSERT INTO t VALUES (1)');
 
   const reader = await open(ns, readerOf(backend), { reader: true });
-  assert.deepEqual(await reader.query('SELECT n FROM t'), [[1]]);
+  assert.deepEqual(await reader.values('SELECT n FROM t'), [[1]]);
   // Its own changes stay in the session.
   await reader.execute('CREATE TABLE IF NOT EXISTS t(n INTEGER)');
   await reader.execute('INSERT INTO t VALUES (99)');
-  assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
+  assert.deepEqual(await reader.values('SELECT n FROM t ORDER BY n'), [[1], [99]]);
   // Its records, too.
   await reader.transaction(async (tx) => tx.setRecord('outbox', bytes('mine')));
   assert.equal(await text(reader), 'mine');
 
   // The owner commits: the reader keeps the state it opened on.
   await owner.execute('INSERT INTO t VALUES (2)');
-  assert.deepEqual(await reader.query('SELECT n FROM t ORDER BY n'), [[1], [99]]);
+  assert.deepEqual(await reader.values('SELECT n FROM t ORDER BY n'), [[1], [99]]);
   await reader.close();
 
   const again = await open(ns, readerOf(backend), { reader: true });
-  assert.deepEqual(await again.query('SELECT n FROM t ORDER BY n'), [[1], [2]]);
+  assert.deepEqual(await again.values('SELECT n FROM t ORDER BY n'), [[1], [2]]);
   assert.equal(await text(again), '');
   await again.close();
   await owner.save();
@@ -515,6 +554,6 @@ test('a reader reads beside the owner, writes nothing, and keeps the state it op
 
 test('a reader of a namespace without a database reads none', async () => {
   const reader = await open(fresh(), readerOf(new Backend()), { reader: true });
-  assert.deepEqual(await reader.query('SELECT count(*) FROM sqlite_schema'), [[0]]);
+  assert.deepEqual(await reader.values('SELECT count(*) FROM sqlite_schema'), [[0]]);
   await reader.close();
 });

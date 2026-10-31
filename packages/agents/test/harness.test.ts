@@ -39,7 +39,7 @@ interface Settings {
 const SCHEMA = 'CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)';
 async function settingsOf(ctx: restate.ObjectContext): Promise<Settings> {
   await ctx.db.execute(SCHEMA);
-  const [row] = await ctx.db.query('SELECT json FROM settings');
+  const [row] = await ctx.db.values('SELECT json FROM settings');
   return row ? (JSON.parse(String(row[0])) as Settings) : {};
 }
 const clock = tool({ name: 'clock', description: 'The time.', input: z.object({}), run: async () => '12:00' });

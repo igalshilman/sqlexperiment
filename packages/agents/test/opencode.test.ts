@@ -45,7 +45,7 @@ describe('the OpenCode agent', () => {
     const c = conversation(besideYours, 'tables');
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: /);
     const names = await c.read(async (ctx) =>
-      (await ctx.db.query("SELECT name FROM sqlite_schema WHERE type = 'table'")).map(([name]) => name),
+      (await ctx.db.values("SELECT name FROM sqlite_schema WHERE type = 'table'")).map(([name]) => name),
     );
     expect(names.filter((name) => !String(name).startsWith('restate_'))).toEqual(['session']);
   }, 60_000);

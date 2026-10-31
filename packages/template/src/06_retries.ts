@@ -31,7 +31,7 @@ const savings = restate.object({
       // The second time, the deposit's id is there already: OR IGNORE skips it.
       await ctx.db.execute('INSERT OR IGNORE INTO deposits (id, amount) VALUES (?, ?)', [id, amount]);
       failFirstAttempt(ctx);
-      const [total] = (await ctx.db.query('SELECT sum(amount) FROM deposits')).map(([sum]) => sum);
+      const [total] = (await ctx.db.values('SELECT sum(amount) FROM deposits')).map(([sum]) => sum);
       return total;
     },
   },

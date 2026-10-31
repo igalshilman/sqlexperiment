@@ -26,7 +26,7 @@ vi.mock('@langchain/openai', () => import('./fakes/langgraph.ts'));
 
 /** The rows of `table` in an object's database. */
 const count = (table: string) => async (ctx: ObjectContext) =>
-  Number((await ctx.db.query(`SELECT COUNT(*) FROM ${table}`))[0]![0]);
+  Number((await ctx.db.values(`SELECT COUNT(*) FROM ${table}`))[0]![0]);
 
 describe('the LangGraph agent', () => {
   it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {

@@ -37,7 +37,7 @@ describe("an object's schema", () => {
     const later = sqlAttempt({ map, service, id: 'later' });
     // The database holds the object's tables, and only them: how far the
     // schema got is a record beside them.
-    expect(await later.end(() => later.db.query(TABLES))).toEqual([['notes']]);
+    expect(await later.end(() => later.db.values(TABLES))).toEqual([['notes']]);
     expect(await stepsOf(map, service)).toBe('1');
   });
 
@@ -48,14 +48,14 @@ describe("an object's schema", () => {
     await first.end(() => first.db.execute("INSERT INTO notes VALUES ('milk')"));
     restate.object({ name: service, schema: [NOTES, 'ALTER TABLE notes ADD COLUMN done INT', done], handlers: {} });
     const later = sqlAttempt({ map, service, id: 'later' });
-    expect(await later.end(() => later.db.query('SELECT text, done FROM notes'))).toEqual([['milk', 1]]);
+    expect(await later.end(() => later.db.values('SELECT text, done FROM notes'))).toEqual([['milk', 1]]);
   });
 
   it('reads a key never written as empty tables, in a shared handler, storing nothing', async () => {
     const service = objectWith(NOTES);
     const map = new Map<string, Uint8Array>();
     const reader = sqlAttempt({ map, service, shared: true });
-    expect(await reader.end(() => reader.db.query('SELECT text FROM notes'))).toEqual([]);
+    expect(await reader.end(() => reader.db.values('SELECT text FROM notes'))).toEqual([]);
     expect(map.size).toBe(0);
   });
 
@@ -63,11 +63,11 @@ describe("an object's schema", () => {
     const service = objectWith(NOTES);
     const map = new Map<string, Uint8Array>();
     const reader = sqlAttempt({ map, service, shared: true, id: 'reader' });
-    await reader.end(() => reader.db.query('SELECT text FROM notes'));
+    await reader.end(() => reader.db.values('SELECT text FROM notes'));
     const writer = sqlAttempt({ map, service, id: 'writer' });
     await writer.end(() => writer.db.execute("INSERT INTO notes VALUES ('milk')"));
     const later = sqlAttempt({ map, service, id: 'later' });
-    expect(await later.end(() => later.db.query('SELECT text FROM notes'))).toEqual([['milk']]);
+    expect(await later.end(() => later.db.values('SELECT text FROM notes'))).toEqual([['milk']]);
   });
 });
 
@@ -81,7 +81,7 @@ describe("a library's schema", () => {
     const tables = await attempt.end(async () => {
       await LIBRARY.ensure(attempt.db);
       await attempt.db.execute("INSERT INTO library_items VALUES ('a')");
-      return attempt.db.query(TABLES);
+      return attempt.db.values(TABLES);
     });
     expect(tables).toEqual([['library_items'], ['notes']]);
     expect([await stepsOf(map, 'library'), await stepsOf(map, service)]).toEqual(['1', '1']);
@@ -99,7 +99,7 @@ describe("a library's schema", () => {
     const reader = sqlAttempt({ map, shared: true });
     const rows = await reader.end(async () => {
       await LIBRARY.ensure(reader.db);
-      return reader.db.query('SELECT item FROM library_items');
+      return reader.db.values('SELECT item FROM library_items');
     });
     expect(rows).toEqual([]);
     expect(map.size).toBe(0);

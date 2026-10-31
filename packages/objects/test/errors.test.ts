@@ -20,7 +20,7 @@ it('an SQL error of ctx.db is terminal, and the session goes on', async () => {
     expect(error).toBeInstanceOf(restate.TerminalError);
     expect((error as Error).message).toMatch(/missing/);
     expect((error as Error).cause).toBeInstanceOf(Error);
-    expect(await a.db.query('SELECT 1')).toEqual([[1]]);
+    expect(await a.db.values('SELECT 1')).toEqual([[1]]);
   });
 });
 
@@ -38,7 +38,7 @@ it("an SQL error inside ctx.transaction is terminal there, and the body's rethro
     );
     expect(inside).toBeInstanceOf(restate.TerminalError);
     expect(error).toBe(inside);
-    expect(await a.db.query('SELECT count(*) FROM t')).toEqual([[0]]);
+    expect(await a.db.values('SELECT count(*) FROM t')).toEqual([[0]]);
   });
 });
 
@@ -48,7 +48,7 @@ it("the body's own error passes as it is, and is retried", async () => {
   const error = await failure(
     a.end(() =>
       a.transaction(async ({ db }) => {
-        await db.query('SELECT 1');
+        await db.values('SELECT 1');
         throw own;
       }),
     ),
@@ -61,21 +61,21 @@ it('a call to ctx.db, or a nested ctx.transaction, from inside a body is termina
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
     const errors = await Promise.all([
-      failure(a.transaction(() => a.db.query('SELECT 1'))),
+      failure(a.transaction(() => a.db.values('SELECT 1'))),
       failure(a.transaction(() => a.db.transaction(async () => {}))),
       failure(a.transaction(() => a.transaction(async () => {}))),
     ]);
     for (const error of errors) expect(error).toBeInstanceOf(restate.TerminalError);
-    expect(await a.db.query('SELECT 1')).toEqual([[1]]);
+    expect(await a.db.values('SELECT 1')).toEqual([[1]]);
   });
 });
 
 it('a parameter the session cannot bind is terminal', async () => {
   const a = sqlAttempt({ map: new Map() });
   await a.end(async () => {
-    const error = await failure(a.db.query('SELECT ?', [new Date() as never]));
+    const error = await failure(a.db.values('SELECT ?', [new Date() as never]));
     expect(error).toBeInstanceOf(restate.TerminalError);
-    expect(await a.db.query('SELECT 1')).toEqual([[1]]);
+    expect(await a.db.values('SELECT 1')).toEqual([[1]]);
   });
 });
 
@@ -84,14 +84,14 @@ it('statements a body awaits together run in order, and none outlives its rollba
   await a.end(async () => {
     await a.db.execute('CREATE TABLE t (n INTEGER)');
     await a.transaction(({ db }) => Promise.all([1, 2, 3].map((n) => db.execute('INSERT INTO t VALUES (?)', [n]))));
-    expect(await a.db.query('SELECT n FROM t ORDER BY rowid')).toEqual([[1], [2], [3]]);
+    expect(await a.db.values('SELECT n FROM t ORDER BY rowid')).toEqual([[1], [2], [3]]);
     const error = await failure(
       a.transaction(({ db }) =>
         Promise.all([db.execute('INSERT INTO missing VALUES (1)'), db.execute('INSERT INTO t VALUES (4)')]),
       ),
     );
     expect(error).toBeInstanceOf(restate.TerminalError);
-    expect(await a.db.query('SELECT count(*) FROM t')).toEqual([[3]]);
+    expect(await a.db.values('SELECT count(*) FROM t')).toEqual([[3]]);
   });
 });
 
@@ -103,7 +103,7 @@ it('statements a body makes but does not await run before its commit', async () 
       void db.execute('INSERT INTO t VALUES (1)');
       void db.execute('INSERT INTO t VALUES (2)');
     });
-    expect(await a.db.query('SELECT n FROM t ORDER BY n')).toEqual([[1], [2]]);
+    expect(await a.db.values('SELECT n FROM t ORDER BY n')).toEqual([[1], [2]]);
   });
 });
 

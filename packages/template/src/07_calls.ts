@@ -22,7 +22,7 @@ const nickname = restate.object({
     /** The nickname's owner: `user`, unless someone claimed it first. */
     claim: async (ctx: restate.ObjectContext, user: string) => {
       await ctx.db.execute('INSERT INTO owner (user) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM owner)', [user]);
-      const [owner] = (await ctx.db.query('SELECT user FROM owner')).map(([name]) => String(name));
+      const [owner] = (await ctx.db.values('SELECT user FROM owner')).map(([name]) => String(name));
       return owner;
     },
   },

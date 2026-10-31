@@ -1,6 +1,6 @@
 // pi-durable storage on an SQL database: the `SqliteDatabase` facade of
 // @earendil-works/chord/sqlite, over a database session `db` (in Restate,
-// `ctx.db`), which has `query`, `queryColumns`, `execute` and
+// `ctx.db`), which has `query`, `get`, `execute` and
 // `transaction(body)`.
 //
 // The facade's operations must run one at a time, a transaction excluding
@@ -21,9 +21,6 @@ import {
 /** The prefix of pi-durable's tables and indexes. */
 const PREFIX = 'restate_pi_';
 
-const objects = <T>({ columns, rows }: { columns: string[]; rows: unknown[][] }): T[] =>
-  rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]])) as T);
-
 /** SQL through `db`: the session, or one transaction's. */
 class Executor implements SqliteExecutor {
   readonly db: SqlDatabase;
@@ -37,10 +34,10 @@ class Executor implements SqliteExecutor {
     await this.db.execute(sql, params);
   }
   async get<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T | undefined> {
-    return (await this.all<T>(sql, ...params))[0];
+    return this.db.get<T>(sql, params);
   }
   async all<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T[]> {
-    return objects<T>(await this.db.queryColumns(sql, params));
+    return this.db.query<T>(sql, params);
   }
 }
 

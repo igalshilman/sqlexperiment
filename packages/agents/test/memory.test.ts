@@ -43,7 +43,7 @@ const recall = tool({
   input: z.object({}),
   run: async (_input, { ctx }) => {
     await ctx.db.execute(SCHEMA);
-    return (await ctx.db.query('SELECT fact FROM facts ORDER BY rowid')).map(([fact]) => fact);
+    return (await ctx.db.values('SELECT fact FROM facts ORDER BY rowid')).map(([fact]) => fact);
   },
 });
 
@@ -62,7 +62,7 @@ function store(key: string) {
 const chat = pi.chat({ tools: [remember, recall] }) as Handler;
 const facts: Handler = async (ctx) => {
   await ctx.db.execute(SCHEMA);
-  return (await ctx.db.query('SELECT fact FROM facts ORDER BY rowid')).map(([fact]) => fact);
+  return (await ctx.db.values('SELECT fact FROM facts ORDER BY rowid')).map(([fact]) => fact);
 };
 
 describe('a tool on the agent database', () => {

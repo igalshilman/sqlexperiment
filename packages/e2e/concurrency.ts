@@ -212,7 +212,7 @@ const database = restate.object({
         db.execute('INSERT INTO t VALUES (1)'),
         slow(ctx, 'db', { ms: 100, value: 2 }),
         ctx.sleep(10).then(() => 3),
-        db.query('SELECT count(*) FROM t'),
+        db.values('SELECT count(*) FROM t'),
       ]);
       const [count] = await row<[number]>(db, 'SELECT count(*) FROM t');
       return { h, r, count };
@@ -235,7 +235,7 @@ const database = restate.object({
 
     nested: async (ctx: Ctx) => {
       try {
-        await ctx.transaction(() => ctx.db.query('SELECT 1'));
+        await ctx.transaction(() => ctx.db.values('SELECT 1'));
         return 'ran';
       } catch (e) {
         return { terminal: e instanceof restate.TerminalError, message: (e as Error).message };
@@ -262,7 +262,7 @@ const database = restate.object({
     marks: async (ctx: Ctx) =>
       ctx.transaction(async ({ db }) => {
         await db.execute('CREATE TABLE IF NOT EXISTS marks (i INTEGER)');
-        return (await db.query('SELECT i FROM marks ORDER BY i')).map(([i]) => i);
+        return (await db.values('SELECT i FROM marks ORDER BY i')).map(([i]) => i);
       }),
   },
 });

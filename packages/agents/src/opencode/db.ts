@@ -52,20 +52,17 @@ const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient
  * transaction's database. Each is refused once `fence` closes.
  */
 function connection(target: SqlDatabase, fence: Fence): Connection {
-  const exec = (sql: string, params: readonly unknown[]) =>
+  // Effect binds what the compiler made of OpenCode's values: SQL values.
+  const exec = <T>(read: (sql: string, params: SqlValue[]) => Promise<T>, sql: string, params: readonly unknown[]) =>
     Effect.tryPromise({
       try: async () => {
         if (fence.closed) throw new Error('the attempt is over');
-        // Effect binds what the compiler made of OpenCode's values: SQL values.
-        return target.queryColumns(sql, params as SqlValue[]);
+        return read(sql, params as SqlValue[]);
       },
       catch: (cause) => error('execute', cause),
     });
-  const run = (sql: string, params: readonly unknown[] = []) =>
-    Effect.map(exec(sql, params), ({ columns, rows }) =>
-      rows.map((row) => Object.fromEntries(columns.map((column, i) => [column, row[i]]))),
-    );
-  const runValues = (sql: string, params: readonly unknown[] = []) => Effect.map(exec(sql, params), ({ rows }) => rows);
+  const run = (sql: string, params: readonly unknown[] = []) => exec((s, p) => target.query(s, p), sql, params);
+  const runValues = (sql: string, params: readonly unknown[] = []) => exec((s, p) => target.values(s, p), sql, params);
   const transformed: Connection['execute'] = (sql, params, transformRows) =>
     transformRows ? Effect.map(run(sql, params), transformRows) : run(sql, params);
   return {

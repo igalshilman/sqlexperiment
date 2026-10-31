@@ -31,14 +31,44 @@ export class SqlError extends Error {
   override name = 'SqlError';
 }
 
+/** A row as an object, by column name. */
+export type Row = Record<string, SqlValue>;
+
 /** SQL: a database, or one transaction of it. */
 export interface SqlDatabase {
-  /** Run SQL and return its rows; parameters bind to a single statement. */
-  query(sql: string, params?: SqlParam[]): Promise<SqlValue[][]>;
-  /** {@link query}, with the column names of the statement whose rows these are. */
-  queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult>;
+  /**
+   * The rows of one statement, each an object by column name; parameters
+   * bind to a single statement. `T` declares the row's shape, unchecked:
+   * integers past 2^53 come back as bigints, and booleans as 0 or 1. Columns
+   * are named as SQL names them (an expression needs `AS`), and two of the
+   * same name are an {@link SqlError}: alias them, or use {@link values}.
+   */
+  query<T = Row>(sql: string, params?: SqlParam[]): Promise<T[]>;
+  /** The first row of {@link query}, or `undefined` when there is none. */
+  get<T = Row>(sql: string, params?: SqlParam[]): Promise<T | undefined>;
+  /** The rows of one statement as arrays, in column order: for adapters, and for columns that share a name. */
+  values(sql: string, params?: SqlParam[]): Promise<SqlValue[][]>;
   /** Run SQL (one or more statements), discarding rows. */
   execute(sql: string, params?: SqlParam[]): Promise<void>;
+}
+
+/** The rows of `result` as objects by column name; a column name twice is an {@link SqlError}. */
+function objects({ columns, rows }: SqlQueryResult): Row[] {
+  if (new Set(columns).size !== columns.length) {
+    const twice = columns.find((name, i) => columns.indexOf(name) !== i);
+    throw new SqlError(`the column ${twice} is named twice: alias one (AS), or read the rows with values()`);
+  }
+  return rows.map((row) => Object.fromEntries(columns.map((name, i) => [name, row[i]!])));
+}
+
+/** {@link SqlDatabase} over `run`, which runs one call's SQL and returns its rows with their columns. */
+export function sqlOver(run: (sql: string, params?: SqlParam[]) => Promise<SqlQueryResult>): SqlDatabase {
+  return {
+    query: async <T>(sql: string, params?: SqlParam[]) => objects(await run(sql, params)) as T[],
+    get: async <T>(sql: string, params?: SqlParam[]) => objects(await run(sql, params))[0] as T | undefined,
+    values: async (sql, params) => (await run(sql, params)).rows,
+    execute: async (sql, params) => void (await run(sql, params)),
+  };
 }
 
 /**
@@ -120,8 +150,16 @@ abstract class Sql implements SqlDatabase {
 
   abstract queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult>;
 
-  async query(sql: string, params?: SqlParam[]): Promise<SqlValue[][]> {
-    return (await this.queryColumns(sql, params)).rows;
+  query<T = Row>(sql: string, params?: SqlParam[]): Promise<T[]> {
+    return sqlOver((s, p) => this.queryColumns(s, p)).query<T>(sql, params);
+  }
+
+  get<T = Row>(sql: string, params?: SqlParam[]): Promise<T | undefined> {
+    return sqlOver((s, p) => this.queryColumns(s, p)).get<T>(sql, params);
+  }
+
+  values(sql: string, params?: SqlParam[]): Promise<SqlValue[][]> {
+    return sqlOver((s, p) => this.queryColumns(s, p)).values(sql, params);
   }
 
   async execute(sql: string, params?: SqlParam[]): Promise<void> {
@@ -247,6 +285,8 @@ export class Database extends Sql {
 
 /** SQL in one transaction, while its body runs, and the records it commits with. */
 export interface Transaction extends SqlDatabase {
+  /** The rows of one statement, with their column names. */
+  queryColumns(sql: string, params?: SqlParam[]): Promise<SqlQueryResult>;
   /**
    * Set the record `name` to `value` with this transaction, in the same
    * write: a whole value kept beside the SQL, in no table, stored exactly

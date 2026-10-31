@@ -11,7 +11,7 @@ import { sqlAttempt } from './support.ts';
 async function insertThree(db: SqlDatabase) {
   await db.execute('CREATE TABLE t (x)');
   for (let i = 0; i < 3; i++) await db.execute('INSERT INTO t VALUES (1)');
-  return db.query('SELECT count(*) FROM t');
+  return db.values('SELECT count(*) FROM t');
 }
 
 describe("a key's other database", () => {
@@ -26,8 +26,8 @@ describe("a key's other database", () => {
     });
     const later = sqlAttempt({ map, id: 'later' });
     const [yours, its] = await later.end(async () => [
-      await later.db.query('SELECT text FROM notes'),
-      await databaseOf(later.db, 'library').query('SELECT text FROM notes'),
+      await later.db.values('SELECT text FROM notes'),
+      await databaseOf(later.db, 'library').values('SELECT text FROM notes'),
     ]);
     expect(yours).toEqual([]);
     expect(its).toEqual([['its own']]);
@@ -71,7 +71,7 @@ describe("a key's other database", () => {
     });
     const stored = new Map(map);
     const reader = sqlAttempt({ map, shared: true, id: 'reader' });
-    expect(await reader.end(() => databaseOf(reader.db, 'library').query('SELECT x FROM t'))).toEqual([[1]]);
+    expect(await reader.end(() => databaseOf(reader.db, 'library').values('SELECT x FROM t'))).toEqual([[1]]);
     expect(map).toEqual(stored);
   });
 

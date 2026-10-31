@@ -93,7 +93,7 @@ const db = await open('packaging', {
 });
 await db.execute('CREATE TABLE t (n INTEGER)');
 await db.execute('INSERT INTO t VALUES (42)');
-console.log(\`the addon runs SQL: \${JSON.stringify(await db.query('SELECT n FROM t'))}\`);
+console.log(\`the addon runs SQL: \${JSON.stringify(await db.values('SELECT n FROM t'))}\`);
 await db.save();
 
 export const agent = object({ name: 'agent', handlers: { chat: pi.chat({ system: 'Be brief.' }) } });

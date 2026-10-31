@@ -67,12 +67,12 @@ const transfer = (a: ReturnType<ReturnType<typeof object>['attempt']>) =>
 
 const balance = async (o: ReturnType<typeof object>) => {
   const a = o.attempt();
-  const [[count]] = (await a.end(() => a.db.query("SELECT count(*) FROM sqlite_master WHERE name = 'balance'"))) as [
+  const [[count]] = (await a.end(() => a.db.values("SELECT count(*) FROM sqlite_master WHERE name = 'balance'"))) as [
     [number],
   ];
   if (!count) return 0;
   const b = o.attempt();
-  return (await b.end(() => b.db.query('SELECT count(*) FROM balance')))[0]![0];
+  return (await b.end(() => b.db.values('SELECT count(*) FROM balance')))[0]![0];
 };
 
 describe('the sends of ctx.transaction', () => {
@@ -90,7 +90,7 @@ describe('the sends of ctx.transaction', () => {
     // Made and stored, they leave the outbox; the database has no table of them.
     expect(await o.outbox()).toEqual([]);
     const b = o.attempt();
-    expect(await b.end(() => b.db.query("SELECT name FROM sqlite_master WHERE name LIKE '_restate%'"))).toEqual([]);
+    expect(await b.end(() => b.db.values("SELECT name FROM sqlite_master WHERE name LIKE '_restate%'"))).toEqual([]);
   });
 
   it('sends nothing for a transaction rolled back', async () => {
@@ -140,7 +140,7 @@ describe('the sends of ctx.transaction', () => {
     // The next attempt's first use of the database makes them: the target
     // drops a send whose key it has seen.
     const next = o.attempt();
-    await next.end(() => next.db.query('SELECT 1'));
+    await next.end(() => next.db.values('SELECT 1'));
     expect(next.sent.map((s) => s.idempotencyKey)).toEqual(lost);
     expect(next.sent.map(decode)).toEqual(['book', 5]);
     expect(await o.outbox()).toEqual([]);
@@ -154,7 +154,7 @@ describe('the sends of ctx.transaction', () => {
     const crashed = o.attempt({ crash: true });
     // It only reads, and its update matches no rows: still, it committed.
     const decide = crashed.transaction(async ({ db, tx }) => {
-      const [[v]] = (await db.query('SELECT v FROM t')) as [[number]];
+      const [[v]] = (await db.values('SELECT v FROM t')) as [[number]];
       await db.execute('UPDATE t SET v = 2 WHERE v = 99');
       if (v === 1) tx.objectSendClient(store, 'a').reserve('book');
     });
@@ -163,7 +163,7 @@ describe('the sends of ctx.transaction', () => {
     const lost = await o.outbox();
     expect(lost).toHaveLength(1);
     const next = o.attempt();
-    await next.end(() => next.db.query('SELECT 1'));
+    await next.end(() => next.db.values('SELECT 1'));
     expect(next.sent.map((s) => s.idempotencyKey)).toEqual(lost);
     expect(await o.outbox()).toEqual([]);
   });
@@ -188,7 +188,7 @@ describe('the sends of ctx.transaction', () => {
     o.map.set = set;
     expect(await o.outbox()).toEqual([]);
     const next = o.attempt();
-    expect(await next.end(() => next.db.query("SELECT count(*) FROM sqlite_master WHERE name = 't'"))).toEqual([[0]]);
+    expect(await next.end(() => next.db.values("SELECT count(*) FROM sqlite_master WHERE name = 't'"))).toEqual([[0]]);
     expect(next.sent).toEqual([]);
     expect(await o.outbox()).toEqual([]);
   });
