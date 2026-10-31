@@ -35,13 +35,23 @@ function context(state = new Map<string, unknown>()) {
   return { made, ctx: ctx as unknown as restate.ObjectContext };
 }
 
-/** The tool `t` run as the model's tool call `call_1`, with `input`. */
+/** The tool `t` run as the model's tool call `call_1`, with `input` as the model gave it. */
 function run(t: Tool, input: Record<string, unknown>) {
   const { made, ctx } = context();
-  return t.run(t.input.parse(input), { ctx, callId: 'call_1' }).then((result) => ({ result, made }));
+  return t.run(input, { ctx, callId: 'call_1' }).then((result) => ({ result, made }));
 }
 
 const fields = (t: Tool) => Object.keys(z.toJSONSchema(t.input).properties ?? {});
+
+describe('tool', () => {
+  it('answers arguments that do not fit its input with what is wrong, and does not run', async () => {
+    const t = subagent(object({ name: 'coder', handlers: { chat: async () => 'done' } }));
+    const { result, made } = await run(t, { name: 'Fizz Buzz', task: 'Write it' });
+    expect(result).toMatch(/^Error: the arguments do not fit the tool's input:/);
+    expect(result).toMatch(/name/);
+    expect(made).toEqual([]);
+  });
+});
 
 describe('call', () => {
   it("calls a service's handler, once per tool call", async () => {

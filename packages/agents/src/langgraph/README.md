@@ -46,9 +46,10 @@ step it stored.
   the model again.
 - **A tool is idempotent by its tool call id** (`callId` of `tool()`'s
   `run`), which it passes on, such as in an idempotency key.
-- **A tool's error fails the attempt** (`handleToolErrors: false`), and
-  Restate retries it; a `restate.TerminalError` of a `restate-agents` tool is
-  its answer to the model.
+- **A tool's error fails the attempt**, and Restate retries it (the ToolNode
+  would hand it to the model); a `restate.TerminalError` of a
+  `restate-agents` tool is its answer to the model, and so are arguments
+  that do not fit a tool, and a call of a tool the agent does not have.
 - **A message is answered once per invocation**: the graph records each
   answer in its state, by invocation id, and a retried attempt returns it. A
   run that a crash interrupted (its prompt without an answer) is finished

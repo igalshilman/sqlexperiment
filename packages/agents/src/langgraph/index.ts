@@ -21,7 +21,8 @@
 //   resumes them with the same tool call ids, which a tool passes on to stay
 //   idempotent.
 // - A tool's error fails the attempt, which Restate retries (the ToolNode
-//   would hand it to the model as the tool's result).
+//   would hand it to the model as the tool's result); a call of a tool the
+//   agent lacks, or with arguments that do not fit, is the model's to fix.
 // - A message is answered once per invocation: the graph records each answer
 //   in its state, and a retried attempt returns it.
 import * as restate from 'restate-objects';
@@ -31,8 +32,8 @@ import type { ChatAnthropic } from '@langchain/anthropic';
 import type { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
-import { type StructuredToolInterface, tool } from '@langchain/core/tools';
-import { Annotation, END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
+import { type StructuredToolInterface, tool, ToolInputParsingException } from '@langchain/core/tools';
+import { Annotation, END, isGraphInterrupt, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import {
   CANCELLED,
@@ -53,7 +54,7 @@ import {
 import { type Answer, withOutput } from '../output.ts';
 import type { z } from 'zod';
 import { type Definition, object } from '../object.ts';
-import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 
 import { SqlCheckpointSaver } from './checkpointer.ts';
 
@@ -69,53 +70,43 @@ const State = Annotation.Root({
 
 /**
  * The tools node: each tool call of the model's last message run by a
- * ToolNode, whose tool's error fails the attempt; and a call of a tool the
- * agent does not have answered with an error, for the model to see (the
- * ToolNode would fail the attempt, and every retry the same way). The round
- * is published as it starts and ends, for the clients that follow the
- * conversation.
+ * ToolNode, which answers the model with what is wrong when a call names a
+ * tool the agent does not have, or arguments that do not fit (the model's to
+ * fix: failing the attempt, every retry would meet the same call again). Any
+ * other error of a tool fails the attempt, at once (the ToolNode would hand
+ * it to the model too). The round is published as it starts and ends, for
+ * the clients that follow the conversation.
  */
 function toolsNode(ctx: restate.ObjectContext, tools: StructuredToolInterface[]) {
-  const run = runTools(tools);
   return async (state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
     await toolCallStarted(ctx);
-    const ran = await run(state, config);
+    // The first error fails the attempt at once, not once the other calls end.
+    const { promise: failure, reject: failed } = Promise.withResolvers<never>();
+    failure.catch(() => {});
+    const node = new ToolNode(
+      tools.map((t) => failing(t, failed)),
+      { handleToolErrors: true },
+    );
+    const ran: { messages: BaseMessage[] } = await Promise.race([node.invoke(state, config), failure]);
     await toolCallEnded(ctx);
     return ran;
   };
 }
 
-/** The tool calls of the model's last message: the tools the agent has, run by a ToolNode, and an error for the others. */
-function runTools(tools: StructuredToolInterface[]) {
-  const node = new ToolNode(tools, { handleToolErrors: false });
-  const names = new Set(tools.map((t) => t.name));
-  return async (
-    state: typeof MessagesAnnotation.State,
-    config: RunnableConfig,
-  ): Promise<{ messages: BaseMessage[] }> => {
-    const last = state.messages.at(-1) as AIMessage;
-    const calls = last.tool_calls ?? [];
-    const unknown = calls.filter((c) => !names.has(c.name));
-    if (unknown.length === 0) return node.invoke(state, config);
-    // The calls of tools the agent has, run as the model's last message with those calls only.
-    const known = calls.filter((c) => names.has(c.name));
-    const only = new AIMessage({ id: last.id, content: last.content, tool_calls: known });
-    const ran: { messages: BaseMessage[] } =
-      known.length > 0
-        ? await node.invoke({ messages: [...state.messages.slice(0, -1), only] }, config)
-        : { messages: [] };
-    const missing = unknown.map(
-      (c) =>
-        new ToolMessage({
-          tool_call_id: c.id!,
-          name: c.name,
-          status: 'error',
-          content: `Error: Tool "${c.name}" not found.`,
-        }),
-    );
-    return { messages: [...ran.messages, ...missing] };
-  };
-}
+/** `t`, its errors given to `failed`, but for its input's (arguments that do not fit) and LangGraph's interrupts. */
+const failing = (t: StructuredToolInterface, failed: (error: unknown) => void): StructuredToolInterface =>
+  Object.create(t, {
+    invoke: {
+      value: async (...args: Parameters<StructuredToolInterface['invoke']>) => {
+        try {
+          return await t.invoke(...args);
+        } catch (error) {
+          if (!(error instanceof ToolInputParsingException) && !isGraphInterrupt(error)) failed(error);
+          throw error;
+        }
+      },
+    },
+  }) as StructuredToolInterface;
 
 /** `provider/model-id` as its provider and model id, for a provider the usual graph takes. */
 const providerOfModel = (named: string) => {
@@ -173,14 +164,15 @@ function graph(ctx: restate.ObjectContext, model: BaseChatModel, tools: Structur
     .addEdge('answer', END);
 }
 
-/** `t` as a LangChain tool. */
+/** `t` as a LangChain tool: `t.run` checks the model's arguments itself. */
 const native = (t: AnyTool, ctx: restate.ObjectContext): StructuredToolInterface =>
   tool(
-    async (input, { toolCall }) => {
+    async (args: unknown, { toolCall }) => {
       if (!toolCall?.id) throw new Error('a tool call without an id');
-      return t.run(input, { ctx, callId: toolCall.id });
+      return t.run(args, { ctx, callId: toolCall.id });
     },
-    { name: t.name, description: t.description, schema: t.input },
+    // What does not fit, for the model to fix: not only that something does not.
+    { name: t.name, description: t.description, schema: jsonSchemaOf(t), verboseParsingErrors: true },
   );
 
 /** An agent's options: `chat` and `prompt` take them. */

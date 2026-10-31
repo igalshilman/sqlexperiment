@@ -10,6 +10,7 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  invalidArguments,
   STEERED,
   steeredWhileWorking,
   withoutIds,
@@ -89,6 +90,13 @@ function object(key: string) {
 const said = (id: number, role: string, text: string) => ({ id, role, parts: [{ type: 'text', text }] });
 
 describe('pi.messages', () => {
+  it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
+    const { answer, ran } = await invalidArguments((tools) => pi.chat({ tools }));
+    expect(answer).toMatch(/error/i);
+    expect(answer).toMatch(/amount/);
+    expect(ran).toBe(false);
+  });
+
   it("marks a tool's error", async () => {
     const alice = object('alice');
     const lookup = tool({

@@ -375,8 +375,10 @@ that gives one.
 
 **Errors.** A `restate.TerminalError` that a tool throws, or that a handler
 it calls fails with (an unknown order, say), is the tool's answer to the
-model, `Error: <message>`, and the agent goes on. Any other error fails the
-attempt, and Restate retries it: the tool call runs again.
+model, `Error: <message>`, and the agent goes on. So are arguments that do
+not fit the tool's `input` (`run` never sees them), and a call of a tool the
+agent does not have: the model's to fix. Any other error fails the attempt,
+and Restate retries it: the tool call runs again.
 
 **Once.** A crash runs an unfinished tool call again with the same call id.
 A tool that must not run twice passes its `idempotencyKey` on (made of the

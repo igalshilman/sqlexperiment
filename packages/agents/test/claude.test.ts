@@ -9,6 +9,7 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  invalidArguments,
   STEERED,
   steeredWhileWorking,
   conversation,
@@ -32,6 +33,13 @@ const twice = async (ctx: restate.ObjectContext) =>
   ]);
 
 describe('the Claude agent', () => {
+  it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
+    const { answer, ran } = await invalidArguments((tools) => claude.chat({ tools }));
+    expect(answer).toMatch(/error/i);
+    expect(answer).toMatch(/amount/);
+    expect(ran).toBe(false);
+  });
+
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
     const now = await cancelledWhileWorking((tools) => claude.chat({ tools }), claude.messages());
     const waiting = await afterCancel(claude.chat({ tools: [cancelledTransfer] }), claude.messages());

@@ -404,3 +404,27 @@ export const withoutIds = (parts: unknown[][]) =>
       return Object.fromEntries(Object.entries(part).filter(([key]) => key !== 'id'));
     }),
   );
+
+/**
+ * `chat` (with `tools`) on an object of its own, asked to transfer 5 with a
+ * `transfer` that takes at most 3: the model's arguments do not fit, which
+ * is the model's to fix, not a failure of the attempt. Its answer (after the
+ * tool's error), and whether `transfer` ran.
+ */
+export async function invalidArguments(chat: (tools: Tool[]) => PromptHandler) {
+  let ran = false;
+  const small = tool({
+    name: 'transfer',
+    description: 'Move money: at most 3.',
+    input: z.object({ from: z.number(), to: z.number(), amount: z.number().max(3) }),
+    run: () => {
+      ran = true;
+      return 'moved';
+    },
+  });
+  const map = new Map<string, Uint8Array>();
+  const sql = sqlAttempt({ map, key: 'invalid', id: 'inv1' });
+  const ctx = { key: 'invalid', ...sql } as unknown as restate.ObjectContext;
+  const answer = await sql.end(() => chat([small])(ctx, 'Please move 5 from 1 to 2'));
+  return { answer, ran };
+}

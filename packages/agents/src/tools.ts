@@ -33,15 +33,22 @@ export interface ToolContext extends ToolCall {
 }
 
 /** A tool of any framework: see {@link tool}. */
-export interface Tool<I = Record<string, unknown>> {
+export interface Tool {
   readonly [TOOL]: true;
   readonly name: string;
   readonly description: string;
-  /** The input: a zod object. */
+  /** The input: a zod object. A framework offers it to the model as its JSON schema ({@link jsonSchemaOf}). */
   readonly input: z.ZodObject;
-  /** Its result, as text for the model. */
-  run(input: I, call: ToolCall): Promise<string>;
+  /**
+   * Its result, as text for the model, of the model's arguments as they came:
+   * `run` checks them against `input`, and answers arguments that do not fit
+   * with what is wrong, for the model to call it again.
+   */
+  run(args: unknown, call: ToolCall): Promise<string>;
 }
+
+/** The JSON schema of `t`'s input, which a framework offers the model. */
+export const jsonSchemaOf = (t: Tool) => z.toJSONSchema(t.input) as Record<string, unknown>;
 
 /** Whether `value` is a {@link Tool}, rather than a framework's own. */
 export const isTool = (value: unknown): value is Tool => typeof value === 'object' && value !== null && TOOL in value;
@@ -64,19 +71,25 @@ const text = (value: unknown) =>
  * gets the agent's `ctx`, the tool call's `callId`, and an `idempotencyKey`
  * made of both, for what the tool must do once. A `restate.TerminalError` it throws (or
  * a Restate call it makes fails with) is its answer, `Error: <message>`, for
- * the model to act on.
+ * the model to act on; and so are arguments that do not fit `input`, which
+ * `run` never sees.
  */
 export const tool = <S extends z.ZodObject>(options: {
   name: string;
   description: string;
   input: S;
   run: (input: z.infer<S>, context: ToolContext) => unknown;
-}): Tool<z.infer<S>> => ({
+}): Tool => ({
   [TOOL]: true,
   name: options.name,
   description: options.description,
   input: options.input,
-  run: async (input, { ctx, callId }) => {
+  run: async (args, { ctx, callId }) => {
+    // Arguments that do not fit: the model's to fix. Failing the attempt
+    // instead, a retry would meet the same stored call again, and fail again.
+    const parsed = options.input.safeParse(args);
+    if (!parsed.success) return `Error: the arguments do not fit the tool's input: ${z.prettifyError(parsed.error)}`;
+    const input = parsed.data;
     try {
       return text(await options.run(input, { ctx, callId, idempotencyKey: `${ctx.request().id}:${callId}` }));
     } catch (error) {

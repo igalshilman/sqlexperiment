@@ -70,8 +70,8 @@ import {
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import { type Definition, object } from '../object.ts';
-import { isTool, type Tool as AnyTool } from '../tools.ts';
-import { z } from 'zod';
+import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
+import type { z } from 'zod';
 import { openSqlKvStorage } from './storage.ts';
 
 /** What `work` gets: `prompt(text)`, the `conversation()`, and the `harness` and chord `context` for anything else. */
@@ -132,11 +132,11 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolRegistration =>
   defineTool({
     name: t.name,
     description: t.description,
-    parameters: Type.Unsafe<Record<string, unknown>>(z.toJSONSchema(t.input)),
+    parameters: Type.Unsafe<Record<string, unknown>>(jsonSchemaOf(t)),
     replay: 'safe', // a crash runs it again, with the same call id
     // Aborted (the conversation's work, on a cancellation), it waits no more.
     execute: async (args, { callId }, task) => ({
-      content: [{ type: 'text', text: await awaitWithContext(t.run(t.input.parse(args), { ctx, callId }), task) }],
+      content: [{ type: 'text', text: await awaitWithContext(t.run(args, { ctx, callId }), task) }],
     }),
   });
 

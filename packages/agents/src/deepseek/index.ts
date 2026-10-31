@@ -71,8 +71,8 @@ import {
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import { type Definition, object } from '../object.ts';
-import { isTool, type Tool as AnyTool } from '../tools.ts';
-import { z } from 'zod';
+import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
+import type { z } from 'zod';
 import { SqlSessionPersistence, storedEvents } from './persistence.ts';
 
 export { SqlSessionPersistence };
@@ -237,10 +237,10 @@ const native = (t: AnyTool, ctx: restate.ObjectContext): ToolDefinition =>
   textTool({
     name: t.name,
     description: t.description,
-    parameters: parameterSpec(z.toJSONSchema(t.input) as Record<string, unknown>),
+    parameters: parameterSpec(jsonSchemaOf(t)),
     // Aborted (the agent's turn, on a cancellation), it waits no more.
     execute: (args, exec) => {
-      const run = t.run(t.input.parse(args), { ctx, callId: exec.callId });
+      const run = t.run(args, { ctx, callId: exec.callId });
       if (!exec.signal) return run;
       const stopped = aborted(exec.signal).catch(() => {
         throw new restate.CancelledError();

@@ -85,13 +85,24 @@ export interface OpenCodeTool<Input = unknown> {
   execute(input: Input, callId: string): Promise<string>;
 }
 
-/** `t` as an OpenCode tool. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): OpenCodeTool => ({
-  name: t.name,
-  description: t.description,
-  input: t.input,
-  execute: (input, callId) => t.run(input as Record<string, unknown>, { ctx, callId }),
-});
+/**
+ * `t` as an OpenCode tool. OpenCode checks the arguments against `t.input`,
+ * and answers the model with what is wrong; those that fit reach `t.run` as
+ * the model gave them, which parses them itself.
+ */
+const native = (t: AnyTool, ctx: restate.ObjectContext): OpenCodeTool => {
+  const standard = t.input['~standard'];
+  const input: StandardSchemaV1 = {
+    '~standard': {
+      ...standard,
+      validate: (args) => {
+        const result = standard.validate(args) as StandardSchemaV1.Result<unknown>;
+        return result.issues ? result : { value: args };
+      },
+    },
+  };
+  return { name: t.name, description: t.description, input, execute: (args, callId) => t.run(args, { ctx, callId }) };
+};
 
 /** The session every prompt goes to. */
 const SESSION = 'ses_root';

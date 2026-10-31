@@ -8,6 +8,7 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  invalidArguments,
   STEERED,
   steeredWhileWorking,
   withoutIds,
@@ -22,6 +23,13 @@ import { prompt } from './langgraph.ts';
 vi.mock('@langchain/openai', () => import('./fakes/langgraph.ts'));
 
 describe('the LangGraph agent', () => {
+  it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
+    const { answer, ran } = await invalidArguments((tools) => langgraph.chat({ tools }));
+    expect(answer).toMatch(/error/i);
+    expect(answer).toMatch(/amount/);
+    expect(ran).toBe(false);
+  });
+
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
     const now = await cancelledWhileWorking((tools) => langgraph.chat({ tools }), langgraph.messages());
     const waiting = await afterCancel(langgraph.chat({ tools: [cancelledTransfer] }), langgraph.messages());

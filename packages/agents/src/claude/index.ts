@@ -45,8 +45,7 @@ import {
 import { type Answer, withOutput } from '../output.ts';
 import type { z } from 'zod';
 import { type Definition, object } from '../object.ts';
-import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
-import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
 
 /** The id of the tool call a tool runs for: the runner always passes it. */
@@ -144,14 +143,15 @@ async function run(
   }
 }
 
-/** `t` as a tool of the Anthropic SDK's tool runner. */
-const native = (t: AnyTool, ctx: restate.ObjectContext): BetaRunnableTool =>
-  betaZodTool({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.input,
-    run: (input, context) => t.run(input, { ctx, callId: callId(context) }),
-  });
+/** `t` as a tool of the Anthropic SDK's tool runner: `t.run` checks the model's arguments itself. */
+const native = (t: AnyTool, ctx: restate.ObjectContext): BetaRunnableTool => ({
+  type: 'custom',
+  name: t.name,
+  description: t.description,
+  input_schema: jsonSchemaOf(t) as Anthropic.Beta.Messages.BetaTool.InputSchema,
+  parse: (args) => args,
+  run: (args, context) => t.run(args, { ctx, callId: callId(context) }),
+});
 
 /** How much effort the model puts into a reply (Anthropic's `output_config.effort`). */
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';

@@ -9,6 +9,7 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  invalidArguments,
   STEERED,
   steeredWhileWorking,
   withoutIds,
@@ -38,6 +39,13 @@ async function counting(body: (calls: { model: number }) => Promise<void>) {
 }
 
 describe('the DeepSeek Harness agent', () => {
+  it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
+    const { answer, ran } = await invalidArguments((tools) => deepseek.chat({ tools }));
+    expect(answer).toMatch(/error/i);
+    expect(answer).toMatch(/amount/);
+    expect(ran).toBe(false);
+  });
+
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
     const now = await cancelledWhileWorking((tools) => deepseek.chat({ tools }), deepseek.messages());
     const waiting = await afterCancel(deepseek.chat({ tools: [cancelledTransfer] }), deepseek.messages());

@@ -8,6 +8,7 @@ import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  invalidArguments,
   STEERED,
   steeredWhileWorking,
   withoutIds,
@@ -33,6 +34,13 @@ const besideYours = async (ctx: Parameters<typeof prompt>[0], message: string) =
 };
 
 describe('the OpenCode agent', () => {
+  it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
+    const { answer, ran } = await invalidArguments((tools) => opencode.chat({ tools }));
+    expect(answer).toMatch(/error/i);
+    expect(answer).toMatch(/amount/);
+    expect(ran).toBe(false);
+  });
+
   it('boots beside tables of yours, in a database of its own', async () => {
     const c = conversation(besideYours, 'tables');
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toMatch(/^Done: /);
