@@ -15,7 +15,7 @@
 //
 // The other system posts to Restate's ingress, at `/<name>/webhook`.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import * as restate from '@restatedev/restate-sdk';
+import { sdk as restate } from 'restate-objects/internal';
 import { deliver, hasCompanion } from './signals.ts';
 
 /** How a webhook is signed: the HMAC-SHA256 of its body with `secret`, in hex, in the request's `header`. */

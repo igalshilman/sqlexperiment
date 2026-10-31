@@ -27,8 +27,8 @@
 import * as restate from 'restate-objects';
 import type { SqlSession } from 'restate-objects';
 import type { RunnableConfig } from '@langchain/core/runnables';
-import { ChatAnthropic } from '@langchain/anthropic';
-import { ChatOpenAI } from '@langchain/openai';
+import type { ChatAnthropic } from '@langchain/anthropic';
+import type { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage, type BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool } from '@langchain/core/tools';
@@ -127,11 +127,35 @@ const providerOfModel = (named: string) => {
   return [provider, id] as const;
 };
 
-/** The chat model `provider/model-id` names: OpenAI's or Anthropic's. */
-const chatModel = (named: string): BaseChatModel => {
+/**
+ * The chat model `provider/model-id` names: OpenAI's or Anthropic's, through
+ * LangChain's integration of the provider, loaded once, when a model of it is
+ * first used: only that one need be installed.
+ */
+const chatModel = async (named: string): Promise<BaseChatModel> => {
   const [provider, id] = providerOfModel(named);
-  return provider === 'openai' ? new ChatOpenAI({ model: id }) : new ChatAnthropic({ model: id });
+  if (provider === 'openai') {
+    openai ??= integration('@langchain/openai', () => import('@langchain/openai'));
+    return new (await openai).ChatOpenAI({ model: id });
+  }
+  anthropic ??= integration('@langchain/anthropic', () => import('@langchain/anthropic'));
+  return new (await anthropic).ChatAnthropic({ model: id });
 };
+
+let openai: Promise<{ ChatOpenAI: typeof ChatOpenAI }> | undefined;
+let anthropic: Promise<{ ChatAnthropic: typeof ChatAnthropic }> | undefined;
+
+/** The integration `name`, which its user installs beside restate-agents. */
+async function integration<T>(name: string, load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== 'ERR_MODULE_NOT_FOUND') throw error;
+    throw new ModelError(
+      `${name.replace('@langchain/', '')}/<model-id> models need ${name}: install it beside restate-agents`,
+    );
+  }
+}
 
 /** The agent's graph: `model`, calling `tools`. */
 function graph(ctx: restate.ObjectContext, model: BaseChatModel, tools: StructuredToolInterface[], system?: string) {
@@ -187,7 +211,7 @@ const answerOnce = async (
   text: string,
   { model, system, tools = [] }: Options,
 ): Promise<string> => {
-  const llm = typeof model === 'object' ? model : chatModel(modelOf(model));
+  const llm = typeof model === 'object' ? model : await chatModel(modelOf(model));
   const app = graph(
     ctx,
     llm,

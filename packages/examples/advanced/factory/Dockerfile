@@ -31,7 +31,9 @@ COPY packages/objects packages/objects
 COPY --from=addon /src/packages/objects/native/objects.node packages/objects/native/
 COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
-RUN pnpm install --frozen-lockfile --prod --filter examples...
+# With development dependencies: restate-agents' harnesses are its optional
+# peers, installed in the workspace as its development dependencies.
+RUN pnpm install --frozen-lockfile --filter examples...
 
 FROM node:24-bookworm-slim
 # For the coders' bash tool: git, and Python for what they build and test.
