@@ -20,6 +20,8 @@ export class Steering {
   readonly turns = new Map<string, Steer[]>();
   /** Each turn closed, with the ids of the messages it took. */
   readonly closed: { turn: string; taken: string[]; cancelled: boolean }[] = [];
+  /** The message being answered, from its turn's start to its close. */
+  answering: { invocationId: string; since: string } | null = null;
 
   /** Steer turn `turn` (an invocation id) with `text`, as the object's `steer` does. */
   steer(turn: string, text: string) {
@@ -54,6 +56,9 @@ export function sqlAttempt(options: AttemptOptions) {
       if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
       return {
         steering: async (turn: string) => steering.turns.get(turn) ?? [],
+        start: async (turn: { invocationId: string; since: string }) => {
+          if (steering.answering?.invocationId !== turn.invocationId) steering.answering = turn;
+        },
         publish: async () => ({ revision: ++steering.revision }),
         progress: async (turn: string) => {
           steering.revision++;
@@ -63,7 +68,12 @@ export function sqlAttempt(options: AttemptOptions) {
     },
     objectSendClient: (definition: { name: string }) => {
       if (definition.name !== 'signals') throw new Error(`no ${definition.name} in this test`);
-      return { close: (close: Steering['closed'][number]) => void steering.closed.push(close) };
+      return {
+        close: (close: Steering['closed'][number]) => {
+          if (steering.answering?.invocationId === close.turn) steering.answering = null;
+          steering.closed.push(close);
+        },
+      };
     },
   };
 }

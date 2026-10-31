@@ -123,9 +123,6 @@ export const CANCELLED = 'Cancelled: the turn was stopped before it finished.';
  */
 export const UNANSWERED = "Unanswered: the model's provider refused the request.";
 
-/** The state key of the {@link Turn} being answered. */
-export const TURN = 'restate-agents.turn';
-
 /** The message a `chat` handler is answering: its invocation, and when it started. */
 export interface Turn {
   /** The invocation's id: `/restate/invocation/<id>/attach` waits for its answer. */
@@ -262,14 +259,12 @@ export const chatHandler = <A = string>(answer: (ctx: restate.ObjectContext, mes
     { input: messageSerde, accept: '*/*', explicitCancellation: true },
     async (ctx: restate.ObjectContext, text: string) => {
       const invocationId = ctx.request().id;
-      if ((await ctx.get<Turn>(TURN))?.invocationId !== invocationId) {
-        ctx.set(TURN, { invocationId, since: new Date().toISOString() } satisfies Turn);
-      }
+      // The companion knows the turn from here to its close: `status`, `stop` and `steer` ask it.
+      await ctx.objectClient(signals, signalsOf(ctx)).start({ invocationId, since: new Date().toISOString() });
       const taken = new Set<string>();
       steerings.set(ctx, taken);
       await stepped(ctx);
       const end = async (cancelled = false) => {
-        ctx.clear(TURN);
         ctx
           .objectSendClient(signals, signalsOf(ctx))
           .close({ agent: agentOf(ctx), turn: invocationId, taken: [...taken], cancelled });

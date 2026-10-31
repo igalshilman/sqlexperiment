@@ -1,6 +1,6 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-objects';
-import { inBackground, type Messages, type MessagesRequest, messageSerde, refusal, TURN, type Turn } from './common.ts';
+import { inBackground, type Messages, type MessagesRequest, messageSerde, refusal, type Turn } from './common.ts';
 import * as log from './log.ts';
 import {
   agentOf,
@@ -61,17 +61,15 @@ const BUILT_IN = {
   ),
   status: restate.handlers.object.shared(
     { journalReplay: true },
-    async (ctx: restate.JournaledObjectSharedContext): Promise<Status> => ({
-      answering: await ctx.get<Turn>(TURN),
-      waiting: await ctx.objectClient(signals, signalsOf(ctx)).pending(),
-    }),
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Status> =>
+      ctx.objectClient(signals, signalsOf(ctx)).status(),
   ),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
-  stop: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
-    const turn = await ctx.get<Turn>(TURN);
-    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
-    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
-  }),
+  stop: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Stopped> =>
+      ctx.objectClient(signals, signalsOf(ctx)).stop(),
+  ),
   /**
    * Add `text` to the message being answered (`status`'s), such as "Only
    * Monday, please": the agent takes it at its next tool call, as its
@@ -80,12 +78,8 @@ const BUILT_IN = {
    */
   steer: restate.handlers.object.shared(
     { journalReplay: true, input: messageSerde, accept: '*/*' },
-    async (ctx: restate.JournaledObjectSharedContext, text: string): Promise<Steered> => {
-      const turn = await ctx.get<Turn>(TURN);
-      return ctx
-        .objectClient(signals, signalsOf(ctx))
-        .steer({ agent: agentOf(ctx), turn: turn?.invocationId ?? null, text });
-    },
+    async (ctx: restate.JournaledObjectSharedContext, text: string): Promise<Steered> =>
+      ctx.objectClient(signals, signalsOf(ctx)).steer({ agent: agentOf(ctx), text }),
   ),
   /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
   notifications: restate.handlers.object.shared(
@@ -101,7 +95,8 @@ const BUILT_IN = {
    */
   watch: restate.handlers.object.shared(
     { journalReplay: true },
-    async (ctx: restate.JournaledObjectSharedContext, watch: Watch): Promise<Notifications> => waited(ctx, watch),
+    async (ctx: restate.JournaledObjectSharedContext, watch: Watch): Promise<Notifications> =>
+      ctx.objectClient(signals, signalsOf(ctx)).watch(watch),
   ),
 };
 
@@ -122,19 +117,21 @@ const FOLLOWED = {
    * messages before `first`. A message sent before it is answered first,
    * then forgotten too; one sent after starts anew.
    */
-  clear: restate.handlers.object.shared({ journalReplay: true }, async (ctx: restate.JournaledObjectSharedContext) => {
-    const turn = await ctx.get<Turn>(TURN);
-    if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
-    await own(ctx, 'erase');
-    return { stopped: turn?.invocationId ?? null } satisfies Stopped;
-  }),
+  clear: restate.handlers.object.shared(
+    { journalReplay: true },
+    async (ctx: restate.JournaledObjectSharedContext): Promise<Stopped> => {
+      const stopped = await ctx.objectClient(signals, signalsOf(ctx)).stop();
+      await own(ctx, 'erase');
+      return stopped;
+    },
+  ),
   sync: restate.handlers.object.shared(
     { journalReplay: true },
     async (
       ctx: restate.JournaledObjectSharedContext,
       { cursor = 0, revision, timeoutSeconds = 50, limit = 100 }: SyncRequest = {},
     ): Promise<Synced> => {
-      if (revision !== undefined) await waited(ctx, { revision, timeoutSeconds });
+      if (revision !== undefined) await ctx.objectClient(signals, signalsOf(ctx)).watch({ revision, timeoutSeconds });
       // The revision first: a change after it shows in the next sync. Then
       // the object's own handlers, which read its state as it is now.
       const now = await ctx.objectClient(signals, signalsOf(ctx)).notifications();
@@ -179,21 +176,6 @@ const own = <O>(ctx: restate.JournaledObjectSharedContext, method: string, param
     inputSerde: restate.serde.json,
     outputSerde: restate.serde.json,
   });
-
-/** The revision, once there is one newer than `revision`, or at the timeout: see `watch`. */
-async function waited(
-  ctx: restate.JournaledObjectSharedContext,
-  { revision, timeoutSeconds = 50 }: Watch,
-): Promise<Notifications> {
-  const key = signalsOf(ctx);
-  const { id, promise } = ctx.awakeable<Notifications>();
-  ctx.objectSendClient(signals, key).subscribe({ revision, awakeable: id });
-  const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
-  const changed = await restate.RestatePromise.race([promise, timeout]);
-  if (changed) return changed;
-  ctx.objectSendClient(signals, key).unsubscribe(id);
-  return ctx.objectClient(signals, key).notifications();
-}
 
 /**
  * What `sync` reads: what is new or changed since `cursor` (default 0, all

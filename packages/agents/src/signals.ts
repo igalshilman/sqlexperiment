@@ -7,7 +7,8 @@
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
 import { sdk as restate } from 'restate-objects/internal';
-import type { Status } from './object.ts';
+import type { Turn } from './common.ts';
+import type { Status, Stopped } from './object.ts';
 
 /** An agent's context, as far as its signals need it: any handler's of its object. */
 type AgentContext = Pick<restate.ObjectSharedContext, 'key' | 'request'>;
@@ -155,6 +156,8 @@ const CLOSED = 16;
  * `watch`es waiting for a newer one.
  */
 interface State {
+  /** The message the agent answers, from its turn's start to its close. */
+  turn: Turn;
   waiting: (Waiting & { awakeable: string })[];
   kept: Record<string, unknown[]>;
   steering: { turn: string; messages: Steer[] };
@@ -180,13 +183,8 @@ const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: 
  * Steer `turn` (the message `agent` answers, if any) with `text`: queued for
  * it to take at its next step, or, if it is over, sent as a message of its own.
  */
-async function steered(
-  ctx: restate.ObjectContext<State>,
-  agent: Agent,
-  turn: string | null,
-  text: string,
-  keep = false,
-): Promise<Steered> {
+async function steered(ctx: restate.ObjectContext<State>, agent: Agent, text: string, keep = false): Promise<Steered> {
+  const turn = (await ctx.get('turn'))?.invocationId ?? null;
   if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
     return { invocationId: await send(ctx, agent, text), steered: false };
   }
@@ -264,15 +262,54 @@ export const signals = restate.object({
     }),
 
     /**
-     * @internal Steer `turn` (the message `agent` answers, if any) with
-     * `text`: queued for it to take at its next step, or, if it is over, sent
+     * @internal Steer the message `agent` answers, if any, with `text`:
+     * queued for it to take at its next step, or, if none is answered, sent
      * as a message of its own.
      */
-    steer: internal(
+    steer: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) =>
+      steered(ctx, agent, text),
+    ),
+
+    /** @internal The agent's `chat` started answering `turn`: the same invocation again (a retry) keeps when it started. */
+    start: internal(async (ctx: restate.ObjectContext<State>, turn: Turn) => {
+      if ((await ctx.get('turn'))?.invocationId !== turn.invocationId) ctx.set('turn', turn);
+    }),
+
+    /** What the agent does: the message it answers, if any, and the waits of its tools. */
+    status: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext<State>): Promise<Status> => ({
+      answering: (await ctx.get('turn')) ?? null,
+      waiting: ((await ctx.get('waiting')) ?? []).map(({ id, name, input, since }) => ({ id, name, input, since })),
+    })),
+
+    /** @internal Cancel the invocation of the message the agent answers, as Restate's admin API cancels one. */
+    stop: restate.handlers.object.exclusive(
+      { ingressPrivate: true },
+      async (ctx: restate.ObjectContext<State>): Promise<Stopped> => {
+        const turn = await ctx.get('turn');
+        if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
+        return { stopped: turn?.invocationId ?? null };
+      },
+    ),
+
+    /**
+     * The revision, once there is one newer than `revision`, or at the
+     * timeout (50 s by default, at most 60 s), whichever comes first. It
+     * waits in Restate, holding no process; a caller that retries it with the
+     * same idempotency key joins the same wait.
+     */
+    watch: restate.handlers.object.shared(
       async (
-        ctx: restate.ObjectContext<State>,
-        { agent, turn, text }: { agent: Agent; turn: string | null; text: string },
-      ) => steered(ctx, agent, turn, text),
+        ctx: restate.ObjectSharedContext<State>,
+        { revision, timeoutSeconds = 50 }: Watch,
+      ): Promise<Notifications> => {
+        const { id, promise } = ctx.awakeable<Notifications>();
+        ctx.objectSendClient(signals, ctx.key).subscribe({ revision, awakeable: id });
+        const timeout = ctx.sleep({ seconds: Math.min(Math.max(timeoutSeconds, 0), 60) }).map(() => null);
+        const changed = await restate.RestatePromise.race([promise, timeout]);
+        if (changed) return changed;
+        ctx.objectSendClient(signals, ctx.key).unsubscribe(id);
+        return { revision: (await ctx.get('revision')) ?? 0 };
+      },
     ),
 
     /**
@@ -281,17 +318,9 @@ export const signals = restate.object({
      * else, or once that turn is over, as a message of its own. Unlike a
      * steer, a cancelled turn does not drop it: it is answered after.
      */
-    deliver: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) => {
-      const { answering } = await ctx.genericCall<null, Status>({
-        service: agent.service,
-        method: 'status',
-        key: agent.key,
-        parameter: null,
-        inputSerde: restate.serde.json,
-        outputSerde: restate.serde.json,
-      });
-      return steered(ctx, agent, answering?.invocationId ?? null, text, true);
-    }),
+    deliver: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) =>
+      steered(ctx, agent, text, true),
+    ),
 
     /** @internal The messages steered to `turn`, in order. */
     steering: restate.handlers.object.shared(
@@ -312,6 +341,7 @@ export const signals = restate.object({
         ctx: restate.ObjectContext<State>,
         { agent, turn, taken, cancelled }: { agent: Agent; turn: string; taken: string[]; cancelled: boolean },
       ) => {
+        if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
         const closed = (await ctx.get('closed')) ?? [];
         if (closed.includes(turn)) return;
         ctx.set('closed', [...closed, turn].slice(-CLOSED));
