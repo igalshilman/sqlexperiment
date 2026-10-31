@@ -259,11 +259,12 @@ const answerOnce = async (
         await conversation.cancel(pending, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
-      // Refused for good (a wrong API key): the prompt ends unanswered. An
-      // earlier one's, this one goes on.
-      if (!refusal(error)) throw error;
+      // Refused for good (a wrong API key): the prompt ends unanswered, and
+      // fails as terminal. An earlier one's, this one goes on.
+      const refused = refusal(error);
+      if (!refused) throw error;
       await conversation.close(pending, UNANSWERED);
-      if (pending === id) throw error;
+      if (pending === id) throw refused;
     }
   }
 };

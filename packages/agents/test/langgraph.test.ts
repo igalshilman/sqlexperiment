@@ -126,6 +126,8 @@ describe('the LangGraph agent', () => {
     })({});
     const c = conversation(langgraph.chat({ model, tools: bank('GraphAgent') }), 'refused');
     await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    // Retried (a crash after its end was stored), it fails again, rather than answer.
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
     expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
     expect(c.ledger.calls).toEqual([]);
     const { messages } = await c.read(langgraph.messages());

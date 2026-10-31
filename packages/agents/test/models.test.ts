@@ -93,6 +93,17 @@ describe('a wrong model', () => {
     await expect(refused).rejects.toMatchObject({ code: REFUSED });
   });
 
+  it("that pi does not know fails as terminal outside an agent's handlers too", async () => {
+    // As in a handler of restate-objects' own: no chatHandler or object() maps it.
+    const ctx = {} as Parameters<typeof pi.withPi>[0];
+    const failed = pi.withPi(ctx, { model: 'nobody/gpt-6-sol' }, async () => 'answered');
+    await expect(failed).rejects.toBeInstanceOf(restate.TerminalError);
+    await expect(failed).rejects.toMatchObject({
+      code: REFUSED,
+      message: expect.stringMatching(/knows no model provider/),
+    });
+  });
+
   it('is told apart from errors that a retry may fix', async () => {
     const overloaded = answer(new Failing(new Error('529 overloaded')));
     await expect(overloaded).rejects.toThrow('529 overloaded');

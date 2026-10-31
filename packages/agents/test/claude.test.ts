@@ -294,6 +294,27 @@ describe('the Claude agent', () => {
       throw new HttpError(401, 'authentication_error', 'invalid x-api-key');
     };
     await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    // Retried (a crash after its end was stored), it fails again, rather than answer.
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toMatchObject({ code: REFUSED });
+    expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(c.ledger.calls).toEqual([]);
+    const { messages } = await c.read(claude.messages());
+    expect(messages[1]!.parts).toEqual([{ type: 'text', text: UNANSWERED }]);
+  });
+
+  it('ends an earlier prompt the provider refuses as it is finished, and answers the next message', async () => {
+    const c = conversation(prompt, 'refused-earlier');
+    const reply = teller.reply;
+    // An overloaded provider fails the attempt, which leaves the prompt unfinished.
+    teller.reply = () => {
+      throw new HttpError(529, 'overloaded_error', 'Overloaded');
+    };
+    await expect(c.attempt('inv1', 'Please move 5 from 1 to 2')).rejects.toThrow(/Overloaded/);
+    // The next message finishes it first, which the provider refuses.
+    teller.reply = () => {
+      teller.reply = reply;
+      throw new HttpError(401, 'authentication_error', 'invalid x-api-key');
+    };
     expect(await c.attempt('inv2', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
     expect(c.ledger.calls).toEqual([]);
     const { messages } = await c.read(claude.messages());

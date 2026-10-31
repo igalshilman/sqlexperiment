@@ -240,11 +240,12 @@ const answerOnce = async (
         await close(app, config, CANCELLED);
         throw turn?.aborted ? turn.reason : error;
       }
-      // Refused for good (a wrong API key): the run ends unanswered. An
-      // earlier prompt's, this one goes on.
-      if (!refusal(error)) throw error;
+      // Refused for good (a wrong API key): the run ends unanswered, and
+      // fails as terminal. An earlier prompt's, this one goes on.
+      const refused = refusal(error);
+      if (!refused) throw error;
       await close(app, config, UNANSWERED);
-      if (!interrupted || last === id) throw error;
+      if (!interrupted || last === id) throw refused;
     }
   }
 };
