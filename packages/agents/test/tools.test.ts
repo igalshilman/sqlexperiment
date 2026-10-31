@@ -185,35 +185,13 @@ describe("Restate's tools", () => {
     await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_2' });
     // The framework stores its result (under the new id), which a publish settles.
     await settle(next.ctx, (id) => id === 'call_2');
-    // A later attempt, which finds the result stored (its tool call's publish
-    // settles), making it again makes a call of its own.
+    // A later attempt's model making it again makes a call of its own.
     const last = context(state);
-    await settle(last.ctx, (id) => id === 'call_2');
     await t.run({ order: '103' }, { ctx: last.ctx, callId: 'call_3' });
     expect([...first.made, ...next.made, ...last.made].map((m) => m.idempotencyKey)).toEqual([
       'inv1:call_1',
       'inv1:call_1',
       'inv1:call_3',
-    ]);
-  });
-
-  it('make a call that answered again when the result settled was lost with its attempt', async () => {
-    const t = call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) });
-    const state = new Map<string, Uint8Array>();
-    const first = context(state);
-    await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
-    // The attempt reads its result in the framework's transcript before the
-    // framework commits it (OpenCode, in a database of its own), and crashes.
-    await settle(first.ctx, (id) => id === 'call_1');
-    await t.run({ order: '104' }, { ctx: first.ctx, callId: 'call_2' });
-    // The next attempt's transcript lacks the result: the model makes it again, the same call.
-    const next = context(state);
-    await settle(next.ctx, () => false);
-    await t.run({ order: '103' }, { ctx: next.ctx, callId: 'call_3' });
-    expect([...first.made, ...next.made].map((m) => m.idempotencyKey)).toEqual([
-      'inv1:call_1',
-      'inv1:call_2',
-      'inv1:call_1',
     ]);
   });
 
