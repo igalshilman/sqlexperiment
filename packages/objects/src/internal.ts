@@ -5,8 +5,9 @@
 // own copy, so that a library's journaled handlers serve beside its objects).
 export * as sdk from '@restatedev/restate-sdk';
 export { Schema } from './schema.ts';
-export { databaseOf, setStoreWrapper, SqlAttempt, withSql } from './session.ts';
+export { asDatabase, databaseOf, setStoreWrapper, SqlAttempt, withSql } from './session.ts';
 export type { SqlHost } from './session.ts';
 export { open, type Connection, type Store, type ConnectionTransaction } from './database.ts';
 export { PromiseSelector } from './selector.ts';
+export { invoke, type AttemptContext } from './object.ts';
 export type { DoProgressResult, Selectable, UnresolvedFuture } from './selector.ts';

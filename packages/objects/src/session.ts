@@ -23,6 +23,7 @@ import {
 } from './database.ts';
 import { apply, ofObject, type Schema, sessions } from './schema.ts';
 import { sendClients } from './sends.ts';
+import { type Send, sendOf } from './calls.ts';
 
 export type { DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue };
 
@@ -33,13 +34,24 @@ export type { DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue };
  */
 export interface Database extends DatabaseWriter {
   /**
-   * Run `body` as one SQL transaction: it commits when `body` resolves, and
-   * rolls back when it rejects. The transaction holds the session: other
-   * calls to the session wait until it ends, and a call from inside `body` is
-   * refused, as it would wait for `body`. So `body` uses the `db` it gets,
-   * which is invalid once `body` settles.
+   * Run `body` as one transaction: it commits when `body` resolves, and rolls
+   * back when it rejects. It holds the database: other calls wait until it
+   * ends, and a call to the database from inside `body` is refused, as it
+   * would wait for `body`. So `body` uses the `tx` it gets, which is invalid
+   * once `body` settles.
    */
-  transaction<T>(body: (db: DatabaseWriter) => Promise<T>): Promise<T>;
+  transaction<T>(body: (tx: Transaction) => Promise<T>): Promise<T>;
+}
+
+/** One transaction of a {@link Database}: its SQL, and the sends it commits with. */
+export interface Transaction extends DatabaseWriter {
+  /**
+   * Sends made right after the transaction commits, and never if it rolls
+   * back. Each has the idempotency key it is given, or else one of the
+   * transaction (`transaction/<id>/<index>`), so a send an attempt makes
+   * again is dropped.
+   */
+  readonly send: Send;
 }
 
 /**
@@ -221,6 +233,25 @@ function forBody(tx: ConnectionTransaction): DatabaseWriter {
   return sqlOver((sql, params) => forHandler(tx.queryColumns(sql, params)));
 }
 
+/**
+ * `connection`, opened without the SDK (`open`), as a handler's `ctx.db`:
+ * for a library's tests, and tools. Its transactions send nothing, and a
+ * library's schema applies to it (`Schema.ensure`).
+ */
+export function asDatabase(connection: Connection): Database {
+  const db: Database = {
+    ...sqlOver((sql, params) => connection.queryColumns(sql, params)),
+    transaction: (body) => connection.transaction((tx) => body({ ...forBody(tx), send: refusedSend })),
+  };
+  sessions.set(db, (schemas) => apply(connection, schemas));
+  return db;
+}
+
+/** The sends of a transaction that has no outbox: a shared handler's, or another database's. */
+const refusedSend: Send = () => {
+  throw new TerminalError("a send of a transaction is an exclusive handler's, in the object's own database");
+};
+
 // A transaction's sends commit with it, in the database's record `outbox`
 // (beside its tables, in none of them), which holds each committed
 // transaction's sends until they are stored. They are made once the
@@ -319,7 +350,11 @@ export class SqlAttempt {
     this.name = name;
     this.db = {
       ...sqlOver((sql, params) => this.call((db) => db.queryColumns(sql, params))),
-      transaction: (body) => this.call((db) => db.transaction((tx) => body(forBody(tx)))),
+      // A shared handler's writes stay in its session: it has no outbox.
+      transaction: <T>(body: (tx: Transaction) => Promise<T>) =>
+        this.ctx.shared || this.name !== undefined
+          ? this.call((db) => db.transaction((tx) => body({ ...forBody(tx), send: refusedSend })))
+          : this.withSends((tx, record) => body({ ...tx, send: sendOf(record) })),
     };
     sessions.set(this.db, (schemas) => this.opened().then((db) => this.ensureSchemas(db, schemas)));
     attempts.set(this.db, this);
@@ -341,18 +376,29 @@ export class SqlAttempt {
    */
   async transaction<T>(body: (t: SqlTransaction) => Promise<T>): Promise<T> {
     if (this.ctx.shared) throw new TerminalError('ctx.transaction is for exclusive handlers');
+    return this.withSends((db, record) => body({ db, tx: sendClients(this.ctx.defaultSerde, record) }));
+  }
+
+  /**
+   * One transaction of the session, whose sends are made once it commits,
+   * and kept in the outbox until they are stored: `body` gets its SQL, and
+   * `record`, which records a send.
+   */
+  private async withSends<T>(
+    body: (db: DatabaseWriter, record: (send: restate.GenericSend<unknown>) => void) => Promise<T>,
+  ): Promise<T> {
     const sends: Outgoing['sends'] = [];
     let recording = true;
-    const tx = sendClients(this.ctx.defaultSerde, (send) => {
+    const record = (send: restate.GenericSend<unknown>) => {
       if (!recording) throw new TerminalError('the transaction has ended: send from inside its body');
       sends.push(storedSend(send));
-    });
+    };
     let outgoing: Outgoing | undefined;
     const value = await this.call((db) =>
       db.transaction(async (handle) => {
         let result: T;
         try {
-          result = await body({ db: forBody(handle), tx });
+          result = await body(forBody(handle), record);
         } finally {
           recording = false;
         }

@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import * as restate from 'restate-objects';
 import { SqlAttempt, type SqlHost, withSql } from 'restate-objects/internal';
-import type { Store } from 'restate-objects/internal';
+import type { AttemptContext, Store } from 'restate-objects/internal';
 
 /**
  * An SQL store over `map`. Give the same map to several databases for an
@@ -125,4 +125,75 @@ export function sqlAttempt({
     /** The attempt ends, as when Restate fences or suspends it. */
     abort: () => end.reject(new Error('the attempt ended')),
   };
+}
+
+/** A call or send a {@link fakeContext} was asked for. */
+export interface Made {
+  service: string;
+  method: string;
+  key?: string;
+  parameter: unknown;
+  idempotencyKey?: string;
+  delay?: number;
+}
+
+/** A parameter as JSON: a send made again from the outbox has it as bytes. */
+const decoded = (parameter: unknown, inputSerde?: unknown) =>
+  parameter instanceof Uint8Array && inputSerde === restate.serde.binary
+    ? (JSON.parse(new TextDecoder().decode(parameter)) as unknown)
+    : parameter;
+
+/** A call or send as a test sees it. */
+const made = (c: restate.GenericCall<unknown, unknown> | restate.GenericSend<unknown>): Made => ({
+  service: c.service,
+  method: c.method,
+  ...(c.key !== undefined ? { key: c.key } : {}),
+  parameter: decoded(c.parameter, c.inputSerde),
+  ...(c.idempotencyKey !== undefined ? { idempotencyKey: c.idempotencyKey } : {}),
+  ...('delay' in c && c.delay !== undefined ? { delay: Number(c.delay) } : {}),
+});
+
+/** The context of one attempt of a session object's handler, for `invoke` of restate-objects/internal. */
+export function fakeContext({
+  map,
+  key = 'k',
+  id = 'inv',
+  service,
+  calls = [],
+  sends = [],
+  answer = () => null,
+}: {
+  map: Map<string, Uint8Array>;
+  key?: string;
+  id?: string;
+  /** The object's name: its definition's. */
+  service: string;
+  calls?: Made[];
+  sends?: Made[];
+  /** The answer to each call. */
+  answer?: (call: Made) => unknown;
+}): AttemptContext {
+  const end = Promise.withResolvers<void>();
+  end.promise.catch(() => {});
+  const ctx = {
+    key,
+    request: () => ({ id, target: { service, key, handler: 'h' } }),
+    invocationEndPromise: end,
+    defaultSerde: restate.serde.json,
+    get: async (k: string) => map.get(k) ?? null,
+    set: (k: string, value: Uint8Array) => void map.set(k, Uint8Array.from(value)),
+    clear: (k: string) => void map.delete(k),
+    stateKeys: async () => [...map.keys()],
+    run: async () => {},
+    genericSend: (s: restate.GenericSend<unknown>) => {
+      sends.push(made(s));
+      return {} as restate.InvocationHandle;
+    },
+    genericCall: (c: restate.GenericCall<unknown, unknown>) => {
+      const call = made(c);
+      calls.push(call);
+      return Promise.resolve(answer(call));
+    },
+  };
+  return ctx as unknown as AttemptContext;
 }

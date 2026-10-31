@@ -21,7 +21,8 @@
 import * as restate from '@restatedev/restate-sdk';
 import { register, type Step } from './schema.ts';
 import { hookSelector } from './selector.ts';
-import { SqlAttempt, type SqlHost, type Database, type SqlTransaction, withSql } from './session.ts';
+import { SqlAttempt, type Database, type SqlTransaction, withSql } from './session.ts';
+import { host, recovery, sqlMetadata, sqlOptions } from './object.ts';
 
 // The SDK, but what this module declares in its place.
 export * from '@restatedev/restate-sdk';
@@ -36,6 +37,17 @@ export type {
   SqlValue,
 } from './session.ts';
 export type { Step } from './schema.ts';
+export type { Transaction } from './session.ts';
+export {
+  sessionObject,
+  sqlMetadata,
+  sqlOptions,
+  type Entry,
+  type HandlerOptions,
+  type SessionContext,
+  type ViewContext,
+} from './object.ts';
+export type { CallOptions, Client, Rpc, Send, SendClient, SendOptions, Target } from './calls.ts';
 
 /** The SDK's context of an object's handler that replays its journal (`journalReplay: true`): no `ctx.db`. */
 export type JournaledObjectContext = restate.ObjectContext;
@@ -91,49 +103,10 @@ export interface ObjectSharedContext extends Omit<restate.ObjectSharedContext, '
   readonly db: Database;
 }
 
-/**
- * The options `object` sets: lazy state, so an invocation does not start by
- * loading every page. Journals are kept as Restate's default keeps them.
- *
- * TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
- */
-export const sqlOptions = { enableLazyState: true } satisfies restate.ObjectOptions;
-
-/**
- * The metadata `object` sets: Restate's UI hides the database from the
- * journal view (its head, tail, manifests and packs in the object's state, `v22/...`; and
- * the `sync` runs after its writes).
- */
-export const sqlMetadata = {
-  'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v22/',
-};
-
 // Marks the handlers made here.
 const SQL = Symbol('restate-objects handler');
 
 type Fn<C> = (ctx: C, input: never) => Promise<unknown>;
-
-/** The SDK's runtime context, as far as the session needs it beyond its public type. */
-type Runtime = { invocationEndPromise: SqlHost['invocationEndPromise']; defaultSerde: SqlHost['defaultSerde'] };
-
-function host(ctx: restate.ObjectContext | restate.ObjectSharedContext, shared: boolean): SqlHost {
-  const runtime = ctx as unknown as Runtime;
-  const exclusive = ctx as restate.ObjectContext;
-  return {
-    shared,
-    key: ctx.key,
-    invocationEndPromise: runtime.invocationEndPromise,
-    defaultSerde: runtime.defaultSerde,
-    request: () => ctx.request(),
-    get: (name, serde, entry) => ctx.get(name, serde, entry),
-    set: (name, value, serde, entry) => exclusive.set(name, value, serde, entry),
-    clear: (name, entry) => exclusive.clear(name, entry),
-    stateKeys: () => ctx.stateKeys(),
-    run: (name, action) => exclusive.run(name, action),
-    genericSend: (send) => ctx.genericSend(send),
-  };
-}
 
 const refusedAwakeable = () => {
   throw new restate.TerminalError(
@@ -168,11 +141,6 @@ function withDatabase(fn: Fn<never>, shared: boolean) {
     return withSql(() => fn(sqlContext(ctx, attempt) as never, input), attempt).finally(unhook);
   };
 }
-
-// The handler options the SQL handlers have: explicit recovery, which runs a
-// retried attempt from the start, since a later attempt makes different reads
-// than a replayed journal would have.
-const recovery = () => restate.internal.explicitRecovery();
 
 /**
  * The options of an object's handler: the SDK's, and `journalReplay`. With
