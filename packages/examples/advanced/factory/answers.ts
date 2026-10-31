@@ -6,7 +6,6 @@
 import { z } from 'zod';
 
 /** The planner's: a plan the parent can act on, part by part. */
-
 export const Plan = z.object({
   summary: z.string().describe('What will be built, and how its parts fit together: a short paragraph, for people'),
   parts: z

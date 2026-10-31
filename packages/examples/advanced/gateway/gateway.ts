@@ -1,6 +1,5 @@
 // The tool gateway: one door to every tool, for the agents (agent.ts). A
-// Gateway virtual object per tenant
-// (`Gateway/acme`), with the journal.
+// Gateway virtual object per tenant (`Gateway/acme`), with the journal.
 //
 // - `tools()`: the prebuilt tools (see tools.ts).
 // - `call({ user, name, arguments })` runs one:

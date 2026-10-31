@@ -4,8 +4,8 @@
  * A virtual object is a set of handlers that Restate calls by key: each key
  * (here, a name) is an instance of its own, and Restate runs its calls one at
  * a time. `restate.sessionObject` makes one; each handler gets its context,
- * `ctx`, with the key. This process serves the handlers; Restate calls them over HTTP, and
- * you call them through Restate.
+ * `ctx`, with the key. This process serves the handlers; Restate calls them
+ * over HTTP, and you call them through Restate.
  *
  *   node src/01_greeter.ts                                                          # the object, on port 9080
  *   npx @restatedev/restate-server                                                  # Restate, in another terminal

@@ -7,7 +7,7 @@
  * language. `object` comes from restate-agents: restate-sessions' object, set
  * up for agents.
  *
- *   node src/09_prompt.ts                                                      # and register it (see 01)
+ *   OPENAI_API_KEY=… node src/09_prompt.ts                                     # and register it (see 01)
  *   curl localhost:8080/translator/French/translate --json '"Good morning!"'   # "Bonjour !"
  *   curl localhost:8080/translator/Japanese/translate --json '"Good morning!"'
  */

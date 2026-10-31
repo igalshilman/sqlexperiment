@@ -1,7 +1,7 @@
 /**
  * An assistant with a memory: the facts it learns about you go into a table
  * of its own SQL database, next to its conversation. Its tools write and read
- * them through `ctx.db`, and a handler of your own serves them, for a profile
+ * them through `ctx.db`, and a view of your own serves them, for a profile
  * page say.
  *
  *   OPENAI_API_KEY=… node basic/memory.ts
@@ -35,7 +35,7 @@ const recall = tool({
   },
 });
 
-// An object of your own: the agent's handlers, and yours beside them.
+// An object of your own: the agent's handler and view, and yours beside them.
 const assistant = object({
   name: 'assistant',
   // A table of your own, beside the agent's: the facts, in each user's database.

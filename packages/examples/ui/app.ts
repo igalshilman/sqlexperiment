@@ -1,11 +1,12 @@
-// A chat page for the support agent of ../support.ts, on Restate's own
-// client: send a message, see what the agent is doing while it works,
-// approve or reject what it waits for, steer it, stop it, or start anew.
+// A chat page for the support agent of ../intermediate/support.ts, on
+// Restate's own client: send a message, see what the agent is doing while it
+// works, approve or reject what it waits for, steer it, stop it, or start
+// anew. From packages/examples:
 //
-//   OPENAI_API_KEY=… node intermediate/support.ts                                 # the agent, on port 9080
-//   npx @restatedev/restate-server                                       # Restate, in another terminal
+//   OPENAI_API_KEY=… node intermediate/support.ts   # the agent, on port 9080
+//   npx @restatedev/restate-server                  # Restate, in another terminal
 //   npx @restatedev/restate deployments register http://localhost:9080
-//   npx vite ui                                                          # this page: http://localhost:5173
+//   npx vite ui                                     # this page: http://localhost:5173
 //
 // Each user (`?user=alice`) is a conversation of its own: the agent's key.
 import * as clients from '@restatedev/restate-sdk-clients';

@@ -2,12 +2,12 @@
  * 12 · An agent in your own object
  *
  * `object` holds the agent's handler and view (`pi.chat`, `pi.messages`)
- * beside handlers and views of your own, and a schema of your own: one database for the
+ * beside handlers, views and a schema of your own: one database for the
  * conversation and your tables. A tool's `run` gets the handler's `ctx`, so
  * it reaches that database too. Here, the agent remembers facts about the
- * user, and `facts` serves them, for a profile page say.
+ * user, and the view `facts` serves them, for a profile page say.
  *
- *   node src/12_memory.ts                       # and register it (see 01)
+ *   OPENAI_API_KEY=… node src/12_memory.ts      # and register it (see 01)
  *   curl localhost:8080/companion/alice/chat -d 'I am vegetarian, and I live in Lisbon.'
  *   curl localhost:8080/companion/alice/facts   # what it remembered
  */

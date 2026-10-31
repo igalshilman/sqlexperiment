@@ -7,7 +7,7 @@
  * `TerminalError` is an answer too, for the model to correct itself; any
  * other error is a failure, which Restate retries.
  *
- *   node src/11_tool.ts   # and register it (see 01)
+ *   OPENAI_API_KEY=… node src/11_tool.ts   # and register it (see 01)
  *   curl localhost:8080/timekeeper/alice/chat -d 'What time is it in Lisbon and in Tokyo?'
  */
 import { TerminalError } from 'restate-sessions';

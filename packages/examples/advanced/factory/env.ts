@@ -3,8 +3,8 @@
  * LINEAR_API_KEY (and LINEAR_WEBHOOK_SECRET, its webhook's signing secret),
  * or else the stand-in (linear.ts) on localhost:3333; the project on GitHub,
  * with GITHUB_REPO (owner/name, such as igalshilman/demos) and GITHUB_TOKEN,
- * or else a git repository standing in for it; and WORKSPACE, where the coders work
- * (/tmp/restate-factory by default).
+ * or else a git repository standing in for it; and WORKSPACE, where the
+ * coders work (/tmp/restate-factory by default).
  */
 import { type Tool, tool, type WebhookAuth } from 'restate-agents';
 import { z } from 'zod';

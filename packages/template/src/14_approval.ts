@@ -6,7 +6,7 @@
  * a crash or a restart changes nothing. `pending` lists what the agent waits
  * for, and `signal` answers it.
  *
- *   node src/14_approval.ts                      # and register it (see 01)
+ *   OPENAI_API_KEY=… node src/14_approval.ts     # and register it (see 01)
  *   curl localhost:8080/support/alice/chat/send -d 'Order 103 arrived broken. Can I get my $30 back?'
  *   curl localhost:8080/support/alice/pending    # the approval it waits for
  *   curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'

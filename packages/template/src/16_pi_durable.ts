@@ -19,7 +19,7 @@
  * conversation stays in the database: each message to the same key goes on
  * with it.
  *
- *   node src/16_pi_durable.ts                    # and register it (see 01)
+ *   OPENAI_API_KEY=… node src/16_pi_durable.ts                        # and register it (see 01)
  *   curl localhost:8080/poet/alice/write --json '"the sea"'
  *   curl localhost:8080/poet/alice/write --json '"Again, shorter."'   # the same conversation
  */

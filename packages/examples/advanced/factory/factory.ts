@@ -1,3 +1,20 @@
+/**
+ * A software factory: a new Linear issue, through a webhook, starts a triage
+ * agent (pi), which has a planner (pi) plan it, a coder (OpenCode) per part
+ * build it and open its pull request, and a reviewer (pi) review each one.
+ * GitHub's webhook brings people's comments and reviews, and failed CI
+ * runs, to the coder of the pull request. See README.md.
+ *
+ *   node advanced/factory/linear.ts                                       # Linear (a stand-in), on port 3333
+ *   OPENAI_API_KEY=… ANTHROPIC_API_KEY=… node advanced/factory/factory.ts
+ *   npx @restatedev/restate-server                                        # Restate, in another terminal
+ *   npx @restatedev/restate deployments register http://localhost:9080
+ *   curl localhost:3333/issues --json '{"title": "A calculator CLI", "description": "calc.py, with tests"}'
+ *   curl localhost:8080/triage/ENG-1/messages                             # triage's conversation
+ *
+ * The environment (the real Linear and GitHub, WORKSPACE): env.ts. Coders
+ * run real commands, on this machine: use a sandbox.
+ */
 import { serve, subagent, webhook } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import * as pi from 'restate-agents/pi';
