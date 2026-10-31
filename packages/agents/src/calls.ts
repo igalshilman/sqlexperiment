@@ -10,13 +10,19 @@
 // idempotency key: the same Restate call (a wait for a signal, a sub-agent's
 // task), which it waits for again, or whose answer it gets.
 //
-// A call is kept until the framework's transcript has its result under the
+// A call is settled once the framework's transcript has its result under the
 // last id it was made with ({@link settle}, at each publish, and before each
 // tool call): one that answered just before a crash, whose result the
 // framework had not stored, is made again as the same call. An error there
 // is not its result: OpenCode gives the call it interrupted one, and the
 // model makes it again. Once stored, the model has its result, and an
 // identical call it makes later is a call of its own.
+//
+// Settled holds for the attempt only, and the table keeps every call of the
+// invocation: the transcript an attempt reads may have writes its framework
+// has not committed yet (OpenCode's, in a database of its own), which a crash
+// loses. The next attempt settles again, from the transcript as it was
+// committed.
 import type * as restate from 'restate-sessions';
 import { Schema } from 'restate-sessions/internal';
 import { randomUUID } from 'node:crypto';
@@ -68,15 +74,15 @@ async function load(ctx: CallsContext, invocation: string): Promise<Calls> {
     : { invocation, calls: [] };
 }
 
-/** Each attempt's id, and its calls, by its context. */
-const attempts = new WeakMap<object, { id: string; calls: Promise<Calls> }>();
+/** Each attempt's id, its invocation's calls, and those it settled, by its context. */
+const attempts = new WeakMap<object, { id: string; calls: Promise<Calls>; settled: Set<Call> }>();
 
 /** The attempt of `ctx`: its id, and the calls of its invocation. */
 function attemptOf(ctx: CallsContext) {
   let attempt = attempts.get(ctx);
   if (!attempt) {
     const calls = load(ctx, ctx.request.id);
-    attempt = { id: randomUUID(), calls };
+    attempt = { id: randomUUID(), calls, settled: new Set() };
     attempts.set(ctx, attempt);
   }
   return attempt;
@@ -92,9 +98,10 @@ export async function callOf(ctx: CallsContext, tool: string, input: unknown, ca
   const attempt = attemptOf(ctx);
   const state = await attempt.calls;
   const json = JSON.stringify(input);
+  const open = state.calls.filter((c) => !attempt.settled.has(c));
   let call =
-    state.calls.find((c) => c.ids.includes(callId)) ??
-    state.calls.find((c) => c.attempt !== attempt.id && c.tool === tool && c.input === json);
+    open.find((c) => c.ids.includes(callId)) ??
+    open.find((c) => c.attempt !== attempt.id && c.tool === tool && c.input === json);
   if (call) {
     call.attempt = attempt.id;
     if (!call.ids.includes(callId)) call.ids.push(callId);
@@ -114,17 +121,14 @@ export async function callOf(ctx: CallsContext, tool: string, input: unknown, ca
 }
 
 /**
- * Forget the calls that answered whose result the framework stored: those
- * of which `stored(id)` is true for the last id they were made with. Called
- * at each publish, and before each tool call, with the transcript as the
- * framework stored it: also in an attempt that made no call yet, which would
- * otherwise take one an earlier attempt made, and the model has the result
- * of.
+ * Settle the calls that answered whose result the framework stored: those
+ * of which `stored(id)` is true for the last id they were made with, which
+ * this attempt's tool calls no longer take. Called at each publish, and
+ * before each tool call, with the transcript as the framework has it: also
+ * in an attempt that made no call yet, which would otherwise take one an
+ * earlier attempt made, and the model has the result of.
  */
 export async function settle(ctx: CallsContext, stored: (id: string) => boolean) {
-  const state = await attemptOf(ctx).calls;
-  const kept = state.calls.filter((c) => !c.done || !stored(c.ids.at(-1)!));
-  if (kept.length === state.calls.length) return;
-  state.calls = kept;
-  await store(ctx, state);
+  const { calls, settled } = attemptOf(ctx);
+  for (const c of (await calls).calls) if (c.done && stored(c.ids.at(-1)!)) settled.add(c);
 }
