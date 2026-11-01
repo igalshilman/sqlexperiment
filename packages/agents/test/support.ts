@@ -108,6 +108,7 @@ export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => P
     genericSend: (c: Made) => void route(c),
     cancellation: base.cancellation,
     cancelPreviousCalls: base.cancelPreviousCalls,
+    invocation: (id: string) => ({ cancel: () => options.cancel?.(id) }),
   } as unknown as AttemptContext;
   // A chat handler's: with explicit cancellation.
   const ctx = contextOf(sdk, base.db, { explicitCancellation: true });

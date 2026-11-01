@@ -148,8 +148,11 @@ curl localhost:8080/restate/invocation/inv_1f…/attach               # the answ
 
 **Stop a turn.** `stop` stops the message being answered, such as for a
 UI's Stop button: it cancels its invocation (the one `status` says), and
-answers its id, or null if no message was answered. To interrupt with a new
-message, send it after `stop`: it is answered once the stopped turn ended.
+answers its id, or null if no message was answered. Messages to `chat`
+queue: the agent answers one at a time, in the order they came, and a
+stopped turn makes way for the next one waiting. So to interrupt with a new
+message, send it after `stop`: it is answered once the stopped turn ended,
+after any messages already waiting.
 
 ```sh
 curl localhost:8080/assistant/alice/stop                             # {"stopped": "inv_1f…"}

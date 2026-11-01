@@ -1,7 +1,7 @@
 // The agents' companion (`signals`): the turn it keeps from `start` to
-// `close`, which `status`, `stop`, `steer` and `deliver` read. Its handlers
+// `close`, which `status`, `steer` and `deliver` read (and the `stop` view,
+// through `status`). Its handlers
 // run on a fake context, which keeps the state and records what they send.
-import * as restate from '@restatedev/restate-sdk';
 import { signals } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 
@@ -9,11 +9,10 @@ const agent = { service: 'assistant', key: 'alice' };
 const A = 'inv_1a';
 const B = 'inv_1b';
 
-/** A companion's state and what its handlers sent (texts sent as messages) and cancelled. */
+/** A companion's state and what its handlers sent (texts sent as messages). */
 function companion() {
   const state = new Map<string, unknown>();
   const sent: string[] = [];
-  const cancelled: string[] = [];
   const ctx = {
     key: 'assistant:alice',
     get: async (name: string) => structuredClone(state.get(name)),
@@ -24,12 +23,11 @@ function companion() {
       return { invocationId: Promise.resolve(`inv_sent${sent.length}`) };
     },
     resolveAwakeable: () => {},
-    invocation: (id: { toString(): string }) => ({ cancel: () => void cancelled.push(String(id)) }),
   };
   const handlers = (signals as unknown as { object: Record<string, (ctx: unknown, input?: unknown) => unknown> })
     .object;
   const run = <T>(name: string, input?: unknown) => handlers[name]!(ctx, input) as Promise<T>;
-  return { run, sent, cancelled };
+  return { run, sent };
 }
 
 const turn = (invocationId: string) => ({ invocationId, since: '2026-10-31T00:00:00.000Z' });
@@ -82,14 +80,5 @@ describe("an agent's companion", () => {
     await c.run('close', close(A));
     expect(c.sent).toEqual(['delivered']);
     expect(await answering(c)).toBe(B);
-  });
-
-  it('stops the turn it answers, and nothing when none is', async () => {
-    const c = companion();
-    expect(await c.run('stop')).toEqual({ stopped: null });
-    const id = restate.InvocationIdParser.fromString('inv_1aGuEfH1fC0F1tDaHYyy2FfUD7DhkVvjSl').toString();
-    await c.run('start', { agent, turn: turn(id) });
-    expect(await c.run('stop')).toEqual({ stopped: id });
-    expect(c.cancelled).toEqual([id]);
   });
 });

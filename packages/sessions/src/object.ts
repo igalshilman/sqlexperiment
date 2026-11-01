@@ -45,19 +45,33 @@ export interface SessionContext {
   readonly rpc: Rpc;
   /** Sends, made at once; a transaction's (`tx.send`) are made once it commits. */
   readonly send: Send;
+  /** Cancel an invocation, by its id: see {@link Cancel}. */
+  readonly cancel: Cancel;
 }
 
 /**
  * The context of a session object's view: it runs beside the handlers, and
  * reads the database as committed at its first read, whatever they commit
- * meanwhile. It writes nothing, and sends nothing.
+ * meanwhile. It writes nothing, and sends nothing, but it can cancel an
+ * invocation: a handler of its own object's, say, as a Stop button does.
  */
 export interface ViewContext {
   readonly key: string;
   readonly request: restate.Request;
   readonly db: DatabaseReader;
   readonly rpc: Rpc;
+  readonly cancel: Cancel;
 }
+
+/**
+ * Cancel invocation `invocationId` (such as `inv_1f…`), as Restate's admin
+ * API does: made at once, and not awaited. Cancelling an invocation that
+ * already ended does nothing, so a new attempt that cancels it again is
+ * harmless.
+ *
+ *   ctx.cancel(turn.invocationId);
+ */
+export type Cancel = (invocationId: string) => void;
 
 /** A handler of `C`: its input, if any, annotated. */
 // oxlint-disable-next-line typescript/no-explicit-any
@@ -109,7 +123,7 @@ type Runtime = { invocationEndPromise: SqlHost['invocationEndPromise']; defaultS
 /** What an attempt needs of the SDK's context: a test's fake has these. */
 export type AttemptContext = Pick<
   restate.ObjectContext,
-  'key' | 'request' | 'get' | 'set' | 'clear' | 'stateKeys' | 'run' | 'genericSend' | 'genericCall'
+  'key' | 'request' | 'get' | 'set' | 'clear' | 'stateKeys' | 'run' | 'genericSend' | 'genericCall' | 'invocation'
 > &
   Runtime;
 
@@ -172,18 +186,29 @@ export function contextOf(
 ): SessionContext | ViewContext {
   if (explicitCancellation) explicitlyCancelled.add(ctx);
   const rpc = rpcOf(ctx);
+  const cancel = cancelOf(ctx);
   const context: SessionContext | ViewContext = view
-    ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(db), rpc })
+    ? Object.freeze({ key: ctx.key, request: ctx.request(), db: readerOf(db), rpc, cancel })
     : Object.freeze({
         key: ctx.key,
         request: ctx.request(),
         db,
         rpc,
         send: sendOf((send) => void ctx.genericSend(send)),
+        cancel,
       });
   sdkContexts.set(context, ctx as unknown as restate.ObjectContext);
   return context;
 }
+
+/** {@link Cancel} over the SDK's context `ctx`. */
+const cancelOf =
+  (ctx: Pick<restate.ObjectContext, 'invocation'>): Cancel =>
+  (invocationId) => {
+    // Not an id (the SDK's parser checks no more): a retry would fail the same way.
+    if (!invocationId.startsWith('inv')) throw new restate.TerminalError(`not an invocation id: ${invocationId}`);
+    ctx.invocation(restate.InvocationIdParser.fromString(invocationId)).cancel();
+  };
 
 /** One attempt of `fn` over `ctx`: its own context and session, which ends with it. */
 function attempt(
