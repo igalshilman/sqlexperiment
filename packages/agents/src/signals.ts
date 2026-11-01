@@ -23,7 +23,7 @@ const keyOf = (service: string, key: string) => `${service}:${key}`;
 /** The key of the signals of the agent of `ctx`. */
 export const signalsOf = (ctx: AgentContext) => keyOf(ctx.request.target.service, ctx.key);
 
-/** Where an object of restate-agents (`object()`, every `agent()`) points to its companion. */
+/** Where an object of restate-agents (`sessionObject()`, every `agent()`) points to its companion. */
 const COMPANION = Symbol('restate-agents.companion');
 
 /**
@@ -40,7 +40,7 @@ export interface Companion {
   agent: Agent;
 }
 
-/** `definition`, pointing to its companion: what `object()` returns. */
+/** `definition`, pointing to its companion: what `sessionObject()` returns. */
 export const withCompanion = <D extends { name: string }>(definition: D): D =>
   Object.defineProperty(definition, COMPANION, {
     value: (key: string): Companion => ({
@@ -52,11 +52,11 @@ export const withCompanion = <D extends { name: string }>(definition: D): D =>
 
 /**
  * The companion of `agent`'s key `key`: for anyone holding an agent (an
- * `object()` or `agent()` of restate-agents) to reach what it is doing.
+ * `sessionObject()` or `agent()` of restate-agents) to reach what it is doing.
  */
 export function companionOf(agent: { name: string }, key: string): Companion {
   const companion = (agent as { [COMPANION]?: (key: string) => Companion })[COMPANION];
-  if (!companion) throw new Error(`${agent.name} is not an agent of restate-agents (an object() or an agent())`);
+  if (!companion) throw new Error(`${agent.name} is not an agent of restate-agents (a sessionObject() or an agent())`);
   return companion(key);
 }
 

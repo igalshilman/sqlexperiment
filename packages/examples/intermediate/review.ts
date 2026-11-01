@@ -16,7 +16,7 @@
  */
 import type * as restate from 'restate-sessions';
 import type { Plugin } from '@opencode/plugin';
-import { chatHandler, object, serve } from 'restate-agents';
+import { chatHandler, sessionObject, serve } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 
 const workspace = process.env.WORKSPACE ?? '/tmp/review';
@@ -45,7 +45,7 @@ const options = (ctx: restate.SessionContext): opencode.Options => ({
   plugins: [onlySrc],
 });
 
-const coder = object({
+const coder = sessionObject({
   name: 'coder',
   handlers: {
     chat: opencode.chat(options),

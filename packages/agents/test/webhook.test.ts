@@ -4,11 +4,11 @@
 // records its sends; restate-tools.ts delivers to a running turn, on Restate.
 import { createHmac } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
-import { companionOf, deliver as deliverTo, object, webhook, webhookMessage } from 'restate-agents';
+import { companionOf, deliver as deliverTo, sessionObject, webhook, webhookMessage } from 'restate-agents';
 import { describe, expect, it } from 'vitest';
 
-const triage = object({ name: 'triage', handlers: { chat: async (_ctx, text: string) => text } });
-const audit = object({ name: 'audit', handlers: { chat: async (_ctx, text: string) => text } });
+const triage = sessionObject({ name: 'triage', handlers: { chat: async (_ctx, text: string) => text } });
+const audit = sessionObject({ name: 'audit', handlers: { chat: async (_ctx, text: string) => text } });
 
 const issues = webhook({
   name: 'linear',
@@ -119,7 +119,7 @@ describe('a webhook', () => {
 
   it('fails at its definition with a route that is not an agent of restate-agents', () => {
     const plain = restate.object({ name: 'plain', handlers: { chat: async (_ctx: restate.ObjectContext) => '' } });
-    expect(() => webhook({ name: 'linear', route: [plain] })).toThrow(/plain is not an object\(\) or agent\(\)/);
+    expect(() => webhook({ name: 'linear', route: [plain] })).toThrow(/plain is not a sessionObject\(\) or agent\(\)/);
   });
 
   it('fails at its definition with a secret that is not set', () => {

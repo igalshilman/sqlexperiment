@@ -11,7 +11,7 @@
  *   curl localhost:8080/assistant/alice/chat -d 'Suggest a restaurant for tonight.'
  *   curl localhost:8080/assistant/alice/facts
  */
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -36,7 +36,7 @@ const recall = tool({
 });
 
 // An object of your own: the agent's handler and view, and yours beside them.
-const assistant = object({
+const assistant = sessionObject({
   name: 'assistant',
   // Your own table, in each user's database next to the agent's tables.
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],

@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), OPENAI_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { object, signals } from 'restate-agents';
+import { sessionObject, signals } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import { serveIfMain } from 'restate-sessions/test/faults';
 import { ledger } from 'restate-sessions/test/ledger';
@@ -12,7 +12,7 @@ import { bank } from './bank.ts';
 /** Answer a message, once per invocation. */
 export const prompt = langgraph.chat({ tools: bank('GraphAgent') });
 
-export const agent = object({
+export const agent = sessionObject({
   name: 'GraphAgent',
   handlers: { chat: prompt },
   views: { messages: langgraph.messages() },

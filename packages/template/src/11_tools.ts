@@ -14,7 +14,7 @@
  *   curl localhost:8080/wallet/alice/chat -d 'How much do I have, and what did I spend money on?'
  */
 import * as restate from 'restate-sessions';
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -41,7 +41,7 @@ const history = tool({
   },
 });
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

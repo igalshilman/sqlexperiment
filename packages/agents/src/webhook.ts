@@ -26,7 +26,7 @@ export interface WebhookAuth {
   secret: string;
 }
 
-/** An agent (an `object()` or `agent()` of restate-agents, with a `chat` handler) that webhooks go to. */
+/** An agent (an `sessionObject()` or `agent()` of restate-agents, with a `chat` handler) that webhooks go to. */
 type Route = restate.VirtualObjectDefinition<string, { chat: unknown }>;
 
 /**
@@ -122,7 +122,7 @@ export const webhook = <P extends string>({
 }: WebhookOptions<P>) => {
   if (route.length === 0) throw new Error(`webhook ${name}: route it to at least one agent`);
   for (const agent of route) {
-    if (!hasCompanion(agent)) throw new Error(`webhook ${name}: ${agent.name} is not an object() or agent()`);
+    if (!hasCompanion(agent)) throw new Error(`webhook ${name}: ${agent.name} is not a sessionObject() or agent()`);
   }
   if (auth && !auth.secret) throw new Error(`webhook ${name}: its auth has no secret (unset in the environment?)`);
   const what = description ?? `A webhook into ${route.map((r) => r.name).join(', ')}`;

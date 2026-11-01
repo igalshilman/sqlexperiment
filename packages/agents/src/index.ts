@@ -17,7 +17,7 @@ export {
   UNANSWERED,
   type Configure,
 } from './common.ts';
-export { object, type Status, type Stopped } from './object.ts';
+export { sessionObject, type Status, type Stopped } from './object.ts';
 export {
   companionOf,
   deliver,

@@ -13,7 +13,7 @@
  *   curl localhost:8080/desk/alice/chat -d 'The app crashes when I open my orders'
  *   curl localhost:8080/billing/alice/messages   # what billing was asked, and answered
  */
-import { chatHandler, object, serve } from 'restate-agents';
+import { chatHandler, sessionObject, serve } from 'restate-agents';
 import * as langgraph from 'restate-agents/langgraph';
 import * as pi from 'restate-agents/pi';
 
@@ -27,7 +27,7 @@ const tech = pi.agent({
   system: 'You handle technical problems with the app. Ask for what you need to know, one question at a time.',
 });
 
-const desk = object({
+const desk = sessionObject({
   name: 'desk',
   handlers: {
     chat: chatHandler(async (ctx, message) => {

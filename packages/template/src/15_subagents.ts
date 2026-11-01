@@ -12,7 +12,7 @@
  *   curl localhost:8080/wallet/alice/messages                           # the task it gave the coach, and the plan
  */
 import type * as restate from 'restate-sessions';
-import { object, serve, subagent, tool } from 'restate-agents';
+import { sessionObject, serve, subagent, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -32,7 +32,7 @@ const coach = pi.agent({
   system: 'You are a savings coach. Answer with a short, realistic plan: how much to put aside each week, and one tip.',
 });
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

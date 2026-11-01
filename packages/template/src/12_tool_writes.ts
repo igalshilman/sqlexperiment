@@ -14,7 +14,7 @@
  *   curl localhost:8080/wallet/alice/chat -d 'Now send him a million.'  # the tool answers "Not enough money"
  */
 import * as restate from 'restate-sessions';
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -54,7 +54,7 @@ const balance = tool({
   run: (_input, { ctx }) => balanceOf(ctx.db),
 });
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

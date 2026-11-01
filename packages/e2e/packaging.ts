@@ -80,7 +80,7 @@ run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: ap
 // JavaScript.
 writeFileSync(
   join(app, 'agent.ts'),
-  `import { object } from 'restate-agents';
+  `import { sessionObject } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { open } from 'restate-sessions/internal';
 
@@ -96,7 +96,7 @@ await db.execute('INSERT INTO t VALUES (42)');
 console.log(\`the addon runs SQL: \${JSON.stringify(await db.values('SELECT n FROM t'))}\`);
 await db.save();
 
-export const agent = object({ name: 'agent', handlers: { chat: pi.chat({ system: 'Be brief.' }) } });
+export const agent = sessionObject({ name: 'agent', handlers: { chat: pi.chat({ system: 'Be brief.' }) } });
 console.log(Object.keys(agent).length > 0 ? 'restate-agents/pi runs' : 'no agent');
 
 // Types, not run: a model is a \`provider/model-id\` string.

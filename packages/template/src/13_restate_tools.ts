@@ -14,7 +14,7 @@
  *   curl localhost:8080/wallet/alice/messages                           # the lookup, then the transfer
  */
 import * as restate from 'restate-sessions';
-import { call, object, serve, tool } from 'restate-agents';
+import { call, sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -64,7 +64,7 @@ const owner = call(handle, 'owner', {
   description: 'The owner of a handle: for @bobby, call it with the key "bobby". Null if nobody has it.',
 });
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

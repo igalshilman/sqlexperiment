@@ -412,8 +412,8 @@ signal('approval', {
 });
 ```
 
-Every agent (every `object()`) has the views `pending`, which lists its
-waits, and `signal`, which resolves one; both answer at once, while the agent
+Every agent (every `sessionObject()`) has the views `pending`, which lists
+its waits, and `signal`, which resolves one; both answer at once, while the agent
 waits. Each wait has an id, the signal's name, the model's `input` and when
 it started:
 
@@ -509,8 +509,9 @@ never dropped, as a steer to a stopped turn is.
 The same delivery is yours from any handler (a session object's, or a
 service's or workflow's of the SDK), for events of other kinds (a queue, a
 schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
-Every `object()` and `agent()` knows its companion, `companionOf(agent, key)`
-(its `signals` object and key), so whoever holds an agent can reach it.
+Every `sessionObject()` and `agent()` knows its companion,
+`companionOf(agent, key)` (its `signals` object and key), so whoever holds an
+agent can reach it.
 
 The agent's message says where it comes from, with the body as JSON:
 
@@ -550,12 +551,12 @@ the caller waits.
 ## Your own object
 
 `agent()` is an object with `chat` and `messages`. For more, make the
-object yourself, with `object()`, and the framework's handlers beside your
-own: here, an assistant whose tools keep facts in its own table
+object yourself, with `sessionObject()`, and the framework's handlers beside
+your own: here, an assistant whose tools keep facts in its own table
 ([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -569,7 +570,7 @@ const remember = tool({
   },
 });
 
-const assistant = object({
+const assistant = sessionObject({
   name: 'assistant',
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'], // tables of your own, beside the agent's (optional)
   handlers: {
@@ -611,7 +612,7 @@ pi and OpenCode also have `withPi(ctx, options, work)` and
 `withOpenCode(ctx, options, work)`, for more than a prompt: the Harness's own
 API, such as compacting the conversation (see their READMEs).
 
-**What `object()` sets up.** `ctx.db` in every handler; retries for weeks
+**What `sessionObject()` sets up.** `ctx.db` in every handler; retries for weeks
 (50 ms after a crash, then twice as long each time, up to 10 s apart), since
 each attempt resumes from the database; and the SQL storage hidden from the
 journal in Restate's UI. Its `options` (such as `retryPolicy`) and

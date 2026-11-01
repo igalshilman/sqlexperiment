@@ -49,7 +49,7 @@ import {
 } from '../common.ts';
 import { type Answer, withOutput } from '../output.ts';
 import type { z } from 'zod';
-import { type Definition, object } from '../object.ts';
+import { type Definition, sessionObject } from '../object.ts';
 import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 import { Conversation } from './conversation.ts';
 
@@ -337,4 +337,11 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
   background,
   ...options
 }: Options<O> & Definition<P>) =>
-  object({ name, description, schema, background, handlers: { chat: chat(options) }, views: { messages: messages() } });
+  sessionObject({
+    name,
+    description,
+    schema,
+    background,
+    handlers: { chat: chat(options) },
+    views: { messages: messages() },
+  });

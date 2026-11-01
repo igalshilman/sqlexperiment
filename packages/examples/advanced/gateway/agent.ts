@@ -26,7 +26,7 @@ import * as restate from 'restate-sessions';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';
-import { object } from 'restate-agents';
+import { sessionObject } from 'restate-agents';
 import { withPi } from 'restate-agents/pi';
 import { join } from 'node:path';
 import { gateway, identity } from './gateway.ts';
@@ -96,7 +96,7 @@ async function gatewayTools(ctx: restate.SessionContext, tenant: string, user: s
 // Journals kept an hour, to look at in the UI (by default none are kept).
 const options = { journalRetention: { hours: 1 } };
 
-export const caseAgent = object({
+export const caseAgent = sessionObject({
   name: 'Case',
   handlers: {
     report: {
@@ -152,7 +152,7 @@ export const prompt = async (ctx: restate.SessionContext, text: z.infer<typeof P
   }));
 };
 
-export const assistant = object({
+export const assistant = sessionObject({
   name: 'Assistant',
   handlers: {
     prompt: {

@@ -1,7 +1,7 @@
 // Restate's own tools (restate-agents' call, send, workflow and signal), run
 // with a fake context that records the calls they make.
 import * as restate from 'restate-sessions';
-import { call, object, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
+import { call, sessionObject, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { type AttemptContext, contextOf, invoke } from 'restate-sessions/internal';
 import { fakeContext, memoryDatabase } from 'restate-sessions/test/support';
 import { describe, expect, it } from 'vitest';
@@ -46,7 +46,7 @@ const fields = (t: Tool) => Object.keys(z.toJSONSchema(t.input).properties ?? {}
 
 describe('tool', () => {
   it('answers arguments that do not fit its input with what is wrong, and does not run', async () => {
-    const t = subagent(object({ name: 'coder', handlers: { chat: async () => 'done' } }));
+    const t = subagent(sessionObject({ name: 'coder', handlers: { chat: async () => 'done' } }));
     const { result, made } = await run(t, { name: 'Fizz Buzz', task: 'Write it' });
     expect(result).toMatch(/^Error: the arguments do not fit the tool's input:/);
     expect(result).toMatch(/name/);
@@ -263,9 +263,9 @@ describe('tool', () => {
 });
 
 /** An object with `handlers`, as a function that defines it. */
-const named = (handlers: Record<string, () => Promise<void>>) => () => object({ name: 'assistant', handlers });
+const named = (handlers: Record<string, () => Promise<void>>) => () => sessionObject({ name: 'assistant', handlers });
 
-/** The names of the handlers of `o`, an object(). */
+/** The names of the handlers of `o`, a sessionObject(). */
 const handlersOf = (o: object) => Object.keys((o as { object: object }).object);
 
 describe('object', () => {
@@ -274,12 +274,12 @@ describe('object', () => {
     expect(named({ pending: async () => {} })).toThrow("`pending` is a handler of restate-agents' own");
     expect(named({ clear: async () => {} })).toThrow("`clear` is a handler of restate-agents' own");
     // @ts-expect-error: a handler every object has
-    expect(() => object({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
+    expect(() => sessionObject({ name: 'assistant', handlers: { signal: async () => {} } })).toThrow('`signal`');
   });
 
   it('has `clear` and `sync` only as an agent: one with a `messages` view', () => {
-    const desk = object({ name: 'desk', handlers: { chat: async () => '' } });
-    const agent = object({
+    const desk = sessionObject({ name: 'desk', handlers: { chat: async () => '' } });
+    const agent = sessionObject({
       name: 'agent',
       handlers: { chat: async () => '' },
       views: { messages: async () => ({ messages: [], more: false, cursor: 0 }) },
@@ -291,7 +291,7 @@ describe('object', () => {
 
   it('clears what its `messages` view keeps apart, whatever its handlers are', async () => {
     const cleared: string[] = [];
-    const agent = object({
+    const agent = sessionObject({
       name: 'keeper',
       handlers: { chat: async () => '' },
       views: { messages: alsoClearing(messagesHandler(), async (ctx) => void cleared.push(ctx.key)) },

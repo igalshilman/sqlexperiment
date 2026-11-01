@@ -19,7 +19,7 @@
  * `{"model": "anthropic/claude-sonnet-5-5"}` with ANTHROPIC_API_KEY.
  */
 import type * as restate from 'restate-sessions';
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -47,7 +47,7 @@ const options = async (ctx: restate.SessionContext): Promise<pi.Options> => {
   return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
 };
 
-const assistant = object({
+const assistant = sessionObject({
   name: 'assistant',
   schema: ['CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL)'],
   handlers: {

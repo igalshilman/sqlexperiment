@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), OPENAI_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { object, signals } from 'restate-agents';
+import { sessionObject, signals } from 'restate-agents';
 import * as opencode from 'restate-agents/opencode';
 import { serveIfMain } from 'restate-sessions/test/faults';
 import { ledger } from 'restate-sessions/test/ledger';
@@ -12,7 +12,7 @@ import { bank } from './bank.ts';
 /** Answer a message, once per invocation. */
 export const prompt = opencode.chat({ tools: bank('OpenCodeAgent') });
 
-export const agent = object({
+export const agent = sessionObject({
   name: 'OpenCodeAgent',
   handlers: { chat: prompt },
   views: { messages: opencode.messages() },

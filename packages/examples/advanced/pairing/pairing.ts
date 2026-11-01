@@ -23,7 +23,7 @@
  * (a container, a VM). REVIEWER sets the reviewer's model (GPT-6 Astra by
  * default).
  */
-import { object, serve, signal, subagent, workflow } from 'restate-agents';
+import { sessionObject, serve, signal, subagent, workflow } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 import { Change, shipping } from './shipping.ts';
@@ -56,7 +56,7 @@ const SYSTEM = `You are a pair programmer, working with a person on their projec
 - Ship only what the person approved: ask with \`wait_for_approval\`, then ship with \`shipping\`.
 Answer briefly: what you did, and what is next.`;
 
-const pair = object({
+const pair = sessionObject({
   name: 'pair',
   schema: PLAN,
   handlers: {

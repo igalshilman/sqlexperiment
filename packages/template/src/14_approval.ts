@@ -21,7 +21,7 @@
  * the confirmation.
  */
 import * as restate from 'restate-sessions';
-import { object, serve, signal, tool } from 'restate-agents';
+import { sessionObject, serve, signal, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -61,7 +61,7 @@ const confirmation = signal('confirmation', {
   input: z.object({ to: z.string(), amount: z.number() }),
 });
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

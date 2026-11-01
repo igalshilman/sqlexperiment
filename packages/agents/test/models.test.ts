@@ -3,7 +3,7 @@
 // caller waits. LangGraph's agent takes a chat model of its own, here one that
 // fails as a provider would.
 import * as restate from '@restatedev/restate-sdk';
-import { chatHandler, object, REFUSED, tool } from 'restate-agents';
+import { chatHandler, sessionObject, REFUSED, tool } from 'restate-agents';
 import * as deepseek from 'restate-agents/deepseek';
 import * as langgraph from 'restate-agents/langgraph';
 import * as opencode from 'restate-agents/opencode';
@@ -79,7 +79,7 @@ describe('a wrong model', () => {
   });
 
   it('that the provider refuses fails a handler of your own that prompts too', async () => {
-    const agent = object({
+    const agent = sessionObject({
       name: 'assistant',
       handlers: {
         summarize: async (ctx, text: string) =>
@@ -95,7 +95,7 @@ describe('a wrong model', () => {
   });
 
   it("that pi does not know fails as terminal outside an agent's handlers too", async () => {
-    // As in a handler of restate-sessions' own: no chatHandler or object() maps it.
+    // As in a handler of restate-sessions' own: no chatHandler or sessionObject() maps it.
     const ctx = {} as Parameters<typeof pi.withPi>[0];
     const failed = pi.withPi(ctx, { model: 'nobody/gpt-6-sol' }, async () => 'answered');
     await expect(failed).rejects.toBeInstanceOf(restate.TerminalError);

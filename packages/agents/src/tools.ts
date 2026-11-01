@@ -316,7 +316,7 @@ export function subagent<M>(
  *     input: z.object({ order: z.string(), amount: z.number() }),
  *   })
  *
- * Each wait has an id: `pending` (each `object()` has it) lists them, and
+ * Each wait has an id: `pending` (each `sessionObject()` has it) lists them, and
  * the agent's `signal` handler resolves one, by its id, or the oldest wait
  * for a name:
  *

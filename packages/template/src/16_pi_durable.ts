@@ -30,7 +30,7 @@ import { createModels } from '@earendil-works/pi-ai/models';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { AssistantEntry, createRegistry, defineExtension, Harness, section } from '@earendil-works/pi-durable';
 import { TerminalError } from 'restate-sessions';
-import { object, serve } from 'restate-agents';
+import { sessionObject, serve } from 'restate-agents';
 import { openSqlKvStorage } from 'restate-agents/pi/storage';
 
 // The models the Harness may ask (OpenAI's, with OPENAI_API_KEY), and its
@@ -40,7 +40,7 @@ models.setProvider(openaiProvider());
 const registry = createRegistry();
 registry.install(defineExtension({ name: 'poet', sections: [section('system', () => 'You write short poems.')] }));
 
-const poet = object({
+const poet = sessionObject({
   name: 'poet',
   handlers: {
     write: async (ctx, request: string) => {

@@ -113,12 +113,12 @@ database as the agent. This assistant stores what it learns about each user
 in a `facts` table next to the conversation, and exposes the table through a
 view that a profile page could call
 ([`examples/basic/memory.ts`](packages/examples/basic/memory.ts)). It is
-defined with `object` from `restate-agents`, which is `restate.sessionObject`
+defined with `sessionObject` from `restate-agents`: `restate.sessionObject`
 plus the handlers every agent has (`status`, `stop`, `signal` and a few
 more):
 
 ```ts
-import { object, serve, tool } from 'restate-agents';
+import { sessionObject, serve, tool } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 import { z } from 'zod';
 
@@ -142,7 +142,7 @@ const recall = tool({
   },
 });
 
-const assistant = object({
+const assistant = sessionObject({
   name: 'assistant',
   // Your own table, in each user's database next to the agent's tables.
   schema: ['CREATE TABLE facts (fact TEXT PRIMARY KEY)'],

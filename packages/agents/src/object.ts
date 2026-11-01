@@ -201,7 +201,7 @@ export interface Synced extends Messages {
   status: Status;
 }
 
-/** An object's (or agent's) name, its description, and the tables of your own in its database, if any (see `object`). */
+/** An object's (or agent's) name, its description, and the tables of your own in its database, if any (see `sessionObject`). */
 export interface Definition<P extends string> {
   name: P;
   /** What it is: for the UI, and for the model of a parent that hands it tasks (`subagent`). */
@@ -236,7 +236,7 @@ type With<H, V> = Functions<typeof BUILT_IN> &
  * A Restate virtual object with a SQL database per key, `ctx.db`: a
  * `restate.sessionObject` of restate-sessions, set up for agents.
  *
- *   const notes = object({
+ *   const notes = sessionObject({
  *     name: 'notes',
  *     handlers: {
  *       add: (ctx, note: string) => ctx.db.execute('INSERT INTO notes VALUES (?)', [note]),
@@ -262,7 +262,7 @@ type With<H, V> = Functions<typeof BUILT_IN> &
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { retryPolicy: ... }`.
  */
-export const object = <
+export const sessionObject = <
   P extends string,
   H extends Record<string, restate.Entry<restate.SessionContext>>,
   V extends Record<string, restate.Entry<restate.ViewContext>>,

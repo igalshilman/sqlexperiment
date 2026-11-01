@@ -1,10 +1,10 @@
 /**
  * 09 · A model in a handler
  *
- * From here on, the wallet talks to a model, so it is defined with `object`
- * from restate-agents. That is `restate.sessionObject` with what agents need
- * set up: their tables in the same database, and a few built-in handlers you
- * will meet in the next lessons.
+ * From here on, the wallet talks to a model, so it is defined with
+ * `sessionObject` from restate-agents: `restate.sessionObject` with what
+ * agents need set up, their tables in the same database and a few built-in
+ * handlers you will meet in the next lessons.
  *
  * `pi.prompt(ctx, text)` asks a model from a handler and returns the answer.
  * The prompt and the answer are stored in the wallet's database, so if
@@ -14,7 +14,7 @@
  *   curl localhost:8080/wallet/alice/summary    # a few words on alice's money
  */
 import type * as restate from 'restate-sessions';
-import { object, serve } from 'restate-agents';
+import { sessionObject, serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
 const balanceOf = async (db: restate.DatabaseReader) =>
@@ -23,7 +23,7 @@ const balanceOf = async (db: restate.DatabaseReader) =>
 const historyOf = (db: restate.DatabaseReader) =>
   db.query<{ amount: number; note: string | null }>('SELECT amount, note FROM entries ORDER BY rowid');
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',

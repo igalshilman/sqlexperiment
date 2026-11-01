@@ -17,13 +17,13 @@
  *   curl localhost:8080/wallet/alice/messages                            # alice's conversation, 09's summaries included
  */
 import type * as restate from 'restate-sessions';
-import { object, serve } from 'restate-agents';
+import { sessionObject, serve } from 'restate-agents';
 import * as pi from 'restate-agents/pi';
 
 const balanceOf = async (db: restate.DatabaseReader) =>
   (await db.get<{ balance: number }>('SELECT coalesce(sum(amount), 0) AS balance FROM entries'))?.balance ?? 0;
 
-const wallet = object({
+const wallet = sessionObject({
   name: 'wallet',
   schema: [
     'CREATE TABLE entries (amount INTEGER NOT NULL)',
