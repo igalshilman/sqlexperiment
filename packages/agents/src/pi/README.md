@@ -27,7 +27,7 @@ await serve(assistant);
 | `workspace`   | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox                                           |
 | `serviceTier` | OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on                                                            |
 
-For an object of your own, `pi.chat(options)` is the handler and
+For a session object of your own, `pi.chat(options)` is the handler and
 `pi.messages()` the view; `options` may be a function of the invocation's context, such as
 each user's model from the object's database. `pi.prompt(ctx, text,
 options)` answers a prompt in a handler of your own. For more than a prompt,

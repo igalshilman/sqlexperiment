@@ -24,7 +24,7 @@ await serve(assistant);
 | `tools`  | `tool()`s and Restate's tools of `restate-agents`, or LangChain's tools                                                                                                                  |
 | `output` | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                           |
 
-For an object of your own, `langgraph.chat(options)` is the handler and
+For a session object of your own, `langgraph.chat(options)` is the handler and
 `langgraph.messages()` the view; `options` may be a function of the
 invocation's context (each user's system prompt, say). `langgraph.prompt(ctx,
 text, options)` answers a prompt in a handler of your own, once, however

@@ -30,7 +30,7 @@ await serve(coder);
 | `workspace` | A directory of the local machine to work in, with OpenCode's own tools (read, write, edit, bash, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools` |
 | `plugins`   | OpenCode plugins of your own (`@opencode/plugin`), such as one that denies edits outside `src/` ([`examples/intermediate/review.ts`](../../../examples/intermediate/review.ts))                                                                        |
 
-For an object of your own, `opencode.chat(options)` is the handler and
+For a session object of your own, `opencode.chat(options)` is the handler and
 `opencode.messages()` the view (with it, the agent's `clear` empties
 OpenCode's database too); `options` may be a function of the invocation's
 context, such as a directory for each key:

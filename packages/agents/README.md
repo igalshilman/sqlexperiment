@@ -12,7 +12,7 @@ once, and each tool call is made once.
 - [Tools](#tools)
 - [Signals](#signals)
 - [Models](#models)
-- [Your own object](#your-own-object)
+- [Your own session object](#your-own-session-object)
 - [Build your own](#build-your-own)
 - [Words](#words)
 
@@ -351,8 +351,8 @@ is a message to read, as a terminal shows it: its text, and its tool calls
 with their outputs.
 
 `restate-agents/client` also has the types of what the handlers answer
-(`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types an object of
-your own with its handlers `H`.
+(`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types a session
+object of your own with its handlers `H`.
 [`examples/ui`](../examples/ui/app.ts) is a chat page on it: the
 conversation as the agent works, its approvals, steering and Stop.
 
@@ -548,12 +548,13 @@ defined; a missing or wrong API key, or a model the provider does not know,
 with a terminal error that says what to check, rather than retries while
 the caller waits.
 
-## Your own object
+## Your own session object
 
-`agent()` is an object with `chat` and `messages`. For more, make the
-object yourself, with `sessionObject()`, and the framework's handlers beside
-your own: here, an assistant whose tools keep facts in its own table
-([`examples/basic/memory.ts`](../examples/basic/memory.ts)):
+`agent()` is a session object with `chat` and `messages`. For more, make
+the session object yourself, with `sessionObject()`, and put your own
+handlers beside the framework's. Here, an assistant whose tools keep facts
+in its own table (a shorter
+[`examples/basic/memory.ts`](../examples/basic/memory.ts)):
 
 ```ts
 import { sessionObject, serve, tool } from 'restate-agents';
@@ -596,7 +597,12 @@ invocation's context that gives them: each user's model and persona from
 the object's database, say ([`examples/intermediate/harness.ts`](../examples/intermediate/harness.ts)):
 
 ```ts
-chat: pi.chat(async (ctx) => ({ model: (await settingsOf(ctx)).model, tools: [clock] })),
+const options = async (ctx: restate.SessionContext): Promise<pi.Options> => {
+  const { model, persona } = await settingsOf(ctx);
+  return { model, system: persona ?? 'You are a helpful assistant.', tools: [clock] };
+};
+
+chat: pi.chat(options),
 ```
 
 **A handler of your own.** `prompt(ctx, text, options)` answers a prompt in
@@ -619,8 +625,8 @@ journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. It is a `restate.sessionObject` of
 [`restate-sessions`](../sessions/README.md): `handlers` run one at a time per
 key, and `views` beside them. Its own cannot be named `signal`, `pending`,
-`status`, `stop`, `steer`, `notifications` or `watch`, views every object
-has, nor `sync`, `clear` or `erase`, which an agent has (one with a
+`status`, `stop`, `steer`, `notifications` or `watch`, views every agent's
+session object has, nor `sync`, `clear` or `erase`, which an agent has (one with a
 `messages` view). A view of yours reads the database too: `ctx.db` is the
 database as committed, beside a message being answered.
 

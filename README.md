@@ -85,10 +85,10 @@ const support = pi.agent({
       input: z.object({ order: z.string() }),
     }),
     signal('approval', {
-      description: "Wait for a manager's decision on a refund.",
+      description: "Wait for a manager to decide on a refund. Answers with the manager's decision.",
     }),
     workflow(refund, {
-      description: 'Refund an order.',
+      description: 'Refund an order. Only once a manager approved it.',
       input: z.object({ order: z.string(), amount: z.number() }),
     }),
   ],
