@@ -640,7 +640,7 @@ in the pnpm workspace: a directory under `packages/`
 ```json
 {
   "type": "module",
-  "dependencies": { "@restatedev/restate-sdk": "1.17.4", "restate-agents": "workspace:*", "zod": "4.6.5" }
+  "dependencies": { "@restatedev/restate-sdk": "1.18.1", "restate-agents": "workspace:*", "zod": "4.6.5" }
 }
 ```
 

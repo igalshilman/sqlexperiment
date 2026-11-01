@@ -38,8 +38,8 @@
     "prepack": "pnpm build:ts"
   },
   "dependencies": {
-    "@restatedev/restate-sdk": "1.17.4",
-    "@restatedev/restate-sdk-core": "1.17.4"
+    "@restatedev/restate-sdk": "1.18.1",
+    "@restatedev/restate-sdk-core": "1.18.1"
   },
   "optionalDependencies": {
     "restate-sessions-darwin-arm64": "workspace:*",

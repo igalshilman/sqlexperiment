@@ -67,8 +67,8 @@
     "prepack": "pnpm build:ts"
   },
   "dependencies": {
-    "@restatedev/restate-sdk-clients": "1.17.4",
-    "@restatedev/restate-sdk-core": "1.17.4",
+    "@restatedev/restate-sdk-clients": "1.18.1",
+    "@restatedev/restate-sdk-core": "1.18.1",
     "@standard-schema/spec": "1.1.0"
   },
   "devDependencies": {
@@ -116,7 +116,7 @@
     "@opencode/plugin": "2.0.32",
     "@opencode/sdk": "2.0.32",
     "@opencode/server": "2.0.32",
-    "@restatedev/restate-sdk": "1.17.4",
+    "@restatedev/restate-sdk": "1.18.1",
     "effect": "4.0.1",
     "restate-sessions": "workspace:*",
     "zod": "4.6.5"

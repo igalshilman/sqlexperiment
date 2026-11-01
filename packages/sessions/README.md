@@ -13,7 +13,7 @@ recovery_), and the handler continues from whatever it has committed to its
 database. The storage that makes this safe is a Rust addon in
 [`native/`](native/README.md), built on Turso's SQLite-compatible engine.
 
-It runs on a released Restate server and the published SDK, version 1.17.4,
+It runs on a released Restate server and the published SDK, version 1.18.1,
 which it pins ([why](#concurrent-awaits)). See
 [the requirements](../../README.md#requirements).
 
@@ -51,8 +51,9 @@ A name is either a handler or a view, not both. Each one is a function, or
 `{ handler, ...options }` with the SDK's usual handler options (`input`,
 `output`, `description`, `ingressPrivate`, …). You only annotate the input;
 `ctx` is inferred. `description`, `options` and `metadata` work as on any
-virtual object. A session object also turns on lazy state, and hides the
-database's state operations in Restate's UI.
+virtual object. A session object starts an invocation with only its
+database's head preloaded, and hides the database's state operations in
+Restate's UI.
 
 SDK handlers (`restate.handlers.*`) aren't accepted. Journaled work belongs
 in a regular `restate.object`, `restate.service` or `restate.workflow`, which
@@ -264,8 +265,9 @@ a session has no key/value state of its own.
 **Reads and writes.** A read is a state read. It is journaled for now (once
 protocol v8 ships it won't be, see [FUTURE.md](../../FUTURE.md)), and it goes
 to the runtime unless this attempt wrote the key or the invocation started
-with it. Sessions use lazy state, so an invocation doesn't start by loading
-every page. A write or a clear is a state write, and returns at once.
+with it. An invocation starts with only the database's head (`state:
+{ preload: ['v22/head'] }`): its open's first read needs no round trip, and
+it doesn't start by loading every page. A write or a clear is a state write, and returns at once.
 Restate keeps an attempt's writes and sends in the order they were made, so
 a crash can lose the last ones, but never a write without those before it.
 
@@ -315,7 +317,7 @@ own, and lets only one of them wait for the server at a time
 drive every promise they await with a single loop,
 [the selector](src/selector.ts). Before the handler runs, it takes over the
 invocation's `promisesExecutor.doProgress`, and gives it back when the
-attempt ends. These are SDK internals as of 1.17.4, so the package pins that
+attempt ends. These are SDK internals as of 1.18.1, so the package pins that
 version, and refuses to run a handler on an SDK without them.
 [`test/selector.test.ts`](test/selector.test.ts) tests the selector against
 a fake VM and the SDK's single-waiter channel.

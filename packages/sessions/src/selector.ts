@@ -10,7 +10,7 @@
 // is replayed, so a handler with SQL hands every awaited promise to one loop,
 // which asks the VM about all of them at once (`hookSelector`). The hook
 // replaces the invocation's `promisesExecutor.doProgress`: it relies on the
-// SDK's internals, as of the version this package pins (1.17.4).
+// SDK's internals, as of the version this package pins (1.18.1).
 //
 // TODO: drop the selector, and the pin, once an SDK release lets a handler
 // with explicit recovery await concurrently (FUTURE.md at the repository's root).

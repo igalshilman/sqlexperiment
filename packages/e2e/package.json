@@ -14,8 +14,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.4.0",
-    "@restatedev/restate-sdk": "1.17.4",
-    "@restatedev/restate-sdk-clients": "1.17.4",
+    "@restatedev/restate-sdk": "1.18.1",
+    "@restatedev/restate-sdk-clients": "1.18.1",
     "restate-agents": "workspace:*",
     "restate-sessions": "workspace:*",
     "zod": "4.6.5"
