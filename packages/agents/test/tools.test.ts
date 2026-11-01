@@ -3,7 +3,7 @@
 import * as restate from 'restate-sessions';
 import { call, sessionObject, send, signal, subagent, tool, workflow, type Tool } from 'restate-agents';
 import { type AttemptContext, contextOf, invoke } from 'restate-sessions/internal';
-import { fakeContext, memoryDatabase } from 'restate-sessions/test/support';
+import { fakeContext, type Made, memoryDatabase } from 'restate-sessions/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { settle } from '../src/calls.ts';
@@ -287,6 +287,39 @@ describe('object', () => {
     expect(handlersOf(desk)).not.toContain('clear');
     expect(handlersOf(desk)).not.toContain('sync');
     expect(handlersOf(agent)).toEqual(expect.arrayContaining(['clear', 'sync', 'erase']));
+  });
+
+  it('stops the message it answers, as its companion says, with a key of the request: a restarted `stop` stops the same', async () => {
+    const desk = sessionObject({ name: 'desk', handlers: { chat: async () => '' } });
+    const turn = restate.InvocationIdParser.fromString('inv_1aGuEfH1fC0F1tDaHYyy2FfUD7DhkVvjSl').toString();
+    const stop = async (answering: string | null) => {
+      const calls: Made[] = [];
+      const cancels: string[] = [];
+      const answer = () => ({ answering: answering && { invocationId: answering, since: '' }, waiting: [] });
+      const ctx = fakeContext({
+        map: new Map(),
+        service: 'desk',
+        key: 'alice',
+        id: 'inv_stop',
+        calls,
+        cancels,
+        answer,
+      });
+      return { stopped: await invoke(desk, 'stop', ctx), calls, cancels };
+    };
+    const { stopped, calls, cancels } = await stop(turn);
+    expect(stopped).toEqual({ stopped: turn });
+    expect(cancels).toEqual([turn]);
+    expect(calls).toEqual([
+      {
+        service: 'signals',
+        method: 'status',
+        key: 'desk:alice',
+        parameter: undefined,
+        idempotencyKey: 'inv_stop:stop',
+      },
+    ]);
+    expect(await stop(null)).toMatchObject({ stopped: { stopped: null }, cancels: [] });
   });
 
   it('clears what its `messages` view keeps apart, whatever its handlers are', async () => {

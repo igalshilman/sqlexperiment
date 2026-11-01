@@ -8,7 +8,7 @@
 // that id, so a tool call run again after a crash makes the same call, once.
 import * as restate from 'restate-sessions';
 import { z } from 'zod';
-import { cancellationOf, type Configure, configured, ToolError } from './common.ts';
+import { stopSignalOf, type Configure, configured, ToolError } from './common.ts';
 import { callOf } from './calls.ts';
 import { signals, signalsOf } from './signals.ts';
 
@@ -93,10 +93,11 @@ export const tool = <S extends z.ZodObject>(options: {
     try {
       return text(await options.run(input, { ctx, callId, idempotencyKey: `${ctx.request.id}:${callId}` }));
     } catch (error) {
-      // The invocation was cancelled: the turn ends, rather than the model
-      // going on with the tool's error as its answer (such as the failure of
-      // a call that the cancellation cancelled).
-      const turn = cancellationOf(ctx);
+      // The turn stopped (its invocation was cancelled, or its attempt
+      // ended): it ends, rather than the model going on with the tool's error
+      // as its answer (such as the failure of a call that the cancellation
+      // cancelled).
+      const turn = stopSignalOf(ctx);
       if (turn?.aborted) throw turn.reason;
       if (error instanceof restate.CancelledError) throw error;
       // A terminal error is the tool's answer, which the model can act on; any

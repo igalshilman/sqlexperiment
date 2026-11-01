@@ -71,6 +71,7 @@ interface SessionContext {
   readonly db: Database;
   readonly rpc: Rpc;
   readonly send: Send;
+  readonly cancel: Cancel; // cancel an invocation, by its id
 }
 
 interface ViewContext {
@@ -78,6 +79,7 @@ interface ViewContext {
   readonly request: restate.Request;
   readonly db: DatabaseReader;
   readonly rpc: Rpc;
+  readonly cancel: Cancel;
 }
 ```
 
@@ -96,7 +98,8 @@ and Restate retries it ([how readers work](native/src/state/docs/DESIGN.md#reade
 
 A view's `db` has no `execute` or `transaction`, and its context has no
 `send`. A write through `query` fails too, because a view's database is
-read-only.
+read-only. A view can cancel an invocation, though: see
+[cancelling an invocation](#cancelling-an-invocation).
 
 ```ts
 views: {
@@ -213,6 +216,27 @@ apart. Restate attaches a call with a key it has already seen to the earlier
 invocation, whatever its input, so a key only fits a call whose input is the
 same on every attempt. If the input depends on what the attempt read, put
 that in the key, or use no key.
+
+## Cancelling an invocation
+
+`ctx.cancel(invocationId)` cancels an invocation, as Restate's admin API
+does. It is made at once and not awaited. Handlers and views both have it.
+A view that cancels its own object's running handler is a Stop button: the
+handler is cancelled, and the next message waiting for the key runs.
+
+```ts
+views: {
+  stop: async (ctx, invocationId: string) => ctx.cancel(invocationId),
+},
+```
+
+Cancelling an invocation that already ended does nothing, so an attempt that
+cancels the same id again is harmless. Be careful when the attempt itself
+works out which invocation to cancel, such as by reading which one is
+running. A second attempt may get a different answer: the message that
+started once the first attempt's cancel took effect. Get the id from a call
+with an idempotency key instead, which gives every attempt the same answer
+([calls and sends](#calls-and-sends)).
 
 ## Sends in a transaction
 

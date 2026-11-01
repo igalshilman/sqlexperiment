@@ -44,6 +44,8 @@ const account = restate.sessionObject({
   views: {
     balance: async (ctx) => balanceOf(ctx.db),
     contexts: async (ctx) => Object.keys(ctx).toSorted(),
+    // A Stop button: it cancels the invocation it is given, beside the handler that runs.
+    stop: async (ctx, invocationId: string) => ctx.cancel(invocationId),
   },
 });
 
@@ -86,9 +88,10 @@ test('a send takes its options with the target, and a no-input handler none', as
   ]);
 });
 
-test('a context has the key, the request, the database and calls; a view no sends, and reads only', async () => {
+test('a context has the key, the request, the database, calls and cancel; a view no sends, and reads only', async () => {
   const map = new Map<string, Uint8Array>();
   assert.deepEqual(await invoke(account, 'contexts', fakeContext({ map, service: 'account' })), [
+    'cancel',
     'db',
     'key',
     'request',
@@ -100,10 +103,22 @@ test('a context has the key, the request, the database and calls; a view no send
     views: { db: async (ctx) => Object.keys(ctx.db).toSorted() },
   });
   assert.deepEqual(await invoke(seen, 'keys', fakeContext({ map, service: 'seen' })), {
-    ctx: ['db', 'key', 'request', 'rpc', 'send'],
+    ctx: ['cancel', 'db', 'key', 'request', 'rpc', 'send'],
     db: ['execute', 'get', 'query', 'transaction', 'values'],
   });
   assert.deepEqual(await invoke(seen, 'db', fakeContext({ map, service: 'seen' })), ['get', 'query', 'values']);
+});
+
+test('a view cancels an invocation by its id; one that is no id fails for good', async () => {
+  const cancels: string[] = [];
+  const id = restate.InvocationIdParser.fromString('inv_1aGuEfH1fC0F1tDaHYyy2FfUD7DhkVvjSl').toString();
+  await invoke(account, 'stop', fakeContext({ map: new Map(), service: 'account', cancels }), id);
+  assert.deepEqual(cancels, [id]);
+  await assert.rejects(
+    invoke(account, 'stop', fakeContext({ map: new Map(), service: 'account', cancels }), 'order-7'),
+    (error) => error instanceof restate.TerminalError && /not an invocation id: order-7/.test(error.message),
+  );
+  assert.deepEqual(cancels, [id]);
 });
 
 test('a view of a key never written reads empty tables', async () => {

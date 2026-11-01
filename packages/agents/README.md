@@ -148,8 +148,11 @@ curl localhost:8080/restate/invocation/inv_1f…/attach               # the answ
 
 **Stop a turn.** `stop` stops the message being answered, such as for a
 UI's Stop button: it cancels its invocation (the one `status` says), and
-answers its id, or null if no message was answered. To interrupt with a new
-message, send it after `stop`: it is answered once the stopped turn ended.
+answers its id, or null if no message was answered. Messages to `chat`
+queue: the agent answers one at a time, in the order they came, and a
+stopped turn makes way for the next one waiting. So to interrupt with a new
+message, send it after `stop`: it is answered once the stopped turn ended,
+after any messages already waiting.
 
 ```sh
 curl localhost:8080/assistant/alice/stop                             # {"stopped": "inv_1f…"}
@@ -166,6 +169,11 @@ next message starts afresh. The calls its tools made (a wait for an
 approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
 uses Restate's explicit cancellation for this (`explicitCancellation: true`,
 with `cancelled(ctx)` and `cancelCalls(ctx)` of `restate-sessions/internal`).
+
+An attempt that ends before its turn does, while its process lives on
+(Restate suspended it, gave up on it, or lost its connection), stops its
+work too, a model's request included: it can store nothing more, and the
+next attempt goes on with the turn, which is not cancelled.
 
 **Steer a turn.** `steer` adds to the message being answered, such as for
 a message typed while the agent works: the agent takes it at its next tool

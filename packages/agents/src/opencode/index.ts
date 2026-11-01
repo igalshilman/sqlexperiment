@@ -41,7 +41,6 @@ import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import {
-  cancellationOf,
   CHECK_MODEL,
   chatHandler,
   checkModelName,
@@ -54,6 +53,7 @@ import {
   alsoClearing,
   settleSteering,
   type Steerable,
+  stopSignalOf,
   toolCallEnded,
   toolCallStarted,
   Transcript,
@@ -447,9 +447,9 @@ export const withOpenCode = async <T>(
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
   // A tool's error ends the attempt: nothing more is stored, and the tool
-  // call never returns, so OpenCode does not go on without it. A cancelled
-  // invocation, whenever it comes, interrupts the session's turn instead
-  // (interruptOn).
+  // call never returns, so OpenCode does not go on without it; an attempt
+  // that ends first does the same. A cancelled invocation, whenever it comes,
+  // interrupts the session's turn instead (interruptOn).
   let cancelled: restate.CancelledError | undefined;
   const fail = (error: unknown) => {
     if (error instanceof restate.CancelledError) cancelled = error;
@@ -457,9 +457,9 @@ export const withOpenCode = async <T>(
     failed(error);
     return new Promise<never>(() => {});
   };
-  const turn = cancellationOf(ctx);
-  const onCancel = () => void fail(turn!.reason);
-  turn?.addEventListener('abort', onCancel, { once: true });
+  const turn = stopSignalOf(ctx);
+  const onStop = () => void fail(turn!.reason);
+  turn?.addEventListener('abort', onStop, { once: true });
   // Messages steered to the turn: OpenCode's steering input (by its message
   // id, once), which the session takes at its next step.
   const steerable: Steerable = {
@@ -505,7 +505,7 @@ export const withOpenCode = async <T>(
     const read = () => transcribe(host);
     return await transcribing(ctx, read, () => Promise.race([interruptOn(host, failure), work({ host, prompt })]));
   } finally {
-    turn?.removeEventListener('abort', onCancel);
+    turn?.removeEventListener('abort', onStop);
     await host.close();
   }
 };
