@@ -4,10 +4,12 @@
 // `pnpm --filter restate-agents test opencode`.
 import { describe, expect, it, vi } from 'vitest';
 import * as restate from 'restate-sessions';
+import { AttemptEnded } from '../src/common.ts';
 import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  endedWhileWorking,
   invalidArguments,
   STEERED,
   steeredWhileWorking,
@@ -83,6 +85,14 @@ describe('the OpenCode agent', () => {
       [{ type: 'text', text: 'Hello' }],
       [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
     ]);
+  });
+
+  it('stops a turn whose attempt ended, and the next attempt goes on with it', async () => {
+    const { failed, closed, answer } = await endedWhileWorking((tools) => opencode.chat({ tools }));
+    // Stopped, not cancelled: the turn is not closed, and the retry answers it.
+    expect(failed).toBeInstanceOf(AttemptEnded);
+    expect(closed).toEqual([]);
+    expect(answer).toBe('Done: moved 5 from account 1 to account 2');
   });
 
   it('takes a message steered to the turn at its next tool call', async () => {

@@ -52,7 +52,6 @@ import {
 import {
   aborted,
   CANCELLED,
-  cancellationOf,
   chatHandler,
   type Configure,
   checkModelName,
@@ -64,6 +63,7 @@ import {
   providerOf,
   settleSteering,
   type Steerable,
+  stopSignalOf,
   toolCallEnded,
   toolCallStarted,
   Transcript,
@@ -296,11 +296,13 @@ const answerOnce = async (
   const harness = await boot(ctx.db, route, system);
   // A tool's error fails the attempt, which Restate retries: the harness
   // stores nothing more, so the retry finds the tool's call without a result.
+  // The turn's stop fails it too: a cancellation (below), or an attempt that
+  // ended first.
   const { promise: failed, reject: fail } = Promise.withResolvers<never>();
   failed.catch(() => {});
-  const turn = cancellationOf(ctx);
-  const onCancel = () => fail(turn!.reason);
-  turn?.addEventListener('abort', onCancel, { once: true });
+  const turn = stopSignalOf(ctx);
+  const onStop = () => fail(turn!.reason);
+  turn?.addEventListener('abort', onStop, { once: true });
   let agent: Agent | undefined;
   try {
     const sessionId = SessionId(ctx.key);
@@ -325,7 +327,7 @@ const answerOnce = async (
     else (harness.sessionPersistence as SqlSessionPersistence).abandon();
     throw e;
   } finally {
-    turn?.removeEventListener('abort', onCancel);
+    turn?.removeEventListener('abort', onStop);
     await harness.fiber.dispose();
   }
 };

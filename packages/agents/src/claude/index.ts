@@ -29,8 +29,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { BetaRunnableTool, BetaToolRunContext } from '@anthropic-ai/sdk/lib/tools/BetaRunnableTool';
 import {
   aborted,
+  AttemptEnded,
   CANCELLED,
-  cancellationOf,
   chatHandler,
   CLAUDE_MODEL,
   type Configure,
@@ -39,6 +39,7 @@ import {
   modelIdOf,
   modelOf,
   nextPromptId,
+  stopSignalOf,
   toolCallEnded,
   toolCallStarted,
   Transcript,
@@ -248,12 +249,14 @@ const answerOnce = async (
       await conversation.append(id, [{ role: 'user', content: text }]);
       pending = id;
     }
-    const turn = cancellationOf(ctx);
+    const turn = stopSignalOf(ctx);
     try {
       const running = run(ctx, agent, conversation, pending, turn);
       running.catch(() => {});
       await (turn ? Promise.race([running, aborted(turn)]) : running);
     } catch (error) {
+      // The attempt ended: it stops, and the next attempt goes on with the prompt.
+      if (turn?.reason instanceof AttemptEnded) throw turn.reason;
       // Cancelled: the prompt ends, and the next one starts afresh.
       if (turn?.aborted || error instanceof restate.CancelledError) {
         await conversation.cancel(pending, CANCELLED);

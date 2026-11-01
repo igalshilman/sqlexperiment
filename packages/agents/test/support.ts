@@ -399,6 +399,43 @@ export async function cancelledWhileWorking(
   return { failed, answer, parts: page.messages.map((m) => m.parts) };
 }
 
+/**
+ * `chat` (with `tools`) on an object of its own, the attempt of its message
+ * (a transfer) ended while `transfer` runs (as when Restate suspends it, or
+ * loses its connection), then the next attempt of the same invocation: what
+ * the first attempt failed with, the turns closed by then, and the answer.
+ */
+export async function endedWhileWorking(chat: (tools: Tool[]) => PromptHandler) {
+  const map = new Map<string, Uint8Array>();
+  const started = Promise.withResolvers<void>();
+  const transfer = tool({
+    name: 'transfer',
+    description: 'Move money.',
+    input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+    // The first attempt's never returns; the next one's does.
+    run: async () => {
+      if (fence.closed) return 'moved 5 from account 1 to account 2';
+      started.resolve();
+      return new Promise<never>(() => {});
+    },
+  });
+  const handler = handlerOf(chat([transfer]));
+  const fence = { closed: false };
+  const first = sqlAttempt({ map, fence, key: 'ended', id: 'inv1' });
+  const answering = first.end(() => handler(first.ctx, 'Please move 5 from 1 to 2'));
+  await started.promise;
+  fence.closed = true;
+  first.abort();
+  const failed = await answering.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const closed = [...steeringOf(map).closed];
+  const next = sqlAttempt({ map, key: 'ended', id: 'inv1' });
+  const answer = await next.end(() => handler(next.ctx, 'Please move 5 from 1 to 2'));
+  return { failed, closed, answer };
+}
+
 /** What {@link steeredWhileWorking} steers a turn with. */
 export const STEERED = 'Only from account 1, please';
 
