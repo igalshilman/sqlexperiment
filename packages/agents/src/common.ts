@@ -132,15 +132,31 @@ export interface Turn {
   since: string;
 }
 
-/** The cancellation of each turn, by its context: aborted when Restate cancels its invocation. */
+/** What stops each turn, by its context: see {@link stopSignalOf}. */
 const turns = new WeakMap<object, AbortSignal>();
 
 /**
- * The signal of the turn of `ctx` (of a `chat` handler, `chatHandler`):
- * aborted, with a `restate.CancelledError`, once Restate cancels the
- * invocation. An agent's `prompt` stops its framework's turn then.
+ * Why a turn stopped when its attempt ended before it did: Restate suspended
+ * the attempt, gave up on it, or lost its connection. Nothing the attempt
+ * does after is stored, and the next attempt goes on with the turn, so it
+ * stops without answering: unlike a cancellation, nothing is cancelled.
  */
-export const cancellationOf = (ctx: object): AbortSignal | undefined => turns.get(ctx);
+export class AttemptEnded extends Error {
+  constructor() {
+    super('the attempt ended before its turn did');
+    this.name = 'AttemptEnded';
+  }
+}
+
+/**
+ * The signal that stops the turn of `ctx` (of a `chat` handler,
+ * `chatHandler`), and an agent's `prompt` stops its framework's work with it.
+ * It aborts with a `restate.CancelledError` once Restate cancels the
+ * invocation (the turn ends, answered as cancelled), or with an
+ * {@link AttemptEnded} once the attempt ends first (the work stops, and
+ * answers nothing).
+ */
+export const stopSignalOf = (ctx: object): AbortSignal | undefined => turns.get(ctx);
 
 /** The ids of the messages steered to each turn that its conversation has, by its context. */
 const steerings = new WeakMap<object, Set<string>>();
@@ -271,10 +287,12 @@ export const aborted = (signal: AbortSignal) =>
  *
  * While it answers, the object's `status` says so (its {@link Turn}). Its
  * invocation's cancellation (Restate's, explicit: `cancelled(ctx)` of
- * restate-sessions/internal) aborts {@link cancellationOf} its
+ * restate-sessions/internal) aborts {@link stopSignalOf} its
  * context, whenever it comes, and cancels the calls its tools made
  * (`cancelCalls(ctx)`): the agent's `prompt`
- * ends the turn, and the handler fails with a `restate.CancelledError`.
+ * ends the turn, and the handler fails with a `restate.CancelledError`. An
+ * attempt that ends first (`attemptCompletedSignal`) aborts it too, with an
+ * {@link AttemptEnded}: the work stops, and the next attempt goes on with it.
  *
  * Messages steered to it (`steer`) go to the agent's conversation at its next
  * tool call ({@link toolCallEnded}); when it ends, those it did not take are
@@ -308,6 +326,11 @@ export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, me
       turn.abort(new restate.CancelledError());
       await cancelCalls(ctx);
     })().catch(() => {});
+    // The attempt ends before the turn does: its work stops (a model's
+    // request, say), rather than run on for an attempt that can store nothing.
+    const attempt = ctx.request.attemptCompletedSignal;
+    const attemptEnded = () => turn.abort(new AttemptEnded());
+    attempt.addEventListener('abort', attemptEnded, { once: true });
     let answered: A;
     try {
       answered = await answer(ctx, text);
@@ -322,6 +345,9 @@ export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, me
       if (!terminal) throw error;
       await end();
       throw terminal;
+    } finally {
+      // An attempt's signal aborts at every attempt's end, the turn's too.
+      attempt.removeEventListener('abort', attemptEnded);
     }
     await end();
     return answered;

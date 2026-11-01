@@ -89,11 +89,14 @@ export function sqlAttempt({
   };
   const end = Promise.withResolvers<void>();
   end.promise.catch(() => {});
+  // The SDK's `attemptCompletedSignal`: aborted when the attempt ends, however it ends.
+  const attemptCompleted = new AbortController();
+  const ended = () => attemptCompleted.abort();
   const target = { service };
   const ctx = {
     shared,
     key,
-    request: () => ({ id, target }),
+    request: () => ({ id, target, attemptCompletedSignal: attemptCompleted.signal }),
     invocationEndPromise: end,
     defaultSerde: restate.serde.json,
     get: async (k: string) => {
@@ -140,9 +143,12 @@ export function sqlAttempt({
     /** A view's context, over this attempt's `ctx.db`. */
     view: contextOf(sdkOf(ctx), attempt.db, { view: true }),
     /** `handler`'s result, once its session ended. */
-    end: <T>(handler: () => Promise<T>) => withAttempt(handler, attempt),
+    end: <T>(handler: () => Promise<T>) => withAttempt(handler, attempt).finally(ended),
     /** The attempt ends, as when Restate fences or suspends it. */
-    abort: () => end.reject(new Error('the attempt ended')),
+    abort: () => {
+      end.reject(new Error('the attempt ended'));
+      ended();
+    },
   };
 }
 
@@ -209,7 +215,11 @@ export function fakeContext({
   end.promise.catch(() => {});
   const ctx = {
     key,
-    request: () => ({ id, target: { service, key, handler: 'h' } }),
+    request: () => ({
+      id,
+      target: { service, key, handler: 'h' },
+      attemptCompletedSignal: new AbortController().signal,
+    }),
     invocationEndPromise: end,
     defaultSerde: restate.serde.json,
     get: async (k: string) => map.get(k) ?? null,

@@ -54,7 +54,7 @@ import {
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { CodingTools } from '@earendil-works/pi-durable/tools';
 import {
-  cancellationOf,
+  AttemptEnded,
   CHECK_MODEL,
   chatHandler,
   checkModelName,
@@ -67,6 +67,7 @@ import {
   nextPromptId,
   settleSteering,
   type Steerable,
+  stopSignalOf,
   toolCallEnded,
   toolCallStarted,
   Transcript,
@@ -198,14 +199,18 @@ export const withPi = async <T>(
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
   // A cancelled invocation, whenever it comes, aborts the conversation's
-  // work instead (abortOn): pi-durable ends the turn, and the tool call with it.
+  // work instead (abortOn): pi-durable ends the turn, and the tool call with
+  // it. An attempt that ends first cancels the work, as a tool's error does:
+  // the next attempt goes on with it.
   let cancelled: restate.CancelledError | undefined;
-  const turn = cancellationOf(ctx);
-  const onCancel = () => {
-    cancelled = turn!.reason as restate.CancelledError;
-    failed(cancelled);
+  const turn = stopSignalOf(ctx);
+  const onStop = () => {
+    const reason: unknown = turn!.reason;
+    failed(reason);
+    if (reason instanceof AttemptEnded) cancel(reason);
+    else cancelled = reason as restate.CancelledError;
   };
-  turn?.addEventListener('abort', onCancel, { once: true });
+  turn?.addEventListener('abort', onStop, { once: true });
   // The root conversation, once the Harness is open (below).
   const conversation = () => rootOn(harness, context, model);
   // Messages steered to the turn: given as pi-durable's steering input (by
@@ -289,7 +294,7 @@ export const withPi = async <T>(
       Promise.race([abortOn(), work({ harness, context, conversation, prompt })]),
     );
   } finally {
-    turn?.removeEventListener('abort', onCancel);
+    turn?.removeEventListener('abort', onStop);
     await harness.close(withoutAbortSignal(context));
   }
 };

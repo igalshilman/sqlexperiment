@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import * as restate from '@restatedev/restate-sdk';
 import type { ViewContext } from 'restate-sessions';
 import { CANCELLED, REFUSED, UNANSWERED } from 'restate-agents';
+import { AttemptEnded } from '../src/common.ts';
 import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  endedWhileWorking,
   invalidArguments,
   STEERED,
   steeredWhileWorking,
@@ -42,6 +44,14 @@ describe('the LangGraph agent', () => {
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toBe(waiting.answer);
     expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
+  it('stops a turn whose attempt ended, and the next attempt goes on with it', async () => {
+    const { failed, closed, answer } = await endedWhileWorking((tools) => langgraph.chat({ tools }));
+    // Stopped, not cancelled: the turn is not closed, and the retry answers it.
+    expect(failed).toBeInstanceOf(AttemptEnded);
+    expect(closed).toEqual([]);
+    expect(answer).toBe('Done: moved 5 from account 1 to account 2');
   });
 
   it('answers a message steered to the turn as a message of its own, once the turn ends', async () => {

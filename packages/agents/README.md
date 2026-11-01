@@ -167,6 +167,11 @@ approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
 uses Restate's explicit cancellation for this (`explicitCancellation: true`,
 with `cancelled(ctx)` and `cancelCalls(ctx)` of `restate-sessions/internal`).
 
+An attempt that ends before its turn does, while its process lives on
+(Restate suspended it, gave up on it, or lost its connection), stops its
+work too, a model's request included: it can store nothing more, and the
+next attempt goes on with the turn, which is not cancelled.
+
 **Steer a turn.** `steer` adds to the message being answered, such as for
 a message typed while the agent works: the agent takes it at its next tool
 call, as its framework steers a turn (pi-durable's, OpenCode's and the

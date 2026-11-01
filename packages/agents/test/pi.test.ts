@@ -6,10 +6,12 @@ import { z } from 'zod';
 import * as pi from 'restate-agents/pi';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
+import { AttemptEnded } from '../src/common.ts';
 import {
   afterCancel,
   cancelledTransfer,
   cancelledWhileWorking,
+  endedWhileWorking,
   invalidArguments,
   STEERED,
   steeredWhileWorking,
@@ -177,6 +179,15 @@ describe('pi.chat', () => {
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toBe(waiting.answer);
     expect(withoutIds(now.parts)).toEqual(withoutIds(waiting.parts));
+  });
+
+  it('stops a turn whose attempt ended, and the next attempt goes on with it', async () => {
+    const { failed, closed, answer } = await endedWhileWorking((tools) => pi.chat({ tools }));
+    // Stopped, not cancelled: the turn is not closed, and the retry answers it.
+    expect(failed).toBeInstanceOf(AttemptEnded);
+    expect(closed).toEqual([]);
+    // This model answers with the tool results: the transfer's alone.
+    expect(answer).toBe('moved 5 from account 1 to account 2');
   });
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {

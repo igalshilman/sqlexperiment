@@ -36,8 +36,8 @@ import { type StructuredToolInterface, tool, ToolInputParsingException } from '@
 import { Annotation, END, isGraphInterrupt, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import {
+  AttemptEnded,
   CANCELLED,
-  cancellationOf,
   chatHandler,
   type Configure,
   configured,
@@ -46,6 +46,7 @@ import {
   modelOf,
   nextPromptId,
   providerOf,
+  stopSignalOf,
   toolCallEnded,
   toolCallStarted,
   Transcript,
@@ -228,13 +229,15 @@ const answerOnce = async (
     // are stored.
     const { prompt: last, answers = {} } = state.values;
     const interrupted = last !== undefined && answers[last] === undefined;
-    const turn = cancellationOf(ctx);
+    const turn = stopSignalOf(ctx);
     try {
       await app.invoke(interrupted ? null : { messages: [new HumanMessage(text)], prompt: id }, {
         ...config,
         signal: turn,
       });
     } catch (error) {
+      // The attempt ended: it stops, and the next attempt goes on with the run.
+      if (turn?.reason instanceof AttemptEnded) throw turn.reason;
       // Cancelled: the run ends, and the next prompt starts afresh.
       if (turn?.aborted || error instanceof restate.CancelledError) {
         await close(app, config, CANCELLED);
