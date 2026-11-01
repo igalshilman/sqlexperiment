@@ -3,14 +3,17 @@
 // makes. A crash is an attempt whose later writes and
 // sends are lost: what it stored before stays.
 import * as restate from 'restate-sessions';
-import { open } from 'restate-sessions/internal';
+import { HEAD_KEY, open } from 'restate-sessions/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore, sqlAttempt } from './support.ts';
 
 type Send = restate.GenericSend<Uint8Array>;
 
-/** The database's head: the commit point of the flush whose record holds the outbox. */
-const HEAD = 'v22/head';
+/**
+ * The database's head: the commit point of the flush whose record holds the
+ * outbox, and the key a session object preloads.
+ */
+const HEAD = HEAD_KEY;
 let namespaces = 0;
 
 const store = restate.object({

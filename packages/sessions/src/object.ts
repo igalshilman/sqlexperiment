@@ -74,12 +74,19 @@ export type Entry<C> = Fn<C> | ({ handler: Fn<C> } & HandlerOptions);
 type Functions<H> = string extends keyof H ? unknown : { [K in keyof H]: H[K] extends { handler: infer F } ? F : H[K] };
 
 /**
- * The options every session object has: lazy state, so an invocation does
- * not start by loading every page.
- *
- * TODO: preload the head eagerly (`eagerStateKeysWhitelist`), see FUTURE.md.
+ * The key of the object database's head, its first read as it opens:
+ * `HEAD_KEY` in the addon's state format
+ * (`packages/sessions/native/src/state/format.rs`).
  */
-export const sqlOptions = { enableLazyState: true } satisfies restate.ObjectOptions;
+export const HEAD_KEY = 'v22/head';
+
+/**
+ * The options every session object has: an invocation starts with the
+ * database's head only, not with every page. The rest of the database it
+ * reads as it needs it: its tail entries and packs change keys with each
+ * flush, so only the head can be named.
+ */
+export const sqlOptions = { state: { preload: [HEAD_KEY] } } satisfies restate.ObjectOptions;
 
 /**
  * The metadata every session object has: Restate's UI hides the database

@@ -38,25 +38,6 @@ in `packages/e2e` to the server's (with
 unless it enables v8 by default), and switch the read above to the
 ephemeral one.
 
-## The head with the invocation (eager state keys)
-
-**Waits on:** a TypeScript SDK release whose service options set
-`eagerStateKeysWhitelist` (1.17.4 has no such option). Restate has it since
-1.8.0 ([restatedev/restate#5261](https://github.com/restatedev/restate/pull/5261)).
-
-**Now:** session objects set lazy state, so an invocation does not start with
-every tail entry and pack, and a session's first read is the head
-(`v22/head`): a round trip, cached or not.
-
-**Then:** with lazy state still on, whitelist `v22/head` (`HEAD_KEY`, in
-`packages/sessions/native/src/state/format.rs`); the server ships it with the
-invocation (best effort, within its eager-state size limit), and the open
-starts with it. Tail entries and packs
-change names with each flush and checkpoint, so only the head can be
-listed. The options are `sqlOptions` in `restate-sessions`
-(`packages/sessions/src/object.ts`), which every session object has; its
-`TODO:` marks them.
-
 ## Concurrent awaits in the TypeScript SDK
 
 **Waits on:** an SDK release whose explicit recovery lets a handler
