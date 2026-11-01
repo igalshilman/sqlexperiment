@@ -13,7 +13,7 @@ recovery_), and the handler continues from whatever it has committed to its
 database. The storage that makes this safe is a Rust addon in
 [`native/`](native/README.md), built on Turso's SQLite-compatible engine.
 
-It runs on a released Restate server and the published SDK, version 1.17.4,
+It runs on a released Restate server and the published SDK, version 1.18.1,
 which it pins ([why](#concurrent-awaits)). See
 [the requirements](../../README.md#requirements).
 
@@ -315,7 +315,7 @@ own, and lets only one of them wait for the server at a time
 drive every promise they await with a single loop,
 [the selector](src/selector.ts). Before the handler runs, it takes over the
 invocation's `promisesExecutor.doProgress`, and gives it back when the
-attempt ends. These are SDK internals as of 1.17.4, so the package pins that
+attempt ends. These are SDK internals as of 1.18.1, so the package pins that
 version, and refuses to run a handler on an SDK without them.
 [`test/selector.test.ts`](test/selector.test.ts) tests the selector against
 a fake VM and the SDK's single-waiter channel.

@@ -194,7 +194,7 @@ five packages. Each has its own README, and its unit tests in `test/`.
 ## Requirements
 
 - Restate server 1.8 or later.
-- The published TypeScript SDK, version 1.17.4. `restate-sessions` pins it,
+- The published TypeScript SDK, version 1.18.1. `restate-sessions` pins it,
   because it relies on some of the SDK's internals
   ([why](packages/sessions/README.md#concurrent-awaits)).
 
