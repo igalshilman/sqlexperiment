@@ -58,6 +58,8 @@ export interface AttemptOptions {
   id?: string;
   /** Each send the attempt makes. */
   send?: (send: restate.GenericSend<Uint8Array>) => void;
+  /** Each invocation the attempt cancels (`ctx.cancel`), by its id. */
+  cancel?: (invocationId: string) => void;
   /** Before each of the attempt's state requests. */
   onRequest?: () => void;
   /** A shared handler's attempt: its `ctx.db` reads beside the owner's, and writes nothing. */
@@ -79,6 +81,7 @@ export function sqlAttempt({
   key = 'k',
   id = 'inv',
   send = () => {},
+  cancel = () => {},
   onRequest = () => {},
   shared = false,
   service = `test-${randomUUID()}`,
@@ -139,9 +142,9 @@ export function sqlAttempt({
     set: (name: string, value: unknown) => ctx.set(name, new TextEncoder().encode(JSON.stringify(value))),
     clear: (name: string) => ctx.clear(name),
     /** The handler's context, over this attempt's `ctx.db`. */
-    ctx: contextOf(sdkOf(ctx), attempt.db),
+    ctx: contextOf(sdkOf(ctx, cancel), attempt.db),
     /** A view's context, over this attempt's `ctx.db`. */
-    view: contextOf(sdkOf(ctx), attempt.db, { view: true }),
+    view: contextOf(sdkOf(ctx, cancel), attempt.db, { view: true }),
     /** `handler`'s result, once its session ended. */
     end: <T>(handler: () => Promise<T>) => withAttempt(handler, attempt).finally(ended),
     /** The attempt ends, as when Restate fences or suspends it. */
@@ -170,12 +173,13 @@ const decoded = (parameter: unknown, inputSerde?: unknown) =>
       : (JSON.parse(new TextDecoder().decode(parameter)) as unknown)
     : parameter;
 
-/** The SDK's context behind a test's attempt `ctx`: its key, request and sends. */
-const sdkOf = (ctx: SqlHost & { key: string }): AttemptContext =>
+/** The SDK's context behind a test's attempt `ctx`: its key, request, sends and cancellations. */
+const sdkOf = (ctx: SqlHost & { key: string }, cancel: (invocationId: string) => void): AttemptContext =>
   ({
     key: ctx.key,
     request: () => ctx.request(),
     genericSend: (send: restate.GenericSend<Uint8Array>) => ctx.genericSend(send),
+    invocation: (id: restate.InvocationId) => ({ cancel: () => cancel(id.toString()) }),
     genericCall: () => {
       throw new Error('this attempt calls nothing');
     },
@@ -199,6 +203,7 @@ export function fakeContext({
   service,
   calls = [],
   sends = [],
+  cancels = [],
   answer = () => null,
 }: {
   map: Map<string, Uint8Array>;
@@ -208,6 +213,8 @@ export function fakeContext({
   service: string;
   calls?: Made[];
   sends?: Made[];
+  /** The ids of the invocations it cancels. */
+  cancels?: string[];
   /** The answer to each call. */
   answer?: (call: Made) => unknown;
 }): AttemptContext {
@@ -236,6 +243,9 @@ export function fakeContext({
       calls.push(call);
       return Promise.resolve(answer(call));
     },
+    invocation: (invocationId: restate.InvocationId) => ({
+      cancel: () => void cancels.push(invocationId.toString()),
+    }),
   };
   return ctx as unknown as AttemptContext;
 }

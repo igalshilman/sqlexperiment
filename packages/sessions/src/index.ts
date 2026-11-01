@@ -24,5 +24,12 @@
 export * from '@restatedev/restate-sdk';
 export type { Database, DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue, Transaction } from './session.ts';
 export type { Step } from './schema.ts';
-export { sessionObject, type Entry, type HandlerOptions, type SessionContext, type ViewContext } from './object.ts';
+export {
+  sessionObject,
+  type Cancel,
+  type Entry,
+  type HandlerOptions,
+  type SessionContext,
+  type ViewContext,
+} from './object.ts';
 export type { CallOptions, Client, Rpc, Send, SendClient, SendOptions, Target } from './calls.ts';
