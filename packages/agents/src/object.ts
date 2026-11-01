@@ -57,6 +57,19 @@ const companion = (ctx: restate.ViewContext, step?: string) =>
   ctx.rpc(signals, signalsOf(ctx), step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
 
 /**
+ * Cancel the invocation of the message being answered, if any, and say
+ * which. The companion's `status` says which, with a key of the request and
+ * `step`: a restarted view gets the same answer, and cancels the same
+ * invocation again (which does nothing), not the message that started once
+ * it was cancelled.
+ */
+async function stopped(ctx: restate.ViewContext, step: string): Promise<Stopped> {
+  const turn = (await companion(ctx, step).status()).answering;
+  if (turn) ctx.cancel(turn.invocationId);
+  return { stopped: turn?.invocationId ?? null };
+}
+
+/**
  * Views that wait on the companion (`watch`, `sync`, up to a minute) or on
  * the object (`clear`): Restate
  * suspends one that waits past its inactivity timeout, which restarts it,
@@ -80,7 +93,7 @@ const BUILT_IN = {
   pending: async (ctx: restate.ViewContext): Promise<Waiting[]> => companion(ctx).pending(),
   status: async (ctx: restate.ViewContext): Promise<Status> => companion(ctx).status(),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
-  stop: async (ctx: restate.ViewContext): Promise<Stopped> => companion(ctx, 'stop').stop(),
+  stop: async (ctx: restate.ViewContext): Promise<Stopped> => stopped(ctx, 'stop'),
   /**
    * Add `text` to the message being answered (`status`'s), such as "Only
    * Monday, please": the agent takes it at its next tool call, as its
@@ -130,14 +143,14 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
     // `erase` waits for the messages sent before it.
     ...WAITS,
     handler: async (ctx: restate.ViewContext): Promise<Stopped> => {
-      const stopped = await companion(ctx, 'clear').stop();
+      const stop = await stopped(ctx, 'clear');
       await ctx.rpc({
         service: ctx.request.target.service,
         key: ctx.key,
         handler: 'erase',
         idempotencyKey: `${ctx.request.id}:erase`,
       });
-      return stopped;
+      return stop;
     },
   },
   sync: {

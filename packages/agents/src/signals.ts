@@ -9,7 +9,7 @@
 import type { SessionContext } from 'restate-sessions';
 import { sdk as restate } from 'restate-sessions/internal';
 import type { Turn } from './common.ts';
-import type { Status, Stopped } from './object.ts';
+import type { Status } from './object.ts';
 
 /** An agent's context, as far as its signals need it: any handler's or view's of its object. */
 type AgentContext = { readonly key: string; readonly request: { readonly target: { readonly service: string } } };
@@ -314,16 +314,6 @@ export const signals = restate.object({
       answering: (await ctx.get('turn')) ?? null,
       waiting: ((await ctx.get('waiting')) ?? []).map(({ id, name, input, since }) => ({ id, name, input, since })),
     })),
-
-    /** @internal Cancel the invocation of the message the agent answers, as Restate's admin API cancels one. */
-    stop: restate.handlers.object.exclusive(
-      { ingressPrivate: true },
-      async (ctx: restate.ObjectContext<State>): Promise<Stopped> => {
-        const turn = await ctx.get('turn');
-        if (turn) ctx.invocation(restate.InvocationIdParser.fromString(turn.invocationId)).cancel();
-        return { stopped: turn?.invocationId ?? null };
-      },
-    ),
 
     /**
      * The revision, once there is one newer than `revision`, or at the
