@@ -206,12 +206,12 @@ sequenceDiagram
   V->>S: status (keyed by the stop request)
   S-->>V: answering: turn
   V-)A: cancel(turn)
-  V-->>C: {stopped: turn}
+  V-->>C: stopped: turn
   Note over A: the framework stops (a model request too), records the cut-off calls as cancelled
   Note over A: its tools' calls are cancelled: a wait forgets itself
   A->>S: close(turn)
   Note over S: idle, publish
-  Note over A: fails with CancelledError; the next message waiting starts
+  Note over A: fails with CancelledError, and the next message waiting starts
 ```
 
 - The view asks `status` with an idempotency key of its request: a `stop`
