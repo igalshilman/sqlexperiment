@@ -261,6 +261,35 @@ try {
   assert.deepEqual(await jack.status(), { answering: null, waiting: [] });
   assert.deepEqual(await jack.stop(), { stopped: null });
 
+  // A turn killed through the admin API runs no code on its way out, so it
+  // closes nothing itself: its companion, which watches it, closes it, with
+  // its wait, and `status` says the agent does nothing, with no message after.
+  // Nothing of it is left running: the turn, its wait, the companion's watch.
+  const running = async (key: string) => {
+    const response = await fetch(`${ADMIN}/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        query: `SELECT target FROM sys_invocation WHERE target_service_key LIKE '%${key}' AND status <> 'completed'`,
+      }),
+    });
+    return ((await response.json()) as { rows: { target: string }[] }).rows.map((r) => r.target);
+  };
+  const kate = ingress.objectClient(agent('support'), 'kate');
+  const kates = await ingress
+    .objectSendClient(agent('support'), 'kate')
+    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-kate' }));
+  await waits('support/kate');
+  const killed = await fetch(`${ADMIN}/invocations/${kates.invocationId}/kill`, { method: 'PATCH' });
+  assert.ok(killed.ok, await killed.text());
+  const idle = async () =>
+    JSON.stringify(await kate.status()) === '{"answering":null,"waiting":[]}' && (await running('kate')).length === 0;
+  for (let i = 0; !(await idle()); i++) {
+    if (i > 100)
+      throw new Error(`kate: ${JSON.stringify(await kate.status())}, running ${JSON.stringify(await running('kate'))}`);
+    await sleep(100);
+  }
+
   // `clear` forgets a conversation, and its followers see it empty; with a
   // message being answered, it stops it, and the next message starts anew.
   const before = (await henry.notifications()).revision;

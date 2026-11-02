@@ -268,9 +268,13 @@ export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, me
     // The companion knows the turn from here to its close: `status` and `stop` ask it.
     await ctx.rpc(signals, signalsOf(ctx)).start({ invocationId, since: new Date().toISOString() });
     await stepped(ctx);
+    // The log takes the turn's last change, then the companion closes the
+    // turn, which publishes it: one revision. The close is a call the turn
+    // waits for, so that it is done before the turn ends (see `awaitTurn`).
     const end = async () => {
-      ctx.send(signals, signalsOf(ctx)).close(invocationId);
-      await publish(ctx);
+      const read = reading.get(ctx);
+      if (read) await logged(ctx, read);
+      await signalsOfAgent(ctx).close(invocationId);
     };
     const turn = new AbortController();
     turns.set(ctx, turn.signal);
