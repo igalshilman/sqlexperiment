@@ -5,38 +5,42 @@ it waits on, and where the code marks it (`TODO:` comments).
 
 ## Unjournaled state reads (Restate service protocol v8)
 
-**Waits on:** a Restate release with service protocol v8, and a TypeScript
-SDK release that exposes its ephemeral get.
+**Waits on:** a Restate release with service protocol v8.
 
 **Now:** the SQL store of `restate-sessions` reads the object's state with
-regular, journaled gets (`objectStore` in `packages/sessions/src/session.ts`:
-`ctx.get`). Restate 1.8.0, the release the tests run
-(`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
-at most.
+v8's ephemeral get, left out of the journal, wherever the attempt negotiated
+v8, and with a regular, journaled get on v7 (`objectStore` in
+`packages/sessions/src/session.ts`; the version comes from the attempt's
+content type, in `host` in `object.ts`). The SDK (1.18.1) speaks v5 to v8;
+its `ephemeralStateGet` is private in its types, and the selector
+(`packages/sessions/src/selector.ts`) drives its completions. Restate 1.8.0,
+the release the tests run (`@restatedev/restate-server` in `packages/e2e`),
+negotiates v7 at most, so its reads are journaled.
 
-**Then:** read with v8's ephemeral get, which leaves the read out of the
-journal. A handler without journal replay never reads its journal back, so
-each read's entry is pure overhead: a database read of N pages adds N
-entries. The SDK has it in its internals, unused: its `ephemeralStateGet` is
-private (only `getProject` uses it), so the SDK needs to expose it, and the
-selector would drive it by completion id.
+A handler without journal replay never reads its journal back, so on v7 each
+read's entry is pure overhead: a database read of N pages adds N entries.
+`packages/e2e/concurrency.ts` checks the journal on either protocol.
 
 **Found out (19 October 2026):** v8 is only on Restate's
 `service-protocol-v8` branch. There, `protocol_v8` is one of the
 `experimental!` features in `crates/types/src/config/common.rs`, enabled with
 `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`, and `service_protocol.rs`
-picks v8 only when it is set. Neither the `v1.8.0` tag (its experimental
-features have no `protocol_v8`, and `ServiceProtocolVersion` ends at `V7`)
-nor Restate's `main` has it, and the 1.8.0 binaries (release and image) speak
-`invocation.v1` to `v7` only. The image
+picks v8 only when it is set. Neither the `v1.8.0` tag nor Restate's `main`
+has it, and the 1.8.0 binaries speak `invocation.v1` to `v7` only. The image
 `ghcr.io/restatedev/restate:service-protocol-v8-stats` (restate-server
-1.8.2-dev) has v8, behind that variable, for local benchmarks.
+1.8.2-dev) has v8, behind that variable. To run the e2e tests against it,
+with its `restate-server` binary (`/usr/local/bin/restate-server` in the
+image):
 
-**To switch:** once both releases are out, update `@restatedev/restate-server`
-in `packages/e2e` to the server's (with
-`RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true` where the tests start it,
-unless it enables v8 by default), and switch the read above to the
-ephemeral one.
+```sh
+RESTATE_SERVER=/path/to/v8/restate-server RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true pnpm --filter e2e concurrency
+```
+
+**To switch:** once the release is out, update `@restatedev/restate-server`
+in `packages/e2e` to it (with `RESTATE_EXPERIMENTAL_ENABLE_PROTOCOL_V8=true`
+where the tests start it, unless it enables v8 by default), and drop the v7
+fallback: the journaled get in `objectStore`, and the version check in
+`host`.
 
 ## Concurrent awaits in the TypeScript SDK
 

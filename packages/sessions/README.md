@@ -295,14 +295,16 @@ record its outcome in the transaction. The shop's `Orders` does this, and its
 
 **Where the data lives.** The database is stored in the object's state,
 under the keys `v22/head`, `v22/tail/…`, `v22/manifest/…` and `v22/pack/…`.
-Reads are `ctx.get`, writes are `ctx.set` and `ctx.clear`, and a sync is an
+Reads are state gets, writes are `ctx.set` and `ctx.clear`, and a sync is an
 empty `ctx.run`. Handlers and views can't reach any other state key, since
 a session has no key/value state of its own.
 
-**Reads and writes.** A read is a state read. It is journaled for now (once
-protocol v8 ships it won't be, see [FUTURE.md](../../FUTURE.md)), and it goes
-to the runtime unless this attempt wrote the key or the invocation started
-with it. An invocation starts with only the database's head (`state:
+**Reads and writes.** A read is a state read. Where the server speaks
+service protocol v8, it is left out of the journal: a handler is never
+replayed, so the journal would only grow by an entry per page. On v7, which
+Restate 1.8 speaks, it is a journaled `ctx.get` (see
+[FUTURE.md](../../FUTURE.md)). Either way it goes to the runtime unless this
+attempt wrote the key or the invocation started with it. An invocation starts with only the database's head (`state:
 { preload: ['v22/head'] }`): its open's first read needs no round trip, and
 it doesn't start by loading every page. A write or a clear is a state write, and returns at once.
 Restate keeps an attempt's writes and sends in the order they were made, so

@@ -127,6 +127,22 @@ export type AttemptContext = Pick<
 > &
   Runtime;
 
+/** The SDK's ephemeral state get, private in its types (`ContextImpl.ephemeralStateGet`). */
+type EphemeralGet = {
+  ephemeralStateGet?: (name: string, serde: restate.Serde<Uint8Array>) => Promise<Uint8Array | null>;
+};
+
+/**
+ * The service protocol version the attempt negotiated, from its content type
+ * (`application/vnd.restate.invocation.v8`); 0 where it has none, such as
+ * in a test's fake.
+ */
+function protocolVersion(ctx: Pick<restate.ObjectContext, 'request'>): number {
+  const type = ctx.request().attemptHeaders?.get('content-type');
+  const version = typeof type === 'string' ? /\.invocation\.v(\d+)$/.exec(type)?.[1] : undefined;
+  return version === undefined ? 0 : Number(version);
+}
+
 /** What an attempt's session needs of the SDK's context `ctx`. */
 export function host(
   ctx: restate.ObjectContext | restate.ObjectSharedContext | AttemptContext,
@@ -134,6 +150,9 @@ export function host(
 ): SqlHost {
   const runtime = ctx as unknown as Runtime;
   const exclusive = ctx as restate.ObjectContext;
+  // Protocol v8 has state gets left out of the journal (FUTURE.md at the
+  // repository's root); the selector drives them (`hookSelector`).
+  const ephemeral = protocolVersion(ctx) >= 8 ? (ctx as EphemeralGet).ephemeralStateGet?.bind(ctx) : undefined;
   return {
     shared,
     key: ctx.key,
@@ -141,6 +160,7 @@ export function host(
     defaultSerde: runtime.defaultSerde,
     request: () => ctx.request(),
     get: (name, serde, entry) => ctx.get(name, serde, entry),
+    unjournaledGet: ephemeral,
     set: (name, value, serde, entry) => exclusive.set(name, value, serde, entry),
     clear: (name, entry) => exclusive.clear(name, entry),
     stateKeys: () => ctx.stateKeys(),
