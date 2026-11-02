@@ -25,11 +25,6 @@ describe('the bank agent on pi', () => {
     expect(await crashedAnywhere(prompt, pi.messages(), { concurrency: 1 })).toEqual([]);
   }, 600_000);
 
-  it('answers a message once after a crash at any of its state requests, steered once', async () => {
-    // One at a time: pi-ai's faux provider answers from one queue.
-    expect(await crashedAnywhere(prompt, pi.messages(), { concurrency: 1, steered: true })).toEqual([]);
-  }, 600_000);
-
   it('runs a tool call again however often a crash cuts it off', async () => {
     // pi-durable parks a task cut off 5 times in a row by default: Restate's retries decide here.
     const c = conversation(prompt, 'restarts');

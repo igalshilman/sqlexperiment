@@ -51,7 +51,6 @@ import {
 } from '@deepseek-ai/dsh-tools';
 import {
   aborted,
-  AttemptEnded,
   CANCELLED,
   chatHandler,
   checkModelName,
@@ -64,8 +63,6 @@ import {
   nextPromptId,
   providerOf,
   refusal,
-  settleSteering,
-  type Steerable,
   stopSignalOf,
   storedAnswer,
   toolCallEnded,
@@ -150,7 +147,6 @@ async function boot(db: restate.Database, route: Route, system?: string): Promis
 const CONTINUE = 'Continue: your last turn was interrupted. Finish the request.';
 
 const promptId = (id: string) => MessageId(`prompt:${id}`);
-const steerId = (id: string) => MessageId(`steer:${id}`);
 const textOf = (message: Message) => message.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
 /**
@@ -308,11 +304,10 @@ const answerOnce = async (
   let agent: Agent | undefined;
   try {
     const sessionId = SessionId(ctx.key);
-    const steerable = () => steeringOf(agent!);
     const options = {
       agentOptions: route,
       setup: (agentCtx: Context) => {
-        for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, steerable, fail));
+        for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, fail));
       },
     };
     // Resuming closes a turn a crash left open.
@@ -321,13 +316,8 @@ const answerOnce = async (
       : await harness.agents.create({ sessionId, ...options });
     agent = started.agent;
     const answer = await answered(harness, agent, id, text, failed);
-    await settleSteering(ctx, steerable());
     return answer;
   } catch (e) {
-    // A turn that ends unanswered (cancelled, refused) counts the messages
-    // steered to it that the session has, given in an earlier attempt too:
-    // its close answers only the others. An attempt that ended closes nothing.
-    if (agent && !(e instanceof AttemptEnded)) await settleSteering(ctx, steeringOf(agent)).catch(() => {});
     // A cancelled invocation cancels the agent's turn, which the log keeps.
     if (e instanceof restate.CancelledError && agent) await cancelTurn(harness, agent);
     else (harness.sessionPersistence as SqlSessionPersistence).abandon();
@@ -377,24 +367,12 @@ async function cancelTurn(harness: Context, agent: Agent) {
 }
 
 /**
- * Messages steered to the turn: the agent's steering, which its next step
- * takes (after the tool calls), and the log keeps, by id.
- */
-const steeringOf = (agent: Agent): Steerable => ({
-  steer: async (steered) => agent.steer(message(steerId(steered.id), steered.text)),
-  has: async (steered) =>
-    agent.session.snapshotEvents().some((e) => e.type === 'user/message' && e.data.id === steerId(steered)),
-});
-
-/**
  * `definition`, its calls published as they start and end (for the clients
- * that follow the conversation, and the steering), and its error failing the
- * attempt.
+ * that follow the conversation), and its error failing the attempt.
  */
 const tracked = (
   definition: ToolDefinition,
   ctx: restate.SessionContext,
-  steerable: () => Steerable,
   fail: (error: unknown) => void,
 ): ToolDefinition => ({
   ...definition,
@@ -402,7 +380,7 @@ const tracked = (
     try {
       await toolCallStarted(ctx);
       const result = await definition.execute(args, exec);
-      await toolCallEnded(ctx, steerable());
+      await toolCallEnded(ctx);
       return result;
     } catch (error) {
       fromTool(error);
@@ -458,9 +436,8 @@ export const messages = () => messagesHandler();
 const transcribe = async (db: Database, key: string) => {
   const transcript = new Transcript();
   for (const e of await storedEvents(db, SessionId(key))) {
-    // The prompts and the messages steered to them, not the requests to
-    // continue an interrupted turn.
-    if (e.type === 'user/message' && /^(prompt|steer):/.test(e.data.id)) transcript.say('user', textOf(e.data));
+    // The prompts, not the requests to continue an interrupted turn.
+    if (e.type === 'user/message' && e.data.id.startsWith('prompt:')) transcript.say('user', textOf(e.data));
     if (e.type === 'assistant/message') transcript.say('assistant', textOf(e.data.message));
     if (e.type === 'tool/call') transcript.call(e.data.callId, e.data.name, parsed(e.data.arguments));
     if (e.type === 'tool/result')

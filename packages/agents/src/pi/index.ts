@@ -67,8 +67,6 @@ import {
   providerOf,
   refusal,
   REFUSED,
-  settleSteering,
-  type Steerable,
   stopSignalOf,
   toolCallEnded,
   toolCallStarted,
@@ -224,17 +222,6 @@ export const withPi = async <T>(
   turn?.addEventListener('abort', onStop, { once: true });
   // The root conversation, once the Harness is open (below).
   const conversation = () => rootOn(harness, context, model);
-  // Messages steered to the turn: given as pi-durable's steering input (by
-  // its id, once), which the run takes once the round's tools are done.
-  const steerable: Steerable = {
-    steer: async ({ id, text }) => {
-      await (await conversation()).submit({ type: 'input', content: text, requestId: id, whenBusy: 'steer' }, context);
-    },
-    has: async (id) => {
-      const root = await conversation();
-      return (await root.commit((tx) => tx.submissionByRequest(root.id, id), context)) !== undefined;
-    },
-  };
   // A tool call's error: the attempt fails, and the call never returns.
   const stopped = (error: unknown, task: Context): Promise<never> => {
     // The turn was cancelled, and the abort ended the call: pi-durable records it.
@@ -253,7 +240,7 @@ export const withPi = async <T>(
       try {
         await toolCallStarted(ctx);
         const result = await t.execute(args, api, task);
-        await toolCallEnded(ctx, steerable);
+        await toolCallEnded(ctx);
         return result;
       } catch (error) {
         return stopped(error, task);
@@ -285,7 +272,6 @@ export const withPi = async <T>(
     const entry = await root.commit((tx) => tx.entry(AssistantEntry, answer), context);
     const reply = entry?.model?.at(-1);
     if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
-    await settleSteering(ctx, steerable);
     return textOf(reply.content);
   };
   // `failure`, once it comes; a cancellation first aborts the conversation's work.
@@ -304,12 +290,6 @@ export const withPi = async <T>(
     return await transcribing(ctx, read, () =>
       Promise.race([abortOn(), work({ harness, context, conversation, prompt })]),
     );
-  } catch (error) {
-    // A turn that ends unanswered (cancelled, refused) counts the messages
-    // steered to it that the conversation has, given in an earlier attempt
-    // too: its close answers only the others. An attempt that ended closes nothing.
-    if (!(error instanceof AttemptEnded)) await settleSteering(ctx, steerable).catch(() => {});
-    throw error;
   } finally {
     turn?.removeEventListener('abort', onStop);
     await harness.close(withoutAbortSignal(context));

@@ -54,8 +54,9 @@ curl localhost:8080/assistant/alice/messages                                 # t
 `assistant` is a virtual object: each key (`alice`, `bob`) is a
 conversation of its own, with a database of its own, and answers one
 message at a time. `serve` serves it on PORT (default 9080), with the
-`signals` object every agent uses (its waits and steering); an endpoint of
-your own (`restate.serve`, `restate.endpoint()`) binds `signals` too.
+`signals` object every agent uses (its waits, and what it is doing); an
+endpoint of your own (`restate.serve`, `restate.endpoint()`) binds
+`signals` too.
 `RESTATE_SERVE_ONLY=triage,planner` serves only the services it names, so
 that one program (or image) deploys in parts; `signals` too, in one of them
 (`RESTATE_SERVE_ONLY=triage,planner,signals`): the agents reach it through
@@ -66,7 +67,7 @@ Restate, wherever it is.
 The same agent runs on each of them: `agent({ name, ...options })`, with
 the handler `chat` (a message in, the answer out), and the views
 `messages` (the conversation so far), `status` (what it is doing), `stop`
-and `steer` (the message it answers), `clear` (forget it all), `sync`,
+(the message it answers), `clear` (forget it all), `sync`,
 `notifications` and `watch` (to follow it), and `signal` and `pending`
 ([Signals](#signals)).
 
@@ -113,11 +114,11 @@ system prompt for Claude and LangGraph, and is added to the framework's own
 
 Every agent takes these too, beside its framework's options:
 
-| Option        | What                                                                                                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                    |
-| `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended, and a steer waits for the end |
-| `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                                                          |
+| Option        | What                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                     |
+| `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended |
+| `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                           |
 
 ## Calling an agent
 
@@ -175,32 +176,15 @@ An attempt that ends before its turn does, while its process lives on
 work too, a model's request included: it can store nothing more, and the
 next attempt goes on with the turn, which is not cancelled.
 
-**Steer a turn.** `steer` adds to the message being answered, such as for
-a message typed while the agent works: the agent takes it at its next tool
-call, as its framework steers a turn (pi-durable's, OpenCode's and the
-DeepSeek Harness's steering), and goes on with it. `steer` answers with
-the invocation that answers the message (to attach to), and whether it
-steers one:
-
-```sh
-curl localhost:8080/assistant/alice/steer -d 'Only Monday, please'    # {"invocationId": "inv_1f…", "steered": true}
-```
-
-A turn that ends before it takes a message (no tool call came) answers it
-as a message of its own, once it ended; with no message answered, `steer`
-is a message of its own (`"steered": false`, and its invocation). Claude's
-and LangGraph's turns take no steering: their messages are answered next.
-A stopped turn answers none of them.
-
-A steered message waits in the agent's `signals` object (`steer`), and the
-turn reads it there after each tool call (`steering`), and gives it to the
-framework by its id, which the framework keeps: a retried attempt neither
-loses nor repeats one.
+**A message while it works.** A message sent while the agent answers
+another waits for it: Restate answers a key's messages one at a time, in
+order. To change course, stop the turn (`stop`) and send the message that
+replaces it.
 
 **Forget a conversation.** `clear` starts a key over, such as for a UI's
 New chat button: it stops the message being answered (as `stop`), then
 forgets the conversation, the key's database, and what its
-`signals` hold (waits, kept signals, steered messages). It answers as `stop`
+`signals` hold (waits and kept signals). It answers as `stop`
 does. The next message starts anew; its ids and cursors go on from where
 the forgotten conversation got to, so a follower (`follow`, `sync`) reads on,
 and drops the messages it kept from before `first` (which a page and each
@@ -330,7 +314,6 @@ const sent = await restate
   .objectSendClient(agent('assistant'), 'alice')
   .chat('Plan my week', clients.rpc.sendOpts({ idempotencyKey: 'msg-1' }));
 const { answering, waiting } = await alice.status(); // while it works
-await alice.steer('Only Monday, please'); // typed while it works
 await alice.stop(); // the Stop button
 const { messages } = await alice.messages({ limit: 20 }); // the tool calls so far
 const answer = await restate.result(sent); // once it answered
@@ -362,7 +345,7 @@ with their outputs.
 (`Messages`, `Status`, `Waiting`...); `agent<H>(name)` types a session
 object of your own with its handlers `H`.
 [`examples/ui`](../examples/ui/app.ts) is a chat page on it: the
-conversation as the agent works, its approvals, steering and Stop.
+conversation as the agent works, its approvals and Stop.
 
 ## Tools
 
@@ -508,11 +491,9 @@ await serve(issues, triage);
 | `message`           | What of the body the agents read; by default, all of it                                      |
 | `description`       | What it is, for the UI                                                                       |
 
-A delivery goes through the agent's `signals`, which knows what the agent is
-doing: to the message it answers, if it answers one, which takes it at its
-next step (as `steer`); else as a message of its own (as `chat`). A turn
-that ends, or is stopped, before it takes it answers it after: a delivery is
-never dropped, as a steer to a stopped turn is.
+A delivery is a message of its own to the agent's `chat`, which it answers
+after the message it works on, if any, also one that is stopped: a delivery
+is never dropped.
 
 The same delivery is yours from any handler (a session object's, or a
 service's or workflow's of the SDK), for events of other kinds (a queue, a
@@ -633,7 +614,7 @@ journal in Restate's UI. Its `options` (such as `retryPolicy`) and
 `metadata` add to these. It is a `restate.sessionObject` of
 [`restate-sessions`](../sessions/README.md): `handlers` run one at a time per
 key, and `views` beside them. Its own cannot be named `signal`, `pending`,
-`status`, `stop`, `steer`, `notifications` or `watch`, views every agent's
+`status`, `stop`, `notifications` or `watch`, views every agent's
 session object has, nor `sync`, `clear` or `erase`, which an agent has (one with a
 `messages` view). A view of yours reads the database too: `ctx.db` is the
 database as committed, beside a message being answered.

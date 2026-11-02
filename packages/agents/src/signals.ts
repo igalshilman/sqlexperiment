@@ -1,7 +1,7 @@
 // Signals to agents: a virtual object per agent, keyed `<agent>:<key>` (such
 // as `assistant:alice`), whose `wait` returns once `resolve` gives the wait
-// its value; the messages steered to the message an agent answers; and the
-// revision of the agent's conversation, which its `watch` waits on.
+// its value; the message the agent answers; and the revision of the agent's
+// conversation, which its `watch` waits on.
 //
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
@@ -13,9 +13,6 @@ import type { Status } from './object.ts';
 
 /** An agent's context, as far as its signals need it: any handler's or view's of its object. */
 type AgentContext = { readonly key: string; readonly request: { readonly target: { readonly service: string } } };
-
-/** The agent of `ctx`: its object's name, and key. */
-export const agentOf = (ctx: AgentContext): Agent => ({ service: ctx.request.target.service, key: ctx.key });
 
 /** The key of the signals of agent `service`'s key `key`: `<agent>:<key>`. */
 const keyOf = (service: string, key: string) => `${service}:${key}`;
@@ -64,26 +61,34 @@ export function companionOf(agent: { name: string }, key: string): Companion {
 export const hasCompanion = (agent: object) => COMPANION in agent;
 
 /**
- * Deliver `text` to `agent`'s key `key`, from any handler: to the message it
- * answers, if it answers one, which takes it at its next step (as `steer`);
- * else as a message of its own (as `chat`). A turn that ends, or is stopped,
- * before it takes it answers it after. It is sent, not awaited: `opts` may
- * give it an idempotency key, so that it is delivered once.
+ * Deliver `text` to `agent`'s key `key`, from any handler: a message of its
+ * own (as `chat`), which it answers after the messages before it. It is
+ * sent, not awaited: `opts` may give it an idempotency key, so that it is
+ * delivered once.
  *
  *   deliver(ctx, triage, 'ENG-1', 'The issue was closed', { idempotencyKey: delivery });
  */
 export function deliver(
-  ctx: Pick<restate.Context, 'objectSendClient'> | Pick<SessionContext, 'send'>,
+  ctx: Pick<restate.Context, 'genericSend'> | Pick<SessionContext, 'send'>,
   agent: { name: string },
   key: string,
   text: string,
-  opts: { idempotencyKey?: string } = {},
+  { idempotencyKey }: { idempotencyKey?: string } = {},
 ) {
-  const { object, key: companion, agent: target } = companionOf(agent, key);
-  const delivery = { agent: target, text };
+  companionOf(agent, key); // an agent of restate-agents, with a `chat` handler
+  const message = { service: agent.name, handler: 'chat', key, input: text, idempotencyKey };
   // A session object's handler, or one of the SDK's.
-  if ('send' in ctx) ctx.send(object, companion, opts).deliver(delivery);
-  else ctx.objectSendClient(object, companion).deliver(delivery, restate.rpc.sendOpts(opts));
+  if ('send' in ctx) ctx.send(message);
+  else {
+    ctx.genericSend({
+      service: agent.name,
+      method: 'chat',
+      key,
+      parameter: text,
+      inputSerde: restate.serde.json,
+      idempotencyKey,
+    });
+  }
 }
 
 /** A wait for a signal, as `pending` lists it. */
@@ -115,24 +120,6 @@ export interface Resolved {
   resolved: string | null;
 }
 
-/** A message steered to the message being answered (its turn): its id, `<turn>:steer:<n>`, and its text. */
-export interface Steer {
-  id: string;
-  text: string;
-  /** A delivery (`deliver`): a cancelled turn answers it as a message of its own, rather than drop it. */
-  keep?: boolean;
-}
-
-/**
- * What `steer` did: the invocation that answers it, and whether it steers
- * the message being answered (or, with none answered, was sent as a message
- * of its own).
- */
-export interface Steered {
-  invocationId: string;
-  steered: boolean;
-}
-
 /** The revision of an agent's conversation: each change of what a client reads increases it. */
 export interface Notifications {
   revision: number;
@@ -150,22 +137,16 @@ interface Agent {
   key: string;
 }
 
-/** The turns closed last, newest last: a message steered to one of them is a message of its own. */
-const CLOSED = 16;
-
 /**
- * The waits, in the order they started, each with its awakeable; the signals
- * kept for the next wait; the messages steered to the turn being answered,
- * and the turns closed last; and the conversation's revision, with the
- * `watch`es waiting for a newer one.
+ * The message the agent answers; the waits, in the order they started, each
+ * with its awakeable; the signals kept for the next wait; and the
+ * conversation's revision, with the `watch`es waiting for a newer one.
  */
 interface State {
   /** The message the agent answers, from its turn's start to its close. */
   turn: Turn;
   waiting: (Waiting & { awakeable: string })[];
   kept: Record<string, unknown[]>;
-  steering: { turn: string; messages: Steer[] };
-  closed: string[];
   revision: number;
   watching: { revision: number; awakeable: string }[];
 }
@@ -177,49 +158,6 @@ async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications
   for (const { awakeable } of (await ctx.get('watching')) ?? []) ctx.resolveAwakeable(awakeable, { revision });
   ctx.clear('watching');
   return { revision };
-}
-
-/** Send `text` to `agent`'s `chat`, as a message of its own: its invocation's id. */
-const send = (ctx: restate.ObjectContext<State>, { service, key }: Agent, text: string) =>
-  ctx.genericSend({ service, method: 'chat', key, parameter: text, inputSerde: restate.serde.json }).invocationId;
-
-/**
- * Steer `turn` (the message `agent` answers, if any) with `text`: queued for
- * it to take at its next step, or, if it is over, sent as a message of its own.
- */
-async function steered(ctx: restate.ObjectContext<State>, agent: Agent, text: string, keep = false): Promise<Steered> {
-  const turn = (await ctx.get('turn'))?.invocationId ?? null;
-  if (turn === null || ((await ctx.get('closed')) ?? []).includes(turn)) {
-    return { invocationId: await send(ctx, agent, text), steered: false };
-  }
-  const steering = await ctx.get('steering');
-  const messages = steering?.turn === turn ? steering.messages : [];
-  const id = `${turn}:steer:${messages.length + 1}`;
-  ctx.set('steering', { turn, messages: [...messages, { id, text, ...(keep ? { keep } : {}) }] });
-  await publish(ctx);
-  return { invocationId: turn, steered: true };
-}
-
-/** A turn's close: see `close`. */
-interface Close {
-  agent: Agent;
-  turn: string;
-  taken: string[];
-  cancelled: boolean;
-}
-
-/** Close `turn`, once: see `close`. */
-async function closed(ctx: restate.ObjectContext<State>, { agent, turn, taken, cancelled }: Close) {
-  if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
-  const done = (await ctx.get('closed')) ?? [];
-  if (done.includes(turn)) return;
-  ctx.set('closed', [...done, turn].slice(-CLOSED));
-  const steering = await ctx.get('steering');
-  if (steering?.turn !== turn) return;
-  ctx.clear('steering');
-  for (const { id, text, keep } of steering.messages) {
-    if (!taken.includes(id) && (keep || !cancelled)) await send(ctx, agent, text);
-  }
 }
 
 /** A handler that the agents' own handlers call, which clients cannot (through Restate's ingress). */
@@ -288,25 +226,12 @@ export const signals = restate.object({
     }),
 
     /**
-     * @internal Steer the message `agent` answers, if any, with `text`:
-     * queued for it to take at its next step, or, if none is answered, sent
-     * as a message of its own.
-     */
-    steer: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) =>
-      steered(ctx, agent, text),
-    ),
-
-    /**
      * @internal The agent's `chat` started answering `turn`: the same
      * invocation again (a retry) keeps when it started. A turn before it that
-     * never closed (its invocation was killed) closes now, as a cancelled one:
-     * the deliveries steered to it are answered.
+     * never closed (its invocation was killed) is over.
      */
-    start: internal(async (ctx: restate.ObjectContext<State>, { agent, turn }: { agent: Agent; turn: Turn }) => {
-      const before = (await ctx.get('turn'))?.invocationId;
-      if (before === turn.invocationId) return;
-      if (before !== undefined) await closed(ctx, { agent, turn: before, taken: [], cancelled: true });
-      ctx.set('turn', turn);
+    start: internal(async (ctx: restate.ObjectContext<State>, turn: Turn) => {
+      if ((await ctx.get('turn'))?.invocationId !== turn.invocationId) ctx.set('turn', turn);
     }),
 
     /** What the agent does: the message it answers, if any, and the waits of its tools. */
@@ -336,40 +261,18 @@ export const signals = restate.object({
       },
     ),
 
-    /**
-     * @internal Deliver `text` to `agent` (a webhook's delivery, say): steered
-     * to the message it answers, if any, which takes it at its next step;
-     * else, or once that turn is over, as a message of its own. Unlike a
-     * steer, a cancelled turn does not drop it: it is answered after.
-     */
-    deliver: internal(async (ctx: restate.ObjectContext<State>, { agent, text }: { agent: Agent; text: string }) =>
-      steered(ctx, agent, text, true),
-    ),
-
-    /** @internal The messages steered to `turn`, in order. */
-    steering: restate.handlers.object.shared(
-      { ingressPrivate: true },
-      async (ctx: restate.ObjectSharedContext<State>, turn: string) => {
-        const steering = await ctx.get('steering');
-        return steering?.turn === turn ? steering.messages : [];
-      },
-    ),
-
-    /**
-     * @internal `turn` is over: each message steered to it that it did not
-     * take (not in `taken`) is sent as a message of its own, unless the turn
-     * was cancelled (but for a delivery); later ones are, too.
-     */
-    close: internal(closed),
+    /** @internal The message `turn` (an invocation id) is answered, or its turn ended otherwise. */
+    close: internal(async (ctx: restate.ObjectContext<State>, turn: string) => {
+      if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
+    }),
 
     /**
      * @internal The agent forgot its conversation (`clear`): forget its
-     * waits, kept signals and steered messages, and publish the change.
+     * waits and kept signals, and publish the change.
      */
     reset: restate.handlers.object.exclusive({ ingressPrivate: true }, async (ctx: restate.ObjectContext<State>) => {
       ctx.clear('waiting');
       ctx.clear('kept');
-      ctx.clear('steering');
       await publish(ctx);
     }),
 
@@ -385,16 +288,6 @@ export const signals = restate.object({
 
     /** @internal The conversation changed: increase its revision, and answer the `watch`es. */
     publish: restate.handlers.object.exclusive({ ingressPrivate: true }, publish),
-
-    /**
-     * @internal The turn `turn` made progress (a tool call ended): publish
-     * it, and answer the messages steered to the turn.
-     */
-    progress: internal(async (ctx: restate.ObjectContext<State>, turn: string) => {
-      await publish(ctx);
-      const steering = await ctx.get('steering');
-      return steering?.turn === turn ? steering.messages : [];
-    }),
 
     /** The conversation's revision. */
     notifications: restate.handlers.object.shared(

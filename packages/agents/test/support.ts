@@ -3,48 +3,34 @@
 // that records its calls, through crashes of the handler.
 import { expect } from 'vitest';
 import * as restate from 'restate-sessions';
-import { type Steer, tool, type Tool } from 'restate-agents';
+import { tool, type Tool } from 'restate-agents';
 import { type AttemptContext, contextOf } from 'restate-sessions/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from 'restate-sessions/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from 'restate-sessions/test/ledger';
 
 /**
- * The `signals` object of an agent's tests, as far as steering and following
- * go: the messages steered to each turn, the turns closed, and how often the
- * conversation was published.
+ * The `signals` object of an agent's tests, as far as following goes: the
+ * message being answered, the turns closed, and how often the conversation
+ * was published.
  */
-export class Steering {
+export class Following {
   /** The conversation's revision: how often it was published. */
   revision = 0;
-  /** The messages steered to each turn, by its invocation id. */
-  readonly turns = new Map<string, Steer[]>();
-  /** Each turn closed, with the ids of the messages it took. */
-  readonly closed: { turn: string; taken: string[]; cancelled: boolean }[] = [];
+  /** Each turn closed, by its invocation id. */
+  readonly closed: string[] = [];
   /** The message being answered, from its turn's start to its close. */
   answering: { invocationId: string; since: string } | null = null;
-
-  /** Steer turn `turn` (an invocation id) with `text`, as the object's `steer` does. */
-  steer(turn: string, text: string) {
-    const messages = this.turns.get(turn) ?? [];
-    this.turns.set(turn, [...messages, { id: `${turn}:steer:${messages.length + 1}`, text }]);
-  }
-
-  /** The messages of turn `turn` that it did not take: they are answered as messages of their own. */
-  left(turn: string) {
-    const close = this.closed.findLast((c) => c.turn === turn);
-    return (this.turns.get(turn) ?? []).filter((m) => !close?.taken.includes(m.id)).map((m) => m.text);
-  }
 }
 
-/** The steering of each object's state. */
-const steerings = new WeakMap<Map<string, Uint8Array>, Steering>();
+/** The following of each object's state. */
+const followings = new WeakMap<Map<string, Uint8Array>, Following>();
 
-/** The steering of the object of state `map`. */
-export const steeringOf = (map: ReadonlyMap<string, Uint8Array>) => {
+/** The following of the object of state `map`. */
+export const followingOf = (map: ReadonlyMap<string, Uint8Array>) => {
   const object = map as Map<string, Uint8Array>;
-  if (!steerings.has(object)) steerings.set(object, new Steering());
-  return steerings.get(object)!;
+  if (!followings.has(object)) followings.set(object, new Following());
+  return followings.get(object)!;
 };
 
 /** A call or send an attempt makes, as the SDK gets it (`ctx.rpc`, `ctx.send`). */
@@ -67,26 +53,21 @@ const made = (c: Made): Made => ({
 
 /**
  * An attempt of a handler, restate-sessions's own, with the `signals` object
- * of steering over `map`: `ctx`, a handler's context, and `view`, a view's.
+ * of following over `map`: `ctx`, a handler's context, and `view`, a view's.
  * `route` answers the calls to anything but `signals`.
  */
 export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => Promise<unknown> }) {
-  const steering = steeringOf(options.map);
+  const following = followingOf(options.map);
   const base = baseAttempt(options);
   // The `signals` object, as the agents call it.
   const signals: Record<string, (input: never) => unknown> = {
-    steering: (turn: string) => steering.turns.get(turn) ?? [],
-    publish: () => ({ revision: ++steering.revision }),
-    progress: (turn: string) => {
-      steering.revision++;
-      return steering.turns.get(turn) ?? [];
+    publish: () => ({ revision: ++following.revision }),
+    start: (turn: { invocationId: string; since: string }) => {
+      if (following.answering?.invocationId !== turn.invocationId) following.answering = turn;
     },
-    start: ({ turn }: { turn: { invocationId: string; since: string } }) => {
-      if (steering.answering?.invocationId !== turn.invocationId) steering.answering = turn;
-    },
-    close: (close: Steering['closed'][number]) => {
-      if (steering.answering?.invocationId === close.turn) steering.answering = null;
-      steering.closed.push(close);
+    close: (turn: string) => {
+      if (following.answering?.invocationId === turn) following.answering = null;
+      following.closed.push(turn);
     },
   };
   const route = (c: Made) => {
@@ -270,10 +251,6 @@ export const SAID = [
  * is retried, at every `stride`th request (CRASH_STRIDE, default 3), some at
  * once, until it answers without crashing: each should answer it, with one transfer, and one
  * stored prompt in `messages`. From a conversation with a message before.
- *
- * `steered`: the message is steered ({@link STEERED}) before it starts, and
- * the steering is taken (in `messages`) or left (answered as a message of
- * its own), exactly once, whatever the answer.
  */
 export async function crashedAnywhere(
   prompt: PromptHandler,
@@ -284,33 +261,23 @@ export async function crashedAnywhere(
   {
     stride = Number(process.env.CRASH_STRIDE ?? 3),
     concurrency = 8,
-    steered = false,
   }: {
     /** Crash at every `stride`th state request. */
     stride?: number;
     /** How many crash points at once; 1 for a model fake that is not safe to share. */
     concurrency?: number;
-    /** Steer the message before it starts. */
-    steered?: boolean;
   } = {},
 ) {
   const before = conversation(prompt, 'anywhere');
   await before.attempt('inv0', 'Please move 1 from 3 to 4');
   const crashAt = async (n: number) => {
     const c = conversation(prompt, 'anywhere', before);
-    if (steered) steeringOf(c.state).steer('inv1', STEERED);
     if ((await c.attempt('inv1', 'Please move 5 from 1 to 2', n)) !== 'crashed') return 'finished';
     const answer = await Promise.race([
       c.attempt('inv1', 'Please move 5 from 1 to 2'),
       new Promise((resolve) => setTimeout(() => resolve('no answer'), 10_000)),
     ]).catch((error: unknown) => String(error));
     const users = (await c.read(messages, {})).messages.filter((m) => m.role === 'user');
-    if (steered) {
-      const taken = users.filter((m) => m.parts.some((p) => p.text === STEERED)).length;
-      const left = steeringOf(c.state).left('inv1').length;
-      const ok = typeof answer === 'string' && c.ledger.transfers.size === 2 && taken + left === 1;
-      return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${taken} taken, ${left} left`;
-    }
     const ok =
       answer === 'Done: moved 5 from account 1 to account 2' && c.ledger.transfers.size === 2 && users.length === 2;
     return ok ? 'ok' : `${n}: ${String(answer)}, ${c.ledger.transfers.size} transfers, ${users.length} prompts`;
@@ -431,52 +398,38 @@ export async function endedWhileWorking(chat: (tools: Tool[]) => PromptHandler) 
     () => undefined,
     (error: unknown) => error,
   );
-  const closed = [...steeringOf(map).closed];
+  const closed = [...followingOf(map).closed];
   const next = sqlAttempt({ map, key: 'ended', id: 'inv1' });
   const answer = await next.end(() => handler(next.ctx, 'Please move 5 from 1 to 2'));
   return { failed, closed, answer };
 }
 
-/** What {@link steeredWhileWorking} steers a turn with. */
-export const STEERED = 'Only from account 1, please';
-
 /**
- * `chat` (with `tools`) on an object of its own, its message (a transfer)
- * steered ({@link STEERED}) while its tool `transfer` runs: its answer, the
- * conversation then (each message's parts), the steering that the turn did
- * not take, which is answered as messages of their own, and how often the
- * turn published its conversation.
+ * `chat` (with `tools`) on an object of its own, its message a transfer:
+ * its answer, the conversation then (each message's parts), and how often
+ * the turn published its conversation.
  */
-export async function steeredWhileWorking(
+export async function followedWhileWorking(
   chat: (tools: Tool[]) => PromptHandler,
   messages: (ctx: restate.ViewContext, request: object) => Promise<{ messages: { parts: unknown[] }[] }>,
   { service }: { service?: string } = {},
 ) {
   const map = new Map<string, Uint8Array>();
-  const steering = steeringOf(map);
   const transfer = tool({
     name: 'transfer',
     description: 'Move money.',
     input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
-    run: (_transfer, { ctx }) => {
-      steering.steer(ctx.request.id, STEERED);
-      return 'moved 5 from account 1 to account 2';
-    },
+    run: () => 'moved 5 from account 1 to account 2',
   });
   const attempt = (id: string, shared = false) => {
-    const sql = sqlAttempt({ map, key: 'steer', id, shared, service });
+    const sql = sqlAttempt({ map, key: 'follow', id, shared, service });
     return { sql, ctx: sql.ctx, view: sql.view };
   };
   const turn = attempt('inv1');
   const answer = await turn.sql.end(() => handlerOf(chat([transfer]))(turn.ctx, 'Please move 5 from 1 to 2'));
   const read = attempt('read', true);
   const page = await read.sql.end(() => messages(read.view, {}));
-  return {
-    answer,
-    parts: withoutIds(page.messages.map((m) => m.parts)),
-    left: steering.left('inv1'),
-    published: steering.revision,
-  };
+  return { answer, parts: withoutIds(page.messages.map((m) => m.parts)), published: followingOf(map).revision };
 }
 
 /** `parts` without their tool calls' ids, which differ from run to run. */

@@ -35,7 +35,7 @@ that put them together. New to it all? Begin with
 | [`harness.ts`](intermediate/harness.ts)   | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers    |
 | [`coding.ts`](intermediate/coding.ts)     | A coordinator (pi) that hands coding tasks to coders of its own (OpenCode)                                                                  |
 | [`review.ts`](intermediate/review.ts)     | A coder (OpenCode) made your own: a plugin that keeps its edits in `src/`, and a handler that writes code, then reviews it (`withOpenCode`) |
-| [`ui/`](ui/app.ts)                        | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Steer, Stop (`npx vite ui`)  |
+| [`ui/`](ui/app.ts)                        | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Stop (`npx vite ui`)         |
 
 ### Advanced
 
@@ -43,7 +43,7 @@ that put them together. New to it all? Begin with
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case                                                                                                                                     |
 | [`factory/`](advanced/factory/README.md) | A software factory on Linear: a webhook starts it; a triage agent (pi) asks a planner (pi) for a structured plan, then hands each part to a coder (OpenCode), at once, and a reviewer (pi) reads each pull request; each moves its issue along, through Linear's MCP server |
-| [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you steer it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve                     |
+| [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you talk with it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve                 |
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a

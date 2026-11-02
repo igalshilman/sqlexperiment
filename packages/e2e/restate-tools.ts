@@ -7,11 +7,10 @@
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; `stop` stops a message being
-// answered, and `steer` adds to it; `follow` gives the conversation as it
-// changes; a message may be plain text; a webhook's delivery goes to the
-// message being answered, once, or else is a message of its own, and is
-// answered after a turn that is stopped; `clear` forgets a conversation,
-// stopping its turn;
+// answered; `follow` gives the conversation as it changes; a message may be
+// plain text; a webhook's delivery is a message of its own, once, answered
+// after the message being answered, also one that is stopped; `clear`
+// forgets a conversation, stopping its turn;
 // and a handler's terminal error is the tool's answer.
 //
 //   pnpm --filter e2e tools   (RESTATE_SERVER=/path/to/restate-server to use another)
@@ -262,25 +261,6 @@ try {
   assert.deepEqual(await jack.status(), { answering: null, waiting: [] });
   assert.deepEqual(await jack.stop(), { stopped: null });
 
-  // `steer` adds to the message being answered: the agent takes it at its
-  // next tool call (here, once the approval came).
-  const liam = ingress.objectClient(agent('support'), 'liam');
-  const liams = await ingress
-    .objectSendClient(agent('support'), 'liam')
-    .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-liam' }));
-  await waits('support/liam');
-  assert.deepEqual(await liam.steer('Quickly, please'), { invocationId: liams.invocationId, steered: true });
-  await liam.signal({ name: 'approval', value: 'approved' });
-  assert.equal(await ingress.result(liams), 'order 103: delivered / approved / refunded 103');
-  assert.deepEqual(lines((await liam.messages()).messages), [
-    ['user', 'Refund order 103'],
-    ['assistant', 'orders_status({"order":"103"}): order 103: delivered'],
-    ['assistant', 'wait_for_approval({"order":"103"}): approved'],
-    ['user', 'Quickly, please'],
-    ['assistant', 'refund({"order":"103"}): refunded 103'],
-    ['assistant', 'order 103: delivered / approved / refunded 103'],
-  ]);
-
   // `clear` forgets a conversation, and its followers see it empty; with a
   // message being answered, it stops it, and the next message starts anew.
   const before = (await henry.notifications()).revision;
@@ -307,7 +287,7 @@ try {
   assert.equal(anew.first, forgotten.messages.at(-1)!.id + 1);
   assert.equal(anew.messages[0]!.id, anew.first);
 
-  /** Post a delivery of `note` about `customer`, as delivery `id`, and wait until the agent's signals have it. */
+  /** Post a delivery of `note` about `customer`, as delivery `id`, and wait until Restate has its message to the agent. */
   const hook = async (customer: string, note: string, id: string) => {
     const response = await fetch(`${INGRESS}/hooks/webhook`, {
       method: 'POST',
@@ -315,7 +295,7 @@ try {
       body: JSON.stringify({ customer, note }),
     });
     assert.ok(response.ok, await response.text());
-    const delivered = `SELECT status FROM sys_invocation WHERE target = 'signals/support:${customer}/deliver' AND idempotency_key = 'webhook:hooks:${id}'`;
+    const delivered = `SELECT status FROM sys_invocation WHERE target = 'support/${customer}/chat' AND idempotency_key = 'webhook:hooks:${id}'`;
     for (let i = 0; ; i++) {
       const query = await fetch(`${ADMIN}/query`, {
         method: 'POST',
@@ -323,7 +303,7 @@ try {
         body: JSON.stringify({ query: delivered }),
       });
       const { rows } = (await query.json()) as { rows: { status: string }[] };
-      if (rows[0]?.status === 'completed') return;
+      if (rows.length > 0) return;
       if (i > 300) throw new Error(`delivery ${id} was not delivered: ${JSON.stringify(rows)}`);
       await sleep(50);
     }
@@ -333,9 +313,8 @@ try {
       .filter(([role]) => role === 'user')
       .map(([, text]) => text);
 
-  // A webhook's delivery goes to the message being answered, as a steer
-  // does (once, though Linear, say, sends it twice); with none answered, it
-  // is a message of its own.
+  // A webhook's delivery is a message of its own, answered after the message
+  // being answered, once (though Linear, say, sends it twice).
   const noras = await ingress
     .objectSendClient(agent('support'), 'nora')
     .chat('Refund order 103', clients.rpc.sendOpts({ idempotencyKey: 'msg-nora' }));
@@ -344,8 +323,13 @@ try {
   await hook('nora', 'She called again', 'd-1');
   await ingress.objectClient(agent('support'), 'nora').signal({ name: 'approval', value: 'approved' });
   assert.equal(await ingress.result(noras), 'order 103: delivered / approved / refunded 103');
-  const steeredHook = (await userTexts('nora'))[1];
-  assert.match(steeredHook ?? '', /^<webhook name="hooks" delivery="d-1">\n[^]*"She called again"[^]*<\/webhook>$/);
+  for (let i = 0; (await userTexts('nora')).length < 2; i++) {
+    if (i > 300) throw new Error('the delivery was not answered');
+    await sleep(50);
+  }
+  const delivered = (await userTexts('nora'))[1];
+  assert.match(delivered ?? '', /^<webhook name="hooks" delivery="d-1">\n[^]*"She called again"[^]*<\/webhook>$/);
+  await sleep(500);
   assert.equal((await userTexts('nora')).length, 2);
   await hook('nora', 'All good now', 'd-2');
   for (let i = 0; !(await userTexts('nora')).some((t) => t?.includes('All good now')); i++) {
@@ -353,8 +337,7 @@ try {
     await sleep(50);
   }
 
-  // A turn stopped before it takes a delivery answers it after, as a message
-  // of its own (a steer it drops).
+  // A delivery to a turn that is then stopped is answered after it.
   const olive = ingress.objectClient(agent('support'), 'olive');
   const olives = await ingress
     .objectSendClient(agent('support'), 'olive')
@@ -400,13 +383,6 @@ try {
   assert.deepEqual(await mia.watch({ revision: now.revision, timeoutSeconds: 1 }), now);
   assert.ok(Date.now() - started >= 900, `${Date.now() - started} ms`);
 
-  // With no message answered, it is a message of its own.
-  const own = await liam.steer('Thanks!');
-  assert.equal(own.steered, false);
-  assert.notEqual(own.invocationId, liams.invocationId);
-  const owns = await fetch(`${INGRESS}/restate/invocation/${own.invocationId}/attach`);
-  assert.ok(owns.ok, await owns.text());
-  assert.equal(lines((await liam.messages()).messages).at(-2)?.[1], 'Thanks!');
   await post('support/ivy/signal', { name: 'approval', value: 'approved', keep: true });
   const keyed = await fetch(`${INGRESS}/support/ivy/chat/send`, {
     method: 'POST',

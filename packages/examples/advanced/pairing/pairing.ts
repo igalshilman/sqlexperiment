@@ -14,7 +14,6 @@
  *
  *   curl localhost:8080/pair/fizzbuzz/chat/send -d 'Write fizzbuzz.py, with tests, and ship it'
  *   curl localhost:8080/pair/fizzbuzz/tasks      # the plan, as it works
- *   curl localhost:8080/pair/fizzbuzz/steer -d 'Use pytest'
  *   curl localhost:8080/pair/fizzbuzz/signal --json '{"name": "approval", "value": "approved"}'
  *   curl localhost:8080/pair/fizzbuzz/messages
  *

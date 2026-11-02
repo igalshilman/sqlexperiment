@@ -1,23 +1,12 @@
 // Virtual objects set up for SQL and agents.
 import * as restate from 'restate-sessions';
 import { reset } from 'restate-sessions/internal';
-import {
-  cleared,
-  onClear,
-  inBackground,
-  type Messages,
-  type MessagesRequest,
-  messageSerde,
-  refusal,
-  type Turn,
-} from './common.ts';
+import { cleared, onClear, inBackground, type Messages, type MessagesRequest, refusal, type Turn } from './common.ts';
 import * as log from './log.ts';
 import {
-  agentOf,
   type Notifications,
   type Resolved,
   type Signal,
-  type Steered,
   signals,
   signalsOf,
   withCompanion,
@@ -81,8 +70,8 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
  * The views every object here has, beside its own: `signal`, which resolves
  * a wait of the object's tools (see `signal` in tools.ts), `pending`, the
  * waits, `status`, what the object is doing, `stop`, which stops the message
- * it answers, `steer`, which adds to it, and `notifications` and `watch`,
- * the revision of its conversation, and a wait for a newer one (an agent's
+ * it answers, and `notifications` and `watch`, the revision of its
+ * conversation, and a wait for a newer one (an agent's
  * has `clear` and `sync` too: {@link followed}). Each asks the object's
  * `signals` companion, which knows what the object does: they run while the
  * object's handler works.
@@ -94,18 +83,6 @@ const BUILT_IN = {
   status: async (ctx: restate.ViewContext): Promise<Status> => companion(ctx).status(),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
   stop: async (ctx: restate.ViewContext): Promise<Stopped> => stopped(ctx, 'stop'),
-  /**
-   * Add `text` to the message being answered (`status`'s), such as "Only
-   * Monday, please": the agent takes it at its next tool call, as its
-   * framework steers a turn. A turn that ends first answers it as a message
-   * of its own, as `chat` does when no message is answered.
-   */
-  steer: {
-    input: messageSerde,
-    accept: '*/*',
-    handler: async (ctx: restate.ViewContext, text: string): Promise<Steered> =>
-      companion(ctx, 'steer').steer({ agent: agentOf(ctx), text }),
-  },
   /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
   notifications: async (ctx: restate.ViewContext): Promise<Notifications> => companion(ctx).notifications(),
   /**
@@ -133,8 +110,8 @@ const BUILT_IN = {
 const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest) => Promise<Messages>) => ({
   /**
    * Forget the conversation: stop the message being answered (as `stop`),
-   * then empty the key's database, and what its `signals` hold (waits, kept
-   * signals, steered messages). The log's ids and cursors go on (see
+   * then empty the key's database, and what its `signals` hold (waits and
+   * kept signals). The log's ids and cursors go on (see
    * log.ts), so a follower reads on, and drops the messages before `first`.
    * A message sent before it is answered first, then forgotten too; one sent
    * after starts anew.
@@ -223,8 +200,7 @@ export interface Definition<P extends string> {
   /**
    * Whether it works unwatched, such as a subagent: its turn calls its
    * `signals` only at its end, not at each step, so a client that follows it
-   * sees each turn once it ended, and a steered message waits for the turn's
-   * end. `messages` has every turn as before.
+   * sees each turn once it ended. `messages` has every turn as before.
    */
   background?: boolean;
 }
@@ -258,7 +234,7 @@ type With<H, V> = Functions<typeof BUILT_IN> &
  *
  * Besides its own handlers and views, it has the views `status`, what it is
  * doing (the message it answers, and what its tools wait for), `stop`,
- * which stops that message, `steer`, which adds to it, `pending`, the waits
+ * which stops that message, `pending`, the waits
  * of its tools (`signal()`), `signal({ id, value })`, which resolves one,
  * and `notifications` and `watch({ revision })`, to follow its
  * conversation. An agent, an object with a `messages` view (such as
