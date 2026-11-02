@@ -1,7 +1,7 @@
-// webhook(): a delivery's signature is checked, and it goes to its agents,
-// through their `signals` (`deliver`), once per delivery, as a message that
-// says where it comes from. The handler runs on a fake context, which
-// records its sends; restate-tools.ts delivers to a running turn, on Restate.
+// webhook(): a delivery's signature is checked, and it goes to its agents'
+// `chat` (`deliver`), once per delivery, as a message that says where it
+// comes from. The handler runs on a fake context, which records its sends;
+// restate-tools.ts delivers to an agent on Restate.
 import { createHmac } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
 import { companionOf, deliver as deliverTo, sessionObject, webhook, webhookMessage } from 'restate-agents';
@@ -29,13 +29,17 @@ async function deliver(event: unknown, { secret = 'shh', delivery = 'd-1', to = 
     ['linear-signature', createHmac('sha256', secret).update(body).digest('hex')],
     ['linear-delivery', delivery],
   ]);
-  const sent: { object: string; key: string; agent: unknown; text: string; idempotencyKey?: string }[] = [];
+  const sent: { object: string; key: string; method: string; text: string; idempotencyKey?: string }[] = [];
   const ctx = {
     request: () => ({ id: 'inv_1', headers }),
-    objectSendClient: (target: { name: string }, key: string) => ({
-      deliver: (input: { agent: unknown; text: string }, opts: restate.Opts<unknown, unknown>) =>
-        sent.push({ object: target.name, key, ...input, idempotencyKey: opts.getOpts().idempotencyKey }),
-    }),
+    genericSend: (s: { service: string; method: string; key: string; parameter: string; idempotencyKey?: string }) =>
+      sent.push({
+        object: s.service,
+        key: s.key,
+        method: s.method,
+        text: s.parameter,
+        idempotencyKey: s.idempotencyKey,
+      }),
   };
   await handlerOf(to)(ctx, body);
   return sent;
@@ -56,11 +60,11 @@ describe('a webhook', () => {
     expect(sent!.idempotencyKey).toBe('webhook:linear:d-1');
   });
 
-  it("delivers to each agent of its route, keyed by its body, through the agent's signals", async () => {
+  it('delivers to each agent of its route, keyed by its body, as a message to its chat', async () => {
     const sent = await deliver(created);
-    expect(sent.map((s) => [s.object, s.key, s.agent])).toEqual([
-      ['signals', 'triage:ENG-1', { service: 'triage', key: 'ENG-1' }],
-      ['signals', 'audit:ENG-1', { service: 'audit', key: 'ENG-1' }],
+    expect(sent.map((s) => [s.object, s.key, s.method])).toEqual([
+      ['triage', 'ENG-1', 'chat'],
+      ['audit', 'ENG-1', 'chat'],
     ]);
     expect(sent[0]!.text).toBe(webhookMessage('linear', 'd-1', created));
     expect(sent[0]!.text).toMatch(/^<webhook name="linear" delivery="d-1">\n\{/);
@@ -92,13 +96,13 @@ describe('a webhook', () => {
       message: ({ action }) => ({ action }),
     });
     const run = (trimmed as unknown as { service: { webhook: Handler } }).service.webhook;
-    const sent: { text: string }[] = [];
+    const sent: string[] = [];
     const ctx = {
       request: () => ({ id: 'inv_1', headers: new Map() }),
-      objectSendClient: () => ({ deliver: (input: { text: string }) => sent.push(input) }),
+      genericSend: ({ parameter }: { parameter: string }) => sent.push(parameter),
     };
     await run(ctx, new TextEncoder().encode(JSON.stringify(created)));
-    expect(sent.map((s) => s.text)).toEqual([webhookMessage('linear', 'inv_1', { action: 'create' })]);
+    expect(sent).toEqual([webhookMessage('linear', 'inv_1', { action: 'create' })]);
   });
 
   it('drops a delivery its key gives no key for', async () => {
@@ -140,19 +144,10 @@ describe("an agent's companion", () => {
 
   it("takes a delivery from a session object's handler, as from one of the SDK's", () => {
     const sent: unknown[] = [];
-    const ctx = {
-      send: (target: { name: string }, key: string, opts: unknown) => ({
-        deliver: (input: unknown) => sent.push({ object: target.name, key, opts, input }),
-      }),
-    };
-    deliverTo(ctx as never, triage, 'ENG-1', 'closed', { idempotencyKey: 'd-1' });
+    const ctx = { send: (message: unknown) => sent.push(message) };
+    deliverTo(ctx, triage, 'ENG-1', 'closed', { idempotencyKey: 'd-1' });
     expect(sent).toEqual([
-      {
-        object: 'signals',
-        key: 'triage:ENG-1',
-        opts: { idempotencyKey: 'd-1' },
-        input: { agent: { service: 'triage', key: 'ENG-1' }, text: 'closed' },
-      },
+      { service: 'triage', handler: 'chat', key: 'ENG-1', input: 'closed', idempotencyKey: 'd-1' },
     ]);
   });
 });

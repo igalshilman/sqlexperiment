@@ -16,7 +16,7 @@ import * as clients from '@restatedev/restate-sdk-clients';
 import type { VirtualObjectDefinition } from '@restatedev/restate-sdk-core';
 import type { ChatMessage, Messages, MessagesRequest, Part, Turn } from './common.ts';
 import type { Status, Stopped, Synced, SyncRequest } from './object.ts';
-import type { Notifications, Resolved, Signal, Steered, Waiting, Watch } from './signals.ts';
+import type { Notifications, Resolved, Signal, Waiting, Watch } from './signals.ts';
 
 export type {
   ChatMessage,
@@ -27,7 +27,6 @@ export type {
   Resolved,
   Signal,
   Status,
-  Steered,
   Stopped,
   Synced,
   SyncRequest,
@@ -50,8 +49,6 @@ export interface Agent {
   stop(ctx: unknown): Promise<Stopped>;
   /** Forget the conversation (stopping the message it answers): its database and state too. */
   clear(ctx: unknown): Promise<Stopped>;
-  /** Add `message` to the message it answers, at its next tool call (or answer it as a message of its own). */
-  steer(ctx: unknown, message: string): Promise<Steered>;
   /** What its tools wait for. */
   pending(ctx: unknown): Promise<Waiting[]>;
   /** Resolve a wait: by its id, or the oldest for a name. */

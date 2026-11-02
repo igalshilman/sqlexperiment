@@ -1,7 +1,7 @@
 // A chat page for the support agent of ../intermediate/support.ts, on
 // Restate's own client: send a message, see what the agent is doing while it
-// works, approve or reject what it waits for, steer it, stop it, or start
-// anew. From packages/examples:
+// works, approve or reject what it waits for, stop it, or start anew. From
+// packages/examples:
 //
 //   OPENAI_API_KEY=… node intermediate/support.ts   # the agent, on port 9080
 //   npx @restatedev/restate-server                  # Restate, in another terminal
@@ -25,14 +25,9 @@ const element = (tag: string, className: string, text = '') => {
   return e;
 };
 
-/**
- * Send `text`: a message of its own, or, while the agent answers one, added
- * to that one (`steer`): the agent takes it at its next tool call.
- */
+/** Send `text`: a message of its own, which the agent answers after the one it works on, if any. */
 async function send(text: string) {
-  const { answering } = await support.status();
-  if (answering) await support.steer(text);
-  else await restate.objectSendClient(agent('support'), user).chat(text);
+  await restate.objectSendClient(agent('support'), user).chat(text);
 }
 
 /** A tool call: its name and input, and its output once it ran. */
@@ -57,7 +52,6 @@ function renderMessages(messages: ChatMessage[]) {
 /** What the agent is doing: the message it answers (with Stop), and what its tools wait for (with Approve and Reject). */
 function renderStatus({ answering, waiting }: Status) {
   $('working').hidden = answering === null;
-  $('send').textContent = answering ? 'Steer' : 'Send';
   $('waiting').replaceChildren(
     ...waiting.map((w) => {
       const e = element('div', 'wait', `Waits for ${w.name}: ${JSON.stringify(w.input)}`);

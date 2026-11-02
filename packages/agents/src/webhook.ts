@@ -103,10 +103,8 @@ const parsed = (body: Uint8Array): WebhookEvent => {
 /**
  * A webhook into agents: a service `name`, whose `webhook` handler checks a
  * delivery's signature, and delivers it to each agent of `route`, keyed by
- * `key`, as a {@link webhookMessage}, through the agent's `signals`: to the
- * message the agent answers, if any, which takes it at its next step (as
- * `steer`), or else as a message of its own (as `chat`). A turn that ends,
- * or is stopped, before it takes it answers it after. It answers once the
+ * `key`, as a {@link webhookMessage}: a message of its own (as `chat`),
+ * which the agent answers after the messages before it. It answers once the
  * deliveries are sent, not answered: a system that waits seconds for an
  * answer (Linear, GitHub) gets one at once. What it is (its routes, auth and
  * idempotency) is in the handler's metadata, which the admin API shows.

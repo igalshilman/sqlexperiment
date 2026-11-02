@@ -8,7 +8,7 @@ Restate: each model step and each tool call is stored.
 
 ```
 you ──▶ pair.ts (a terminal) ──▶ pair/<project> (pi) ──▶ WORKSPACE/<project>: read, write, edit, bash
-          ▲   steer, approve        │  plan (a table of its own)
+          ▲   chat, approve         │  plan (a table of its own)
           └── follow ◀──────────────┤  reviewer/<project>.<task> (another model): what to fix
                                     └▶ approval (you) ──▶ shipping/<…> (a workflow): CI, then a pull request
 ```
@@ -26,9 +26,6 @@ What it shows:
   object, with its conversation in its database, and its files in a
   directory of its own. Leave and come back a day later: the terminal shows
   the conversation so far, and the pair has its files.
-- **Steering**: a line you type while the pair works reaches it at its
-  next tool call (`steer`), as "use pytest" would reach a person you pair
-  with.
 - **Tables of your own**: the plan is a table beside the agent's own
   (`schema: PLAN`), which its tools write and a view reads while
   it works (`curl localhost:8080/pair/fizzbuzz/tasks`).

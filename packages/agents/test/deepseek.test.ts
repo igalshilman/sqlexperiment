@@ -13,8 +13,7 @@ import {
   cancelledWhileWorking,
   endedWhileWorking,
   invalidArguments,
-  STEERED,
-  steeredWhileWorking,
+  followedWhileWorking,
   withoutIds,
   conversation,
   crashedAnywhere,
@@ -102,12 +101,12 @@ describe('the DeepSeek Harness agent', () => {
     ]);
   });
 
-  it('takes a message steered to the turn at its next tool call', async () => {
-    const { answer, parts, left, published } = await steeredWhileWorking(
+  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+    const { answer, parts, published } = await followedWhileWorking(
       (tools) => deepseek.chat({ tools }),
       deepseek.messages(),
     );
-    expect(answer).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+    expect(answer).toBe('Done: moved 5 from account 1 to account 2');
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
       [
@@ -118,20 +117,14 @@ describe('the DeepSeek Harness agent', () => {
           output: 'moved 5 from account 1 to account 2',
         },
       ],
-      [{ type: 'text', text: STEERED }],
       [{ type: 'text', text: answer }],
     ]);
-    expect(left).toEqual([]);
     // Published at its start, as its tool call starts and ends, and at its end.
     expect(published).toBe(4);
   });
 
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, deepseek.messages())).toEqual([]);
-  }, 600_000);
-
-  it('answers a message once after a crash at any of its state requests, steered once', async () => {
-    expect(await crashedAnywhere(prompt, deepseek.messages(), { steered: true })).toEqual([]);
   }, 600_000);
 
   it('tells the model a tool it does not have is not there', async () => {

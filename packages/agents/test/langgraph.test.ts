@@ -12,8 +12,7 @@ import {
   cancelledWhileWorking,
   endedWhileWorking,
   invalidArguments,
-  STEERED,
-  steeredWhileWorking,
+  followedWhileWorking,
   withoutIds,
   conversation,
   crashedAnywhere,
@@ -54,13 +53,12 @@ describe('the LangGraph agent', () => {
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
   });
 
-  it('answers a message steered to the turn as a message of its own, once the turn ends', async () => {
-    const { answer, left, published } = await steeredWhileWorking(
+  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+    const { answer, published } = await followedWhileWorking(
       (tools) => langgraph.chat({ tools }),
       langgraph.messages(),
     );
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
-    expect(left).toEqual([STEERED]);
     // Published at its start, as its tool call starts and ends, and at its end.
     expect(published).toBe(4);
   });
@@ -93,10 +91,6 @@ describe('the LangGraph agent', () => {
 
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(await crashedAnywhere(prompt, langgraph.messages())).toEqual([]);
-  }, 600_000);
-
-  it('answers a message once after a crash at any of its state requests, steered once', async () => {
-    expect(await crashedAnywhere(prompt, langgraph.messages(), { steered: true })).toEqual([]);
   }, 600_000);
 
   it('tells the model a tool it does not have is not there', async () => {

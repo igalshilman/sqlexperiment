@@ -3,9 +3,9 @@
  *
  *   node advanced/pairing/pair.ts fizzbuzz
  *
- * What you type goes to the pair; while it works on a message, a line steers
- * it, at its next tool call. Its messages and its tool calls show as it makes
- * them, and so do its waits for your approval. Commands:
+ * What you type goes to the pair, as a message it answers after the one it
+ * works on, if any (`/stop` stops that one). Its messages and its tool calls
+ * show as it makes them, and so do its waits for your approval. Commands:
  *
  *   /approve [what to change]   answer its wait for your approval
  *   /tasks                      the plan
@@ -64,8 +64,9 @@ const project = process.argv[2];
 if (!project) throw new Error('Usage: node advanced/pairing/pair.ts <project>');
 const ingress = clients.connect({ url: 'http://localhost:8080' });
 const conversation = ingress.objectClient(agent<Pair>('pair'), project);
+const messages = ingress.objectSendClient(agent<Pair>('pair'), project);
 
-/** A command, or a message: to the message the pair works on, if any, or else as one of its own. */
+/** A command, or a message to the pair. */
 async function say(line: string) {
   const [command, ...words] = line.split(' ');
   const rest = words.join(' ');
@@ -82,7 +83,7 @@ async function say(line: string) {
       await conversation.stop();
       return;
     default:
-      await conversation.steer(line);
+      await messages.chat(line);
   }
 }
 

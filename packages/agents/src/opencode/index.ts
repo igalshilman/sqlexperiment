@@ -42,7 +42,6 @@ import type { Plugin } from '@opencode/plugin';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import {
   alsoClearing,
-  AttemptEnded,
   chatHandler,
   CHECK_MODEL,
   checkModelName,
@@ -54,8 +53,6 @@ import {
   providerOf,
   refusal,
   REFUSED,
-  settleSteering,
-  type Steerable,
   stopSignalOf,
   toolCallEnded,
   toolCallStarted,
@@ -189,23 +186,17 @@ function toolsPlugin(tools: OpenCodeTool[], fail: (error: unknown) => Promise<ne
 }
 
 /**
- * An OpenCode plugin that publishes each tool call as it starts and ends
- * (for the clients that follow the conversation), and gives the session the
- * messages steered to the turn (`steerable`) at its end: OpenCode's
- * steering, which its next step takes.
+ * An OpenCode plugin that publishes each tool call as it starts and ends,
+ * for the clients that follow the conversation.
  */
-const steeringPlugin = (
-  ctx: restate.SessionContext,
-  steerable: Steerable,
-  fail: (error: unknown) => Promise<never>,
-): Plugin.Plugin => ({
-  id: 'restate-agents.steering',
+const followPlugin = (ctx: restate.SessionContext, fail: (error: unknown) => Promise<never>): Plugin.Plugin => ({
+  id: 'restate-agents.follow',
   async setup(plugin) {
     const before = await plugin.tool.hook('execute.before', async () => {
       await toolCallStarted(ctx).catch(fail);
     });
     const after = await plugin.tool.hook('execute.after', async () => {
-      await toolCallEnded(ctx, steerable).catch(fail);
+      await toolCallEnded(ctx).catch(fail);
     });
     return async () => {
       await before.dispose();
@@ -214,11 +205,8 @@ const steeringPlugin = (
   },
 });
 
-/** OpenCode's message id of prompt (or steered message) `id`: letters, digits, `_` and `-`. */
+/** OpenCode's message id of prompt `id`: letters, digits, `_` and `-`. */
 const messageIdOf = (id: string) => `msg_${id.replace(/[^\w-]/g, '_')}`;
-
-/** Whether message `id` is one steered to a turn (see `steer` in object.ts), not a prompt. */
-const steered = (id: string) => /_steer_\d+$/.test(id);
 
 /** A part of an assistant message: text, or a tool call (`id`, `name`, and its `state`). */
 interface Content {
@@ -294,14 +282,14 @@ async function messagesAfter(host: Host, messageId: string): Promise<Message[] |
 
 /**
  * How the turn of the messages `after` a prompt ended: at an idle marker, or
- * where the next prompt, queued while it ran, starts (a message steered to it
- * is not one). Running, if neither came yet.
+ * where the next prompt, queued while it ran, starts. Running, if neither
+ * came yet.
  */
 function turnOutcome(after: Message[]): Outcome {
   let last: Message | undefined;
   for (const m of after) {
     if (m.type === 'idle') return ended(last, m.outcome);
-    if (m.type === 'user' && last !== undefined && !steered(m.id)) return ended(last, 'succeeded');
+    if (m.type === 'user' && last !== undefined) return ended(last, 'succeeded');
     if (m.type === 'assistant') last = m;
   }
   return { state: 'running' };
@@ -316,10 +304,10 @@ function ended(last: Message | undefined, how: string | undefined): Outcome {
 
 /** The id of the session's latest prompt, if any. */
 async function lastPrompt(host: Host): Promise<string | undefined> {
-  const queued = (await inbox(host)).findLast((item) => !steered(item.id));
+  const queued = (await inbox(host)).at(-1);
   if (queued) return queued.id;
   for await (const page of messagePages(host, 'desc')) {
-    const user = page.find((m) => m.type === 'user' && !steered(m.id));
+    const user = page.find((m) => m.type === 'user');
     if (user) return user.id;
   }
   return undefined;
@@ -329,12 +317,6 @@ async function lastPrompt(host: Host): Promise<string | undefined> {
 const active = async (host: Host) => {
   const turns: Record<string, unknown> = await host.call(host.client.session.active());
   return turns[SESSION] !== undefined;
-};
-
-/** Whether the session has message `messageId`: in its inbox, or in its transcript. */
-const inSession = async (host: Host, messageId: string) => {
-  const given = (m: { id: string }) => m.id === messageId;
-  return (await inbox(host)).some(given) || (await sessionMessages(host)).some(given);
 };
 
 /**
@@ -463,19 +445,10 @@ export const withOpenCode = async <T>(
   const turn = stopSignalOf(ctx);
   const onStop = () => void fail(turn!.reason);
   turn?.addEventListener('abort', onStop, { once: true });
-  // Messages steered to the turn: OpenCode's steering input (by its message
-  // id, once), which the session takes at its next step.
-  const steerable: Steerable = {
-    steer: async ({ id, text }) => {
-      const steer = { sessionID: SESSION as never, id: messageIdOf(id) as never, text, delivery: 'steer' as const };
-      await host.call(host.client.session.prompt(steer));
-    },
-    has: (id) => inSession(host, messageIdOf(id)),
-  };
   const host = await openOpenCode(database(ctx.db, DATABASE), fence, {
     plugins: [
       ...plugins,
-      steeringPlugin(ctx, steerable, fail),
+      followPlugin(ctx, fail),
       toolsPlugin(
         tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
         fail,
@@ -492,10 +465,7 @@ export const withOpenCode = async <T>(
     await openSession(host, model, workspace);
     await submit(host, messageId, text);
     const now = await settled(host, messageId);
-    if (now.state === 'answered') {
-      await settleSteering(ctx, steerable);
-      return now.text;
-    }
+    if (now.state === 'answered') return now.text;
     if (now.state !== 'failed') throw new Error(`prompt ${id} is not in the session`);
     // A prompt the cancellation's interrupt ended fails with the cancellation.
     if (cancelled) throw cancelled;
@@ -510,12 +480,6 @@ export const withOpenCode = async <T>(
     // The log reads the session through this host, while it is open.
     const read = () => transcribe(host);
     return await transcribing(ctx, read, () => Promise.race([interruptOn(host, failure), work({ host, prompt })]));
-  } catch (error) {
-    // A turn that ends unanswered (cancelled, refused) counts the messages
-    // steered to it that the session has, given in an earlier attempt too:
-    // its close answers only the others. An attempt that ended closes nothing.
-    if (!(error instanceof AttemptEnded)) await settleSteering(ctx, steerable).catch(() => {});
-    throw error;
   } finally {
     turn?.removeEventListener('abort', onStop);
     await host.close();

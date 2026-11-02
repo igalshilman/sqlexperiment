@@ -13,9 +13,7 @@ import {
   cancelledWhileWorking,
   endedWhileWorking,
   invalidArguments,
-  STEERED,
-  steeredWhileWorking,
-  steeringOf,
+  followedWhileWorking,
   withoutIds,
   type Made,
   type Entry,
@@ -29,13 +27,6 @@ vi.mock('@earendil-works/pi-ai/providers/all', () => ({
   builtinProviders: () => [
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
       const last = messages.at(-1)!;
-      // Asked to move, then wait: the transfer, then (in a round of its own, after
-      // a message steered to the turn, say) the wait.
-      if (messages.some((m) => m.role === 'user' && textOf(m.content) === 'Move 5, then wait')) {
-        const results = messages.filter((m) => m.role === 'toolResult').length;
-        if (results === 0) return callTools([['transfer', { from: 1, to: 2, amount: 5 }]]);
-        if (results === 1) return callTools([['wait', {}]]);
-      }
       if (last.role === 'toolResult') {
         return say(
           messages
@@ -221,9 +212,9 @@ describe('pi.chat', () => {
     ]);
   });
 
-  it('takes a message steered to the turn at its next tool call', async () => {
-    const { answer, parts, left, published } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages());
-    expect(answer).toBe(`Please move 5 from 1 to 2 / ${STEERED}`);
+  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+    const { answer, parts, published } = await followedWhileWorking((tools) => pi.chat({ tools }), pi.messages());
+    expect(answer).toBe('moved 5 from account 1 to account 2');
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
       [
@@ -235,68 +226,17 @@ describe('pi.chat', () => {
           output: 'moved 5 from account 1 to account 2',
         },
       ],
-      [{ type: 'text', text: STEERED }],
       [{ type: 'text', text: answer }],
     ]);
-    expect(left).toEqual([]);
     // Published at its start, as its tool call starts and ends, and at its end.
     expect(published).toBe(4);
   });
 
-  it('does not answer again a steered message an earlier attempt took, when the turn is cancelled', async () => {
-    const map = new Map<string, Uint8Array>();
-    const steering = steeringOf(map);
-    const waiting = { started: Promise.withResolvers<void>() };
-    const tools = [
-      tool({
-        name: 'transfer',
-        description: 'Move money.',
-        input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
-        run: (_input, { ctx }) => {
-          steering.steer(ctx.request.id, STEERED);
-          return 'moved 5 from account 1 to account 2';
-        },
-      }),
-      tool({
-        name: 'wait',
-        description: 'Waits.',
-        input: z.object({}),
-        run: async () => {
-          waiting.started.resolve();
-          return new Promise<never>(() => {});
-        },
-      }),
-    ];
-    const handler = handlerOf(pi.chat({ tools }));
-    // The first attempt takes the steered message, then ends (a suspension)
-    // while its next tool waits.
-    const fence = { closed: false };
-    const first = sqlAttempt({ map, fence, key: 'steer', id: 'inv1' });
-    const answering = first.end(() => handler(first.ctx, 'Move 5, then wait'));
-    await waiting.started.promise;
-    fence.closed = true;
-    first.abort();
-    await answering.catch(() => {});
-    // The next one is cancelled as the tool waits again, before any of its
-    // tool calls ends: its turn ends with the steered message taken, so it is
-    // not answered again.
-    waiting.started = Promise.withResolvers<void>();
-    const next = sqlAttempt({ map, key: 'steer', id: 'inv1' });
-    const cancelled = next.end(() => handler(next.ctx, 'Move 5, then wait'));
-    await waiting.started.promise;
-    next.cancel();
-    await expect(cancelled).rejects.toBeInstanceOf(restate.CancelledError);
-    expect(steering.closed.map((c) => c.turn)).toEqual(['inv1']);
-    expect(steering.left('inv1')).toEqual([]);
-  });
-
-  it('in the background, publishes only the end of a turn, which answers a steered message after it', async () => {
+  it('in the background, publishes only the end of a turn', async () => {
     pi.agent({ name: 'unwatched', background: true });
-    const { answer, left, published } = await steeredWhileWorking((tools) => pi.chat({ tools }), pi.messages(), {
+    const { published } = await followedWhileWorking((tools) => pi.chat({ tools }), pi.messages(), {
       service: 'unwatched',
     });
-    expect(answer).not.toContain(STEERED);
-    expect(left).toEqual([STEERED]);
     expect(published).toBe(1);
   });
 
