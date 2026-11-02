@@ -15,6 +15,8 @@ once, and each tool call is made once.
 - [Your own session object](#your-own-session-object)
 - [Build your own](#build-your-own)
 - [Words](#words)
+- [Turn semantics](TURN-SEMANTICS.md): how a message is answered, retried,
+  stopped or killed, and what a client sees meanwhile
 
 ## Start here
 
@@ -131,7 +133,8 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'       # "Hello Alic
 ```
 
 A key answers one message at a time: a message sent while another is
-answered waits for it. A message that fails for good answers with an error:
+answered waits for it ([turn semantics](TURN-SEMANTICS.md) spells out how a
+turn starts, ends, and is retried). A message that fails for good answers with an error:
 HTTP 424 if the model's provider refused it (a missing or wrong API key, an
 unknown model), 500 otherwise. A refused message is over: the next message
 is answered on its own, not after it.
