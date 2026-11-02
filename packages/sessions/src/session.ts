@@ -63,6 +63,11 @@ export interface SqlHost {
   readonly defaultSerde: Serde<any>;
   request(): { readonly id: string; readonly target: { readonly service: string } };
   get(name: string, serde: Serde<Uint8Array>, options: restate.EntryOptions): PromiseLike<Uint8Array | null>;
+  /**
+   * A state get left out of the journal (service protocol v8's ephemeral
+   * get), where the attempt negotiated v8; undefined on v7.
+   */
+  readonly unjournaledGet?: (name: string, serde: Serde<Uint8Array>) => Promise<Uint8Array | null>;
   set(name: string, value: Uint8Array, serde: Serde<Uint8Array>, options: restate.EntryOptions): void;
   clear(name: string, options: restate.EntryOptions): void;
   /** The object's state keys. */
@@ -174,10 +179,13 @@ function objectStore(
       if (error instanceof CancelledError) cancelled(error);
       throw error;
     });
-  // TODO: read with protocol v8's ephemeral get, left out of the journal, once
-  // a Restate release ships v8 and the SDK lets a library make one (FUTURE.md
-  // at the repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
-  const get = async (key: string) => (await request(ctx.get(keyOf(key), serde.binary, named(keyOf(key))))) ?? undefined;
+  // Unjournaled where the server speaks protocol v8: a handler without journal
+  // replay never reads its journal back, so a read's entry is pure overhead.
+  // TODO: only unjournaled, once a Restate release ships v8 (FUTURE.md at the
+  // repository's root). Restate 1.8 negotiates v7 at most: a journaled get.
+  const read = (name: string) =>
+    ctx.unjournaledGet ? ctx.unjournaledGet(name, serde.binary) : ctx.get(name, serde.binary, named(name));
+  const get = async (key: string) => (await request(read(keyOf(key)))) ?? undefined;
   if (ctx.shared) return { get, set: refusedWrite, clear: refusedWrite, sync: async () => {} };
   return {
     get,

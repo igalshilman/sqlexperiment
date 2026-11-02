@@ -205,7 +205,10 @@ interface Executor {
   outputPump: { awaitNextProgress(): Promise<void> };
   externalProgressChannel: { awaitNext(): Promise<void>; signal(): void };
   runClosuresTracker: { executeRun(handle: number): void };
-  ephemeralRequestTracker: { complete(completionId: number, value: unknown): Promise<void> };
+  ephemeralRequestTracker: {
+    register(completionId: number, completer: unknown): Promise<unknown>;
+    complete(completionId: number, value: unknown): Promise<void>;
+  };
   errorCallback: (e: unknown) => void;
 }
 
@@ -244,10 +247,19 @@ export function hookSelector(ctx: object): () => void {
       ephemeralRequestTracker.complete(completionId, coreVm.take_ephemeral_notification(completionId)),
     onError: (e) => executor.errorCallback(e),
   });
-  // An own property, over the class's method: removing it gives the method back.
+  // Own properties, over the classes' methods: removing them gives the methods back.
   executor.doProgress = async (promise) => selector.register(promise);
+  // An ephemeral command (protocol v8's state get, left out of the journal)
+  // is driven by its completion id, which the tracker gets first.
+  const register = ephemeralRequestTracker.register.bind(ephemeralRequestTracker);
+  ephemeralRequestTracker.register = (completionId, completer) => {
+    const promise = register(completionId, completer);
+    selector.registerEphemeral(completionId);
+    return promise;
+  };
   return () => {
     selector.close();
     delete (executor as Partial<Executor>).doProgress;
+    delete (ephemeralRequestTracker as Partial<Executor['ephemeralRequestTracker']>).register;
   };
 }

@@ -325,13 +325,25 @@ async function call(path: string, body: unknown = null): Promise<{ value: unknow
 }
 
 /** Start `path` without waiting for its result: its invocation id. */
-async function start(path: string): Promise<string> {
+async function start(path: string, body: unknown = null): Promise<string> {
   const r = await fetch(`${INGRESS}/${path}/send`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: 'null',
+    body: JSON.stringify(body),
   });
   return ((await r.json()) as { invocationId: string }).invocationId;
+}
+
+/** The rows of a query to the server's system tables. */
+async function query<Row>(sql: string): Promise<Row[]> {
+  const r = await fetch(`${ADMIN}/query`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ query: sql }),
+  });
+  const { rows, message } = (await r.json()) as { rows?: Row[]; message?: string };
+  if (!rows) throw new Error(`query: ${message}`);
+  return rows;
 }
 
 let failed = 0;
@@ -411,6 +423,7 @@ await check('a cancellation reaches every pending operation', async () => {
 
 const values = (n: number) => Array.from({ length: n }, (_, i) => `v${i}`);
 await call('Concurrency/state/seed', 80);
+await call('Concurrency/journal/seed', 40);
 
 await check('40 lazy database reads at once', async () => {
   assert.deepEqual((await call('Concurrency/state/gets', 40)).value, values(40));
@@ -428,6 +441,29 @@ await check('8 async functions of 10 lazy database reads each, at once', async (
 
 await check('a view: 40 lazy database reads at once', async () => {
   assert.deepEqual((await call('Concurrency/state/viewGets', 40)).value, values(40));
+});
+
+await check('database reads: journaled on protocol v7, left out of the journal on v8', async () => {
+  // Keep the journal of a completed invocation, to look at it.
+  const patched = await fetch(`${ADMIN}/services/Concurrency`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ journal_retention: '1h' }),
+  });
+  assert.ok(patched.ok, `journal retention: ${patched.status}`);
+  const id = await start('Concurrency/journal/gets', 40);
+  const attached = await fetch(`${INGRESS}/restate/invocation/${id}/attach`, { signal: AbortSignal.timeout(30_000) });
+  assert.deepEqual(await attached.json(), values(40));
+  const [invocation] = await query<{ version: number }>(
+    `SELECT pinned_service_protocol_version AS version FROM sys_invocation WHERE id = '${id}'`,
+  );
+  const version = invocation?.version ?? 0;
+  const gets = await query<{ type: string }>(
+    `SELECT entry_type AS type FROM sys_journal WHERE id = '${id}' AND entry_type LIKE '%Get%State%'`,
+  );
+  if (version >= 8) assert.deepEqual(gets, []);
+  else assert.ok(gets.length > 0, `v${version}: no state gets in the journal`);
+  console.log(`     protocol v${version}: ${gets.length} state gets in the journal`);
 });
 
 await check('a retried attempt starts over, and reads what the one before committed', async () => {
