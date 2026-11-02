@@ -166,6 +166,32 @@ async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications
   return { revision };
 }
 
+/** How long one `awaitTurn` waits for its turn to end, before a new one takes over. */
+const WATCH = { hours: 1 };
+
+/**
+ * `turn` (an invocation id) is over: forget it, if the agent answers it, and
+ * its tools' waits, which no one waits for any more, ending their `wait`s (a
+ * turn that ends as it should has none left, but a killed one leaves them).
+ * It publishes the change, for the clients that follow the conversation: a
+ * turn's own close (its last change), or the close of one that never closed
+ * itself. A close again changes nothing, and publishes nothing.
+ */
+async function closed(ctx: restate.ObjectContext<State>, turn: string) {
+  const answering = (await ctx.get('turn'))?.invocationId === turn;
+  if (answering) ctx.clear('turn');
+  const waiting = (await ctx.get('waiting')) ?? [];
+  // A wait's id starts with the invocation id of the turn whose tool waits.
+  const over = waiting.filter((w) => w.id.startsWith(`${turn}:`));
+  for (const w of over) ctx.rejectAwakeable(w.awakeable, 'its turn is over');
+  if (over.length > 0)
+    ctx.set(
+      'waiting',
+      waiting.filter((w) => !over.includes(w)),
+    );
+  if (answering || over.length > 0) await publish(ctx);
+}
+
 /** A handler that the agents' own handlers call, which clients cannot (through Restate's ingress). */
 const internal = <I, O>(fn: (ctx: restate.ObjectContext<State>, input: I) => Promise<O>) =>
   restate.handlers.object.exclusive({ ingressPrivate: true }, fn);
@@ -234,11 +260,50 @@ export const signals = restate.object({
     /**
      * @internal The agent's `chat` started answering `turn`: the same
      * invocation again (a retry) keeps when it started. A turn before it that
-     * never closed (its invocation was killed) is over.
+     * never closed itself (its invocation was killed) closes now, if its
+     * `awaitTurn` did not close it yet. `awaitTurn` watches the new turn, so
+     * that it closes even if no turn comes after it.
      */
     start: internal(async (ctx: restate.ObjectContext<State>, turn: Turn) => {
-      if ((await ctx.get('turn'))?.invocationId !== turn.invocationId) ctx.set('turn', turn);
+      const before = (await ctx.get('turn'))?.invocationId;
+      if (before === turn.invocationId) return;
+      if (before !== undefined) await closed(ctx, before);
+      ctx.set('turn', turn);
+      ctx.objectSendClient(signals, ctx.key).awaitTurn(turn.invocationId);
     }),
+
+    /**
+     * @internal Wait for `turn` to end, without holding a process, and close
+     * it if it failed: its waits end, and `status` no longer says the agent
+     * answers it. A turn that never closed itself failed: it was killed, ran
+     * out of retries, or was lost. A turn that ends as it should, or is
+     * cancelled, closed itself already: its `close` is a call it waits for
+     * before it ends, so this `close` comes second, and changes nothing.
+     *
+     * It waits {@link WATCH} at most: a turn still answered then gets a new
+     * watch, which runs on the deployment of the day, rather than this one
+     * waiting for weeks on the one it started on (a turn that waits for an
+     * approval, say). A cancelled watch (an operator's) rejects the race
+     * itself, before either side's `map`: it closes nothing.
+     */
+    awaitTurn: restate.handlers.object.shared(
+      // It leaves nothing behind once done: a turn has one at a time.
+      { ingressPrivate: true, journalRetention: 0, idempotencyRetention: 0 },
+      async (ctx: restate.ObjectSharedContext<State>, turn: string) => {
+        const ended = await restate.RestatePromise.race([
+          // `map` gets the turn's failure too: a killed turn's (a TerminalError).
+          ctx
+            .invocation(restate.InvocationIdParser.fromString(turn))
+            .attach()
+            .map((_answer, failure) => ({ failed: failure !== undefined })),
+          ctx.sleep(WATCH).map(() => null),
+        ]);
+        if (ended?.failed) ctx.objectSendClient(signals, ctx.key).close(turn);
+        else if (ended === null && (await ctx.get('turn'))?.invocationId === turn) {
+          ctx.objectSendClient(signals, ctx.key).awaitTurn(turn);
+        }
+      },
+    ),
 
     /** What the agent does: the message it answers, if any, and the waits of its tools. */
     status: restate.handlers.object.shared(async (ctx: restate.ObjectSharedContext<State>): Promise<Status> => ({
@@ -267,10 +332,8 @@ export const signals = restate.object({
       },
     ),
 
-    /** @internal The message `turn` (an invocation id) is answered, or its turn ended otherwise. */
-    close: internal(async (ctx: restate.ObjectContext<State>, turn: string) => {
-      if ((await ctx.get('turn'))?.invocationId === turn) ctx.clear('turn');
-    }),
+    /** @internal The message `turn` (an invocation id) is answered, or its turn ended otherwise: see {@link closed}. */
+    close: internal(closed),
 
     /**
      * @internal The agent forgot its conversation (`clear`): forget its

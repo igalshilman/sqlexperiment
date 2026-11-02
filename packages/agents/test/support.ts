@@ -65,9 +65,11 @@ export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => P
     start: (turn: { invocationId: string; since: string }) => {
       if (following.answering?.invocationId !== turn.invocationId) following.answering = turn;
     },
+    // As the companion's: a turn's close publishes it.
     close: (turn: string) => {
       if (following.answering?.invocationId === turn) following.answering = null;
       following.closed.push(turn);
+      following.revision++;
     },
   };
   const route = (c: Made) => {

@@ -434,7 +434,7 @@ curl localhost:8080/support/alice/signal --json '{"id": "inv_1f…:toolu_01", "v
 curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved", "keep": true}'
 ```
 
-A wait ends with its agent's invocation: a cancelled one leaves `pending`.
+A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 `serve` serves beside the agents. See
 [`examples/intermediate/support.ts`](../examples/intermediate/support.ts).
