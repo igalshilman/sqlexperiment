@@ -20,7 +20,8 @@
 // See README.md.
 
 // The SDK, and what this module adds to it (or declares in its place: its
-// `Client`, `SendClient` and `Target` are a session object's).
+// `Client`, `SendClient` and `Target` are a session object's, and `serve`
+// takes the services, with what they need beside them).
 export * from '@restatedev/restate-sdk';
 export type { Database, DatabaseReader, DatabaseWriter, Row, SqlParam, SqlValue, Transaction } from './session.ts';
 export type { Step } from './schema.ts';
@@ -33,3 +34,5 @@ export {
   type ViewContext,
 } from './object.ts';
 export type { CallOptions, Client, Rpc, Send, SendClient, SendOptions, Target } from './calls.ts';
+// In place of the SDK's: the services, on PORT, with what they need beside them.
+export { serve } from './serve.ts';
