@@ -182,13 +182,11 @@ async function closed(ctx: restate.ObjectContext<State>, turn: string) {
   if (answering) ctx.clear('turn');
   const waiting = (await ctx.get('waiting')) ?? [];
   // A wait's id starts with the invocation id of the turn whose tool waits.
-  const over = waiting.filter((w) => w.id.startsWith(`${turn}:`));
+  const ofTurn = (id: string) => id.startsWith(`${turn}:`);
+  const over = waiting.filter((w) => ofTurn(w.id));
+  const left = waiting.filter((w) => !ofTurn(w.id));
   for (const w of over) ctx.rejectAwakeable(w.awakeable, 'its turn is over');
-  if (over.length > 0)
-    ctx.set(
-      'waiting',
-      waiting.filter((w) => !over.includes(w)),
-    );
+  if (over.length > 0) ctx.set('waiting', left);
   if (answering || over.length > 0) await publish(ctx);
 }
 
