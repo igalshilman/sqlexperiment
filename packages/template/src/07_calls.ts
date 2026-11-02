@@ -68,4 +68,4 @@ const wallet = restate.sessionObject({
   },
 });
 
-await restate.serve({ services: [wallet, handle], port: 9080 });
+await restate.serve(wallet, handle);

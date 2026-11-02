@@ -7,7 +7,7 @@
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
 import type { SessionContext } from 'restate-sessions';
-import { sdk as restate } from 'restate-sessions/internal';
+import { needing, sdk as restate } from 'restate-sessions/internal';
 import type { Turn } from './common.ts';
 import type { Status } from './object.ts';
 
@@ -37,15 +37,21 @@ export interface Companion {
   agent: Agent;
 }
 
-/** `definition`, pointing to its companion: what `sessionObject()` returns. */
+/**
+ * `definition`, pointing to its companion: what `sessionObject()` returns.
+ * `serve` serves its `signals` object beside it.
+ */
 export const withCompanion = <D extends { name: string }>(definition: D): D =>
-  Object.defineProperty(definition, COMPANION, {
-    value: (key: string): Companion => ({
-      object: signals,
-      key: keyOf(definition.name, key),
-      agent: { service: definition.name, key },
+  needing(
+    Object.defineProperty(definition, COMPANION, {
+      value: (key: string): Companion => ({
+        object: signals,
+        key: keyOf(definition.name, key),
+        agent: { service: definition.name, key },
+      }),
     }),
-  });
+    () => [signals],
+  );
 
 /**
  * The companion of `agent`'s key `key`: for anyone holding an agent (an

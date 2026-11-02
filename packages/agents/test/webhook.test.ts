@@ -5,6 +5,7 @@
 import { createHmac } from 'node:crypto';
 import * as restate from '@restatedev/restate-sdk';
 import { companionOf, deliver as deliverTo, sessionObject, webhook, webhookMessage } from 'restate-agents';
+import { served } from 'restate-sessions/internal';
 import { describe, expect, it } from 'vitest';
 
 const triage = sessionObject({ name: 'triage', handlers: { chat: async (_ctx, text: string) => text } });
@@ -134,6 +135,10 @@ describe('a webhook', () => {
 });
 
 describe("an agent's companion", () => {
+  it('is served beside the agent: restate.serve of an agent serves its signals too', () => {
+    expect(served([triage, audit]).map((s) => s.name)).toEqual(['triage', 'signals', 'audit']);
+  });
+
   it('is found from the agent: its signals object, keyed `<agent>:<key>`', () => {
     const companion = companionOf(triage, 'ENG-1');
     expect(companion.object.name).toBe('signals');

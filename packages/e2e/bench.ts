@@ -122,7 +122,7 @@ const ADMIN = 'http://127.0.0.1:9070';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 if (process.argv[2] === 'serve') {
-  await restate.serve({ services: [bench], port: PORT });
+  await restate.endpoint().bind(bench).listen(PORT);
 } else if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await drive(process.argv[2]);
 }

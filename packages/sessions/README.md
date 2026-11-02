@@ -59,6 +59,13 @@ SDK handlers (`restate.handlers.*`) aren't accepted. Journaled work belongs
 in a regular `restate.object`, `restate.service` or `restate.workflow`, which
 your session object can call.
 
+`restate.serve(...services)` serves them, session objects and the SDK's
+alike, on `PORT` (9080 by default), with what they need beside them (such
+as restate-agents' `signals`, which each agent brings with it).
+`RESTATE_SERVE_ONLY=a,b` serves only the services it names: one program,
+deployed in parts. For anything else (another port, HTTP/1.1, a
+Lambda handler), the SDK's `restate.endpoint()` is there as ever.
+
 ### The contexts
 
 The contexts are small and explicit, and a new one is built for each

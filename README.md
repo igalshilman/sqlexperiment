@@ -43,7 +43,7 @@ const notes = restate.sessionObject({
   },
 });
 
-await restate.serve({ services: [notes], port: 9080 });
+await restate.serve(notes);
 ```
 
 ```sh
